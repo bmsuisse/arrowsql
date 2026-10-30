@@ -20,7 +20,10 @@ enum Info {
 }
 
 pub fn get_info(py: Python<'_>, conn: &Arc<ConnShared>, info_type: u16) -> PyResult<Py<PyAny>> {
-    let (server_version, database, server_name) = {
+    // The slot can be held by a running query; waiting for it with the GIL
+    // held would stop every other Python thread (including one that could
+    // cancel that query).
+    let (server_version, database, server_name) = py.detach(|| {
         let slot = conn.slot.lock();
         match slot.client.as_ref() {
             Some(c) => (
@@ -30,7 +33,7 @@ pub fn get_info(py: Python<'_>, conn: &Arc<ConnShared>, info_type: u16) -> PyRes
             ),
             None => (None, String::new(), None),
         }
-    };
+    });
     let value = match info_type {
         0 => Info::Int(0),                                   // SQL_MAX_DRIVER_CONNECTIONS
         1 => Info::Int(1),                                   // SQL_MAX_CONCURRENT_ACTIVITIES
