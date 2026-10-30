@@ -3221,6 +3221,61 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         inner = pyarrow.RecordBatchReader.from_batches(schema, gen)
         return _ArrowReader(self, inner, gen, pyarrow.ArrowInvalid, close_requested)
 
+    # RUST-PORT: zero-dependency Arrow API (see docs/ARROW_PLAN.md). The
+    # returned objects implement the Arrow PyCapsule protocol, so DuckDB,
+    # polars and pyarrow read them without copying; pyarrow is not required.
+
+    def fetchall_arrow(self, batch_size: int = 65536) -> "ddbc_bindings.ArrowTable":
+        """Fetch all remaining rows of the current result as an Arrow table.
+
+        Returns a native ``ArrowTable`` (``num_rows``, ``num_columns``,
+        ``column_names``, ``__arrow_c_stream__``). Convert with
+        ``pyarrow.table(t)``, ``polars.from_arrow(t)`` or query it directly
+        with ``duckdb.sql("SELECT ... FROM t")``.
+        """
+        return self._fetch_arrow_native(-1, batch_size)
+
+    def fetchmany_arrow(
+        self, size: Optional[int] = None, batch_size: int = 65536
+    ) -> "ddbc_bindings.ArrowTable":
+        """Fetch the next ``size`` rows (default ``arraysize``) as an Arrow table."""
+        if size is None:
+            size = self.arraysize
+        return self._fetch_arrow_native(max(size, 0), batch_size)
+
+    def _fetch_arrow_native(self, max_rows: int, batch_size: int) -> "ddbc_bindings.ArrowTable":
+        self._check_closed()
+        if not self._has_result_set and self.description:
+            self._reset_rownumber()
+        ret, table = ddbc_bindings.DDBCArrowFetchTable(
+            self.hstmt, max_rows, max(batch_size, 1), self.messages
+        )
+        check_error(ddbc_sql_const.SQL_HANDLE_STMT.value, self.hstmt, ret)
+        num_fetched = table.num_rows
+        if num_fetched > 0 and self._has_result_set:
+            self._next_row_index += num_fetched
+            self._rownumber = self._next_row_index - 1
+        if num_fetched == 0 and self._next_row_index == 0:
+            self.rowcount = 0
+        else:
+            self.rowcount = self._next_row_index
+        return table
+
+    def arrow_stream(self, batch_size: int = 65536, prefetch: int = 2) -> "ddbc_bindings.ArrowStream":
+        """Stream the rest of the current result as Arrow record batches.
+
+        Batches are decoded on a background thread, ``prefetch`` batches
+        ahead of the consumer, so a consumer such as DuckDB works on one batch
+        while the next is read from the server. The stream is one-shot; a
+        schema-only export (DuckDB's peek before scanning) does not consume
+        it. Closing it, or dropping it before the end, discards the unread
+        rows; the cursor stays usable. ``rownumber`` is not advanced.
+        """
+        self._check_closed()
+        return ddbc_bindings.DDBCArrowStream(
+            self.hstmt, max(batch_size, 1), max(prefetch, 1), self
+        )
+
     def nextset(self) -> Optional[bool]:
         """
         Skip to the next available result set.

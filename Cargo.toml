@@ -22,6 +22,14 @@ uuid = "1"
 bigdecimal = "0.4"
 thiserror = "2"
 mimalloc = { version = "0.1", default-features = false }
+# Arrow arrays + the C Data / C Stream interfaces (src/arrow/). Columns are
+# built with our own buffers and only wrapped as arrow-rs arrays for export.
+arrow-array = { version = "60", default-features = false, features = ["ffi"] }
+arrow-buffer = "60"
+arrow-data = { version = "60", features = ["ffi"] }
+arrow-schema = { version = "60", features = ["ffi"] }
+# Same version mssql-tds uses: one-pass UTF-16 / code page -> UTF-8.
+encoding_rs = "0.8"
 
 [profile.dev]
 opt-level = 1

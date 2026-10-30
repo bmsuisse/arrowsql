@@ -61,3 +61,16 @@ attributes; pre-#581 pickles (4 reduce args) still load.
 `scripts/overlay_upstream_binding.sh` builds `.overlay-upstream/`: this repo's
 `python/mssql_python` plus upstream's compiled C++ binding. `scripts/test_overlay.sh
 <db-id> <pytest args>` runs pytest on it against a private database.
+
+## Native Arrow API (docs/ARROW_PLAN.md)
+
+- `cursor.py`: new methods `fetchall_arrow(batch_size)`, `fetchmany_arrow(size,
+  batch_size)` (return `ddbc_bindings.ArrowTable`) and `arrow_stream(batch_size,
+  prefetch)` (returns `ddbc_bindings.ArrowStream`), marked `RUST-PORT`. They
+  need no pyarrow: the objects implement the Arrow PyCapsule protocol. The
+  upstream methods `arrow()`, `arrow_batch()`, `arrow_reader()` are unchanged
+  and run on the same native decoder through `DDBCSQLFetchArrowBatch`.
+- `arrow_parallel.py` (new) + `__init__.py` export: `mssql_python.read_arrow(
+  connection_str, query, partition_on=None, partitions=1, batch_size=65536)`
+  reads integer-range partitions of a query over separate connections in
+  parallel threads and returns one `ArrowTable` (`ArrowTable.concat`).
