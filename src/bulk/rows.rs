@@ -232,8 +232,21 @@ impl PyRows {
         true
     }
 
+    /// Fail the load with `err`, which the caller re-raises as is.
+    fn fail_with(&self, shared: &Arc<Shared>, what: &str, err: PyErr) -> Window {
+        let message = format!("{what}: {err}");
+        if let Ok(mut slot) = self.raised.lock() {
+            slot.get_or_insert(err);
+        }
+        Window::failed(shared, message)
+    }
+
     fn read_window(&mut self, py: Python<'_>) -> Window {
         let shared = Arc::clone(&self.shared);
+        // A Ctrl-C only reaches Python code while the GIL is held, i.e. here.
+        if let Err(err) = py.check_signals() {
+            return self.fail_with(&shared, "Interrupted", err);
+        }
         let mut window = Window::new(&shared);
         let started = Instant::now();
         let mut iterator = self.iter.bind(py).clone();
@@ -250,13 +263,7 @@ impl PyRows {
             };
             let row = match item {
                 Ok(row) => row,
-                Err(err) => {
-                    let message = format!("Reading the next row failed: {err}");
-                    if let Ok(mut slot) = self.raised.lock() {
-                        slot.get_or_insert(err);
-                    }
-                    return Window::failed(&shared, message);
-                }
+                Err(err) => return self.fail_with(&shared, "Reading the next row failed", err),
             };
             self.rows_read += 1;
             if let Err(message) = convert_row(&shared, &row, self.rows_read, &mut window) {

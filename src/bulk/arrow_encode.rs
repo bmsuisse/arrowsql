@@ -242,7 +242,10 @@ impl Window {
 
     /// Encode rows of `batch` starting at `rows.start`, at most `rows.len()`.
     fn encode(plans: &Arc<[ColumnPlan]>, batch: &RecordBatch, rows: Range<usize>) -> Window {
-        let columns = plans.iter().map(|plan| Arc::clone(batch.column(plan.source))).collect();
+        if plans.iter().any(|plan| plan.source >= batch.num_columns()) {
+            return Window::failed(plans, "An Arrow batch has fewer columns than the schema".to_string());
+        }
+        let columns =plans.iter().map(|plan| Arc::clone(batch.column(plan.source))).collect();
         Self::encode_columns(plans, Arc::new(columns), rows).unwrap_or_else(|message| Window::failed(plans, message))
     }
 
