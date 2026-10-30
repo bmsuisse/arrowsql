@@ -238,6 +238,19 @@ fn reset_pools(manager: &mut Manager) -> Vec<TdsClient> {
         .collect()
 }
 
+/// Runs in a forked child. The idle sockets belong to the parent, so they are
+/// leaked, not closed: a close would write to the parent's live connection.
+pub fn forget_after_fork() {
+    // Only the forking thread survives in the child; a lock another parent
+    // thread held at fork time would never be released.
+    if MANAGER.is_locked() {
+        // SAFETY: its owner thread does not exist in this process.
+        unsafe { MANAGER.force_unlock() };
+    }
+    let inherited = reset_pools(&mut MANAGER.lock());
+    std::mem::forget(inherited);
+}
+
 #[pyfunction]
 #[pyo3(signature = (max_size=100, idle_timeout=600))]
 pub fn enable_pooling(max_size: i64, idle_timeout: i64) {

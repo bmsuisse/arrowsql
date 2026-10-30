@@ -4,11 +4,11 @@
 //! names, defaults and return codes. See docs/ARCHITECTURE.md for the design
 //! and docs/CONTRACT.md for the symbol table and ownership.
 
-use std::sync::Mutex;
-
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
+mod arrow;
 mod catalog;
 mod connection;
 mod connstr;
@@ -23,12 +23,16 @@ mod rowfactory;
 mod runtime;
 mod statement;
 mod types;
-mod arrow;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-static DECIMAL_SEPARATOR: Mutex<String> = Mutex::new(String::new());
+/// `os.register_at_fork(after_in_child=...)` hook. The child must not reuse
+/// sockets the parent still owns; the runtime rebuilds itself lazily by pid.
+#[pyfunction]
+fn reset_after_fork() {
+    pooling::forget_after_fork();
+}
 
 #[pyfunction]
 #[pyo3(name = "ThrowStdException")]
@@ -36,10 +40,11 @@ fn throw_std_exception(message: String) -> PyResult<()> {
     Err(PyRuntimeError::new_err(message))
 }
 
-/// There is no ODBC driver to locate; kept for API compatibility.
+/// There is no ODBC driver to locate; kept for API compatibility. The
+/// argument must still be a str, as in the pybind signature.
 #[pyfunction]
-#[pyo3(name = "GetDriverPathCpp", signature = (*_args))]
-fn get_driver_path(_args: &Bound<'_, pyo3::types::PyTuple>) -> String {
+#[pyo3(name = "GetDriverPathCpp")]
+fn get_driver_path(_module_dir: String) -> String {
     String::new()
 }
 
@@ -54,15 +59,11 @@ fn get_odbc_driver_path(_args: &Bound<'_, pyo3::types::PyTuple>) -> String {
 #[pyo3(name = "_set_odbc_provider", signature = (*_args))]
 fn set_odbc_provider(_args: &Bound<'_, pyo3::types::PyTuple>) {}
 
+/// Accepted for API compatibility; the native decoder never formats decimals
+/// as text, so the separator has no effect.
 #[pyfunction]
 #[pyo3(name = "DDBCSetDecimalSeparator")]
-fn set_decimal_separator(separator: String) {
-    // TODO(decode/numeric): upstream applies this when converting decimals
-    // fetched as text; stored for parity, unused by the native decoder.
-    if let Ok(mut s) = DECIMAL_SEPARATOR.lock() {
-        *s = separator;
-    }
-}
+fn set_decimal_separator(_separator: String) {}
 
 /// Low-level SQLFetch/SQLGetData pair: the Python layer only uses the
 /// composite fetch functions, so these report IM001.
@@ -87,6 +88,14 @@ fn sql_get_data(
     statement::not_implemented(StatementHandle, "DDBCSQLGetData")
 }
 
+fn register_fork_hook(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = m.py();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("after_in_child", wrap_pyfunction!(reset_after_fork, py)?)?;
+    PyModule::import(py, "os")?.call_method("register_at_fork", (), Some(&kwargs))?;
+    Ok(())
+}
+
 #[pymodule]
 fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Resolve temporal classes before any fetch, so substitutions made before import apply.
@@ -99,6 +108,7 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__rust_port__", true)?;
     // Upstream's loader exposed the loaded extension as `ddbc_bindings.module`.
     m.add("module", m)?;
+    register_fork_hook(m)?;
 
     m.add_class::<types::ParamInfo>()?;
     m.add_class::<types::NumericData>()?;

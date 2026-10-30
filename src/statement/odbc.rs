@@ -49,6 +49,7 @@ fn reject(py: Python<'_>, stmt: &Arc<StmtShared>, record: DiagRecord) -> i16 {
 #[pyo3(name = "DDBCSQLExecDirect")]
 pub fn exec_direct(py: Python<'_>, statement_handle: &Bound<'_, PyAny>, query: String) -> PyResult<i16> {
     let stmt = stmt_of(statement_handle)?;
+    crate::logging::debug(py, "SQLExecDirect: executing batch");
     let query = crate::params::placeholders::translate_call_escape(&query).unwrap_or(query);
     Ok(py.detach(|| execute_command(&stmt, Command::Batch(query))))
 }
@@ -260,6 +261,7 @@ pub fn fetch_all(
     messages: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<i16> {
     let stmt = stmt_of(StatementHandle)?;
+    crate::logging::debug(py, "FetchAll: fetching remaining rows");
     let mut ret = SQL_SUCCESS;
     loop {
         let fetched = py.detach(|| fetch(&stmt, FETCHALL_BATCH_ROWS, FetchPlan::Batch));
