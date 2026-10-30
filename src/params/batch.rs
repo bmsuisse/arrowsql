@@ -201,7 +201,7 @@ fn unify_decimal(rows: &mut [Vec<SqlType>], col: usize, is_null: &[bool]) -> Tds
     let int_digits = texts.iter().flatten().map(|t| integer_digits(t)).max().unwrap_or(1);
     let precision = int_digits + scale;
     if precision > MAX_DECIMAL_PRECISION {
-        return Err(Error::UsageError(format!(
+        return Err(Error::TypeConversionError(format!(
             "values in one column need a numeric precision of {precision}, above the maximum of {MAX_DECIMAL_PRECISION}"
         )));
     }

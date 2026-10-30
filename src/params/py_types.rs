@@ -418,6 +418,15 @@ fn column_value_to_sql_type(value: ColumnValues) -> SqlType {
     }
 }
 
+/// A Python value that does not fit a numeric size hint. Out-of-range values
+/// (`OverflowError`) are a value problem (`ValueError`); a value of the wrong
+/// type is a usage problem (`TypeError`).
+fn numeric_hint_error(sql_type: &str, error: PyErr) -> Error {
+    let message = format!("Failed to convert parameter to {sql_type}: {error}");
+    let overflow = Python::attach(|py| error.is_instance_of::<pyo3::exceptions::PyOverflowError>(py));
+    if overflow { Error::TypeConversionError(message) } else { Error::UsageError(message) }
+}
+
 /// Converts a Python value according to its validated `setinputsizes()` hint.
 ///
 /// Hints select the SQL type, but size handling remains type-specific: decimal
@@ -433,25 +442,25 @@ pub(crate) fn py_to_sql_type_with_hint(
 
     match hint.sql_type {
         InputSqlType::Bit => Ok(SqlType::Bit(Some(py_obj.extract::<bool>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to BIT: {error}")),
+            |error| numeric_hint_error("BIT", error),
         )?))),
         InputSqlType::TinyInt => Ok(SqlType::TinyInt(Some(py_obj.extract::<u8>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to TINYINT: {error}")),
+            |error| numeric_hint_error("TINYINT", error),
         )?))),
         InputSqlType::SmallInt => Ok(SqlType::SmallInt(Some(py_obj.extract::<i16>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to SMALLINT: {error}")),
+            |error| numeric_hint_error("SMALLINT", error),
         )?))),
         InputSqlType::Integer => Ok(SqlType::Int(Some(py_obj.extract::<i32>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to INT: {error}")),
+            |error| numeric_hint_error("INT", error),
         )?))),
         InputSqlType::BigInt => Ok(SqlType::BigInt(Some(py_obj.extract::<i64>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to BIGINT: {error}")),
+            |error| numeric_hint_error("BIGINT", error),
         )?))),
         InputSqlType::Real => Ok(SqlType::Real(Some(py_obj.extract::<f32>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to REAL: {error}")),
+            |error| numeric_hint_error("REAL", error),
         )?))),
         InputSqlType::Float => Ok(SqlType::Float(Some(py_obj.extract::<f64>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to FLOAT: {error}")),
+            |error| numeric_hint_error("FLOAT", error),
         )?))),
         InputSqlType::Numeric | InputSqlType::Decimal => hinted_decimal(py_obj, hint),
         InputSqlType::Char
