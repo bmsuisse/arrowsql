@@ -67,6 +67,9 @@ from .cursor import Cursor
 # RUST-PORT: partitioned parallel Arrow reads
 from .arrow_parallel import read_arrow
 
+# RUST-PORT: parallel Arrow bulk load into a heap
+from .bulk_parallel import write_arrow
+
 # Row Objects
 from .row import Row, RowMapping
 
@@ -354,6 +357,7 @@ __all__ = [
     "ROWID",
     # Connection and cursor classes
     "connect",
+    "write_arrow",
     "Connection",
     "TokenProvider",
     "Cursor",
