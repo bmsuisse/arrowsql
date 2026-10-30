@@ -12,10 +12,16 @@ use super::cursor::{FETCHALL_BATCH_ROWS, FETCHONE_READAHEAD, FetchPlan, fetch, n
 use super::exec::{Command, execute_batch, execute_command};
 use super::{StmtShared, close_cursor, stmt_of};
 use crate::consts::*;
-use crate::decode::{describe, python as pyconv};
+use crate::decode::{describe, python as pyconv, text};
 use crate::diag::{self, DiagRecord};
 use crate::params::py_types::{ParameterHint, py_to_sql_type, py_to_sql_type_with_hint};
 use crate::types::ParamInfo;
+
+/// Malformed UTF-16 policy for a batch fetch. Upstream binds bounded columns
+/// in bulk, which is lossy; a LOB column forces row-wise, strict decoding.
+fn bulk_utf16_errors(has_lob: bool) -> text::Utf16Errors {
+    if has_lob { text::Utf16Errors::Strict } else { text::Utf16Errors::BulkBounded }
+}
 
 pub fn append_messages(py: Python<'_>, messages: Option<&Bound<'_, PyAny>>, info: &[DiagRecord]) -> PyResult<()> {
     let Some(messages) = messages else { return Ok(()) };
@@ -236,7 +242,7 @@ pub fn fetch_many(
     let stmt = stmt_of(StatementHandle)?;
     let fetched = py.detach(|| fetch(&stmt, fetchSize, FetchPlan::Exact { readahead: fetchSize }));
     append_messages(py, messages, &fetched.info)?;
-    pyconv::append_rows(py, &fetched.rows, fetched.ncols, rows)?;
+    pyconv::append_rows(py, &fetched.rows, fetched.ncols, rows, bulk_utf16_errors(fetched.has_lob))?;
     // An empty fetchmany at end-of-data is a success with no rows upstream.
     Ok(if fetched.ret == SQL_NO_DATA { SQL_SUCCESS } else { fetched.ret })
 }
@@ -258,7 +264,7 @@ pub fn fetch_all(
     loop {
         let fetched = py.detach(|| fetch(&stmt, FETCHALL_BATCH_ROWS, FetchPlan::Batch));
         append_messages(py, messages, &fetched.info)?;
-        pyconv::append_rows(py, &fetched.rows, fetched.ncols, rows)?;
+        pyconv::append_rows(py, &fetched.rows, fetched.ncols, rows, bulk_utf16_errors(fetched.has_lob))?;
         match fetched.ret {
             SQL_NO_DATA => break,
             SQL_SUCCESS_WITH_INFO => ret = SQL_SUCCESS_WITH_INFO,

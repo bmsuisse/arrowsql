@@ -132,3 +132,13 @@ pub fn decimal_digits(meta: &ColumnMetadata) -> i16 {
 pub fn nullable(meta: &ColumnMetadata) -> i16 {
     if meta.is_nullable() { SQL_NULLABLE } else { SQL_NO_NULLS }
 }
+
+/// Widest bounded text/binary column that upstream binds in bulk (`SQL_MAX_LOB_SIZE`).
+const BULK_BIND_MAX_SIZE: u64 = 8000;
+
+/// Columns upstream streams with `SQLGetData` instead of binding in bulk:
+/// unbounded (`max`, `text`, `xml`) or wider than [`BULK_BIND_MAX_SIZE`].
+pub fn is_lob(meta: &ColumnMetadata) -> bool {
+    let size = column_size(meta);
+    size == 0 || size > BULK_BIND_MAX_SIZE
+}

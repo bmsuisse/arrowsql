@@ -14,7 +14,7 @@ use mssql_tds::query::metadata::ColumnMetadata;
 
 use super::StmtShared;
 use crate::consts::*;
-use crate::decode::RowBuffer;
+use crate::decode::{RowBuffer, describe};
 use crate::diag::{self, DiagRecord};
 use crate::runtime::block_on;
 
@@ -264,11 +264,13 @@ pub struct Fetched {
     /// Info records produced by this fetch (for the `messages` list).
     pub info: Vec<DiagRecord>,
     pub ret: SqlReturn,
+    /// The result set has a LOB column, so upstream streams it row by row.
+    pub has_lob: bool,
 }
 
 impl Fetched {
     fn without_rows(ret: SqlReturn) -> Self {
-        Self { rows: RowBuffer::new(), ncols: 0, info: vec![], ret }
+        Self { rows: RowBuffer::new(), ncols: 0, info: vec![], ret, has_lob: false }
     }
 }
 
@@ -304,6 +306,7 @@ pub fn fetch(stmt: &StmtShared, n: usize, plan: FetchPlan) -> Fetched {
     }
     let rows = state.take_pending(n);
     let ncols = state.ncols();
+    let has_lob = state.columns.as_ref().is_some_and(|cols| cols.iter().any(describe::is_lob));
     let info = state.diag.clone();
     let ret = if rows.rows > 0 {
         if info.is_empty() { SQL_SUCCESS } else { SQL_SUCCESS_WITH_INFO }
@@ -313,7 +316,7 @@ pub fn fetch(stmt: &StmtShared, n: usize, plan: FetchPlan) -> Fetched {
     } else {
         SQL_NO_DATA
     };
-    Fetched { rows, ncols, info, ret }
+    Fetched { rows, ncols, info, ret, has_lob }
 }
 
 fn read_for_fetch(client: &mut TdsClient, state: &mut StmtState, n: usize, plan: FetchPlan) {
