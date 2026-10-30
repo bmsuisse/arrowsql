@@ -24,14 +24,30 @@ pub fn float(py: Python<'_>, value: f64) -> PyResult<*mut ffi::PyObject> {
     check(py, unsafe { ffi::PyFloat_FromDouble(value) })
 }
 
-fn decimal_from_str(py: Python<'_>, text: &str) -> PyResult<*mut ffi::PyObject> {
+/// `decimal.Decimal(text)`, called through the one-argument C-API call so no
+/// argument tuple is built.
+fn decimal_from_str<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyAny>> {
     let cls = DECIMAL_TYPE.import(py, "decimal", "Decimal")?;
-    Ok(cls.call1((text,))?.into_ptr())
+    let arg = unsafe {
+        Bound::from_owned_ptr_or_err(
+            py,
+            ffi::PyUnicode_FromStringAndSize(text.as_ptr().cast(), text.len() as ffi::Py_ssize_t),
+        )?
+    };
+    unsafe {
+        Bound::from_owned_ptr_or_err(py, ffi::PyObject_CallOneArg(cls.as_ptr(), arg.as_ptr()))
+    }
+}
+
+/// A Decimal for `value`, keeping the scale the server sent (trailing zeros
+/// included).
+pub fn decimal_object<'py>(py: Python<'py>, value: &DecimalParts) -> PyResult<Bound<'py, PyAny>> {
+    let mut buf = [0u8; DECIMAL_STR_LEN];
+    decimal_from_str(py, value.format_into(&mut buf))
 }
 
 pub fn decimal(py: Python<'_>, value: &DecimalParts) -> PyResult<*mut ffi::PyObject> {
-    let mut buf = [0u8; DECIMAL_STR_LEN];
-    decimal_from_str(py, value.format_into(&mut buf))
+    Ok(decimal_object(py, value)?.into_ptr())
 }
 
 /// money/smallmoney scaled by 10^4 -> Decimal with 4 fractional digits.
@@ -39,5 +55,5 @@ pub fn money(py: Python<'_>, scaled: i64) -> PyResult<*mut ffi::PyObject> {
     let sign = if scaled < 0 { "-" } else { "" };
     let magnitude = scaled.unsigned_abs();
     let text = format!("{sign}{}.{:04}", magnitude / 10_000, magnitude % 10_000);
-    decimal_from_str(py, &text)
+    Ok(decimal_from_str(py, &text)?.into_ptr())
 }
