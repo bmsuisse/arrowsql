@@ -95,6 +95,8 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ARCHITECTURE", std::env::consts::ARCH)?;
     m.add("SQL_NO_TOTAL", consts::SQL_NO_TOTAL)?;
     m.add("__rust_port__", true)?;
+    // Upstream's loader exposed the loaded extension as `ddbc_bindings.module`.
+    m.add("module", m)?;
 
     m.add_class::<types::ParamInfo>()?;
     m.add_class::<types::NumericData>()?;
