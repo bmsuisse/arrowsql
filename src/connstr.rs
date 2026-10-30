@@ -73,6 +73,9 @@ fn yes(value: &str) -> bool {
     matches!(value.to_ascii_lowercase().as_str(), "yes" | "true" | "1")
 }
 
+/// TDS packet size requested when the connection string does not set one.
+pub const DEFAULT_PACKET_SIZE: u16 = 16384;
+
 /// Options that live outside `ClientContext`.
 #[derive(Debug, Clone, Default)]
 pub struct ConnOptions {
@@ -132,6 +135,9 @@ pub fn build_context(
         ctx.connect_timeout = t;
         opts.login_timeout = Some(t);
     }
+    // 16384 measured 10-15% faster than the 8000 default on large reads
+    // (docs/PERFORMANCE_RESEARCH.md §2); an explicit PacketSize still wins.
+    ctx.packet_size = DEFAULT_PACKET_SIZE;
     if let Some(p) = first(&map, &["packet size", "packetsize"])
         && let Ok(p) = p.parse::<u16>()
     {
@@ -199,6 +205,14 @@ mod tests {
         assert_eq!(m["server"], "tcp:h,1433");
         assert_eq!(m["pwd"], "a;b}c");
         assert_eq!(m["database"], "db");
+    }
+
+    #[test]
+    fn packet_size_defaults_to_16384_and_honours_explicit_value() {
+        let (ctx, _) = build_context("Server=h;", None).unwrap();
+        assert_eq!(ctx.packet_size, DEFAULT_PACKET_SIZE);
+        let (ctx, _) = build_context("Server=h;Packet Size=4096;", None).unwrap();
+        assert_eq!(ctx.packet_size, 4096);
     }
 
     #[test]
