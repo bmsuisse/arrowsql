@@ -2,9 +2,62 @@
 //!
 //! Inputs are (days since 0001-01-01, 100ns ticks since midnight); fractional
 //! precision below 1µs is truncated like the C++ binding did.
+//!
+//! Values are built by the `datetime.date`, `datetime.time` and
+//! `datetime.datetime` classes as they are when the module loads. While a class
+//! is the builtin type the C-API constructor is used directly. A substituted
+//! class is called with the same positional arguments instead, so it sees every
+//! value.
 
+use pyo3::PyTypeInfo;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDate, PyDateTime, PyDelta, PyTime, PyTzInfo};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDate, PyDateTime, PyDelta, PyTime, PyType, PyTzInfo};
+
+/// How one temporal value is built.
+enum Maker {
+    /// The builtin type: use the C-API constructor.
+    Native,
+    /// A substituted class: call it with the positional arguments.
+    Python(Py<PyAny>),
+}
+
+struct Makers {
+    date: Maker,
+    time: Maker,
+    datetime: Maker,
+}
+
+static MAKERS: PyOnceLock<Makers> = PyOnceLock::new();
+
+fn resolve(cls: Bound<'_, PyAny>, builtin: &Bound<'_, PyType>) -> Maker {
+    if cls.as_ptr() == builtin.as_ptr() {
+        Maker::Native
+    } else {
+        Maker::Python(cls.unbind())
+    }
+}
+
+/// Resolve the temporal classes once. Called from module init, so a class
+/// substituted before `mssql_python` is imported is the one every fetch uses.
+pub fn init(py: Python<'_>) -> PyResult<()> {
+    MAKERS.get_or_try_init(py, || -> PyResult<Makers> {
+        let module = py.import("datetime")?;
+        Ok(Makers {
+            date: resolve(module.getattr("date")?, &PyDate::type_object(py)),
+            time: resolve(module.getattr("time")?, &PyTime::type_object(py)),
+            datetime: resolve(module.getattr("datetime")?, &PyDateTime::type_object(py)),
+        })
+    })?;
+    Ok(())
+}
+
+fn makers(py: Python<'_>) -> PyResult<&'static Makers> {
+    MAKERS
+        .get(py)
+        .ok_or_else(|| PyRuntimeError::new_err("temporal constructors are not initialised"))
+}
 
 /// Days since 0001-01-01 -> (year, month, day). Hinnant's civil_from_days.
 pub fn civil(days: u32) -> (i32, u8, u8) {
@@ -34,20 +87,33 @@ fn clock(ticks: u64) -> (u8, u8, u8, u32) {
 
 pub fn date(py: Python<'_>, days: u32) -> PyResult<Bound<'_, PyAny>> {
     let (y, m, d) = civil(days);
-    Ok(PyDate::new(py, y, m, d)?.into_any())
+    match &makers(py)?.date {
+        Maker::Native => Ok(PyDate::new(py, y, m, d)?.into_any()),
+        Maker::Python(cls) => cls.bind(py).call1((y, m, d)),
+    }
 }
 
 pub fn time(py: Python<'_>, ticks: u64) -> PyResult<Bound<'_, PyAny>> {
     let (h, mi, s, us) = clock(ticks);
-    Ok(PyTime::new(py, h, mi, s, us, None)?.into_any())
+    match &makers(py)?.time {
+        Maker::Native => Ok(PyTime::new(py, h, mi, s, us, None)?.into_any()),
+        Maker::Python(cls) => cls.bind(py).call1((h, mi, s, us)),
+    }
 }
 
 pub fn datetime(py: Python<'_>, days: u32, ticks: u64) -> PyResult<Bound<'_, PyAny>> {
     // msodbcsql rounding can carry a datetime to 24:00:00.000 -> next day.
-    let (days, ticks) = if ticks >= 864_000_000_000 { (days + 1, ticks - 864_000_000_000) } else { (days, ticks) };
+    let (days, ticks) = if ticks >= 864_000_000_000 {
+        (days + 1, ticks - 864_000_000_000)
+    } else {
+        (days, ticks)
+    };
     let (y, m, d) = civil(days);
     let (h, mi, s, us) = clock(ticks);
-    Ok(PyDateTime::new(py, y, m, d, h, mi, s, us, None)?.into_any())
+    match &makers(py)?.datetime {
+        Maker::Native => Ok(PyDateTime::new(py, y, m, d, h, mi, s, us, None)?.into_any()),
+        Maker::Python(cls) => cls.bind(py).call1((y, m, d, h, mi, s, us)),
+    }
 }
 
 /// datetimeoffset is stored as UTC on the wire; return local time with a
@@ -58,7 +124,8 @@ pub fn datetimeoffset(
     ticks: u64,
     offset_minutes: i16,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let total = i64::from(days) * 864_000_000_000 + ticks as i64
+    let total = i64::from(days) * 864_000_000_000
+        + ticks as i64
         + i64::from(offset_minutes) * 60 * 10_000_000;
     let local_days = total.div_euclid(864_000_000_000) as u32;
     let local_ticks = total.rem_euclid(864_000_000_000) as u64;
@@ -66,7 +133,10 @@ pub fn datetimeoffset(
     let (h, mi, s, us) = clock(local_ticks);
     let delta = PyDelta::new(py, 0, i32::from(offset_minutes) * 60, 0, true)?;
     let tz = PyTzInfo::fixed_offset(py, delta)?;
-    Ok(PyDateTime::new(py, y, m, d, h, mi, s, us, Some(&tz))?.into_any())
+    match &makers(py)?.datetime {
+        Maker::Native => Ok(PyDateTime::new(py, y, m, d, h, mi, s, us, Some(&tz))?.into_any()),
+        Maker::Python(cls) => cls.bind(py).call1((y, m, d, h, mi, s, us, &tz)),
+    }
 }
 
 #[cfg(test)]
