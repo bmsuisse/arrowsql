@@ -116,3 +116,13 @@ converter map is still keyed on the converter generation.
   materializes a `Cursor` of the same connection used as a row source, which
   would otherwise deadlock on the connection's wire.
 - Timeout errors read "Bulk copy timeout: the operation timed out after N seconds".
+
+## Packaging (docs/PACKAGING.md)
+
+- `cursor.py` `_bulkcopy_import_core`: the `mssql_py_core` import failure
+  names the `async-preview` extra (`RUST-PORT`). Bulk copy itself is native;
+  only cursors without a native handle and plain iterables of RecordBatch
+  reach this fallback.
+- `pyproject.toml`: no required dependencies. `async-preview`, `arrow` and
+  `azure` are optional extras. No Python-layer code changed for them: the
+  imports were already lazy.

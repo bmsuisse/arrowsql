@@ -3602,9 +3602,12 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             return import_module("mssql_py_core.mssql_py_core")
         except ImportError as exc:
             logger.error("bulkcopy: Failed to import mssql_py_core module")
+            # RUST-PORT: only cursors without a native handle and plain iterables of
+            # RecordBatch reach this fallback; mssql_py_core is an optional extra.
             raise ImportError(
-                "Bulk copy requires the mssql_py_core library which is not available. "
-                "This is an unexpected error. "
+                "This bulk copy source needs the optional 'async-preview' extra, which "
+                "provides mssql_py_core. Install it with: "
+                "pip install 'mssql-python-rs-port[async-preview]'"
             ) from exc
 
     @classmethod
