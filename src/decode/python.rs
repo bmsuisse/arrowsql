@@ -7,7 +7,7 @@ use pyo3::types::PyList;
 use super::buffer::{Cell, RowBuffer};
 use super::{binary, numeric, temporal, text};
 
-fn cell_to_py(
+pub(crate) fn cell_to_py(
     py: Python<'_>,
     buf: &RowBuffer,
     cell: &Cell,
