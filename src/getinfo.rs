@@ -21,7 +21,6 @@ use pyo3::types::{PyBytes, PyDict};
 use crate::connection::ConnShared;
 use crate::decode::RowBuffer;
 use crate::diag;
-use crate::runtime::block_on;
 use crate::statement::free_for_connection;
 
 /// One SQLGetInfo answer, before it is serialised to bytes.
@@ -168,11 +167,12 @@ fn user_name(py: Python<'_>, conn: &ConnShared) -> PyResult<Value> {
         free_for_connection(&mut slot);
         let client = slot.client.as_mut().ok_or_else(connection_closed)?;
         let mut rows = RowBuffer::new();
-        let outcome = block_on(async {
-            if client.execute("SELECT USER_NAME()".to_string(), ()).await? == StatementResult::Rows {
-                while client.next_row_into(&mut rows).await? {}
+        let sink = &mut rows;
+        let outcome = client.block_on(|c| async move {
+            if c.execute("SELECT USER_NAME()".to_string(), ()).await? == StatementResult::Rows {
+                while c.next_row_into(sink).await? {}
             }
-            client.close_query().await
+            c.close_query().await
         });
         let _ = client.take_info_messages();
         outcome.map_err(|err| native_error(&diag::records_for_error(&err, "HY000")))?;

@@ -1,6 +1,6 @@
 //! Connection pooling.
 //!
-//! Idle `TdsClient`s are kept per pool key (connection string + the Python
+//! Idle `SyncClient`s are kept per pool key (connection string + the Python
 //! layer's `pool_key`, which encodes token identity). A pool's `size` counts
 //! idle *and* checked-out connections, capped at `max_size`; an acquire past
 //! the cap fails instead of waiting. Capacity is held by a [`Lease`] that the
@@ -20,18 +20,17 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use mssql_tds::connection::tds_client::TdsClient;
+use crate::runtime::SyncClient;
 use parking_lot::Mutex;
 use pyo3::prelude::*;
 
-use crate::runtime::block_on;
 
 const DEFAULT_MAX_SIZE: usize = 100;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// A pooled session plus what is needed to judge its access token on reuse.
 pub struct IdleClient {
-    pub client: TdsClient,
+    pub client: SyncClient,
     /// Access token the session logged in with, if any.
     pub token: Option<String>,
     /// Token expiry as Unix seconds; 0 when the factory reported none.
@@ -173,7 +172,7 @@ pub fn acquire(key: &str) -> Result<Acquired, PoolFull> {
 }
 
 /// Drop idle sessions older than the idle timeout, in every pool.
-fn evict_expired(manager: &mut Manager, to_close: &mut Vec<TdsClient>) {
+fn evict_expired(manager: &mut Manager, to_close: &mut Vec<SyncClient>) {
     let timeout = manager.idle_timeout;
     manager.pools.retain(|_, pool| {
         let (expired, kept): (Vec<_>, Vec<_>) =
@@ -207,7 +206,7 @@ pub fn evict_with_token(lease: &Lease, token: &str) {
 /// Return a session to its pool. Gives it back when it cannot be pooled
 /// (pooling disabled, new generation, dead session, open batch); the caller
 /// then closes it, and `lease` frees the slot on drop.
-pub fn checkin(mut lease: Lease, entry: IdleClient) -> Option<TdsClient> {
+pub fn checkin(mut lease: Lease, entry: IdleClient) -> Option<SyncClient> {
     let mut manager = MANAGER.lock();
     let poolable = manager.accepting
         && manager.generation == lease.generation
@@ -223,14 +222,14 @@ pub fn checkin(mut lease: Lease, entry: IdleClient) -> Option<TdsClient> {
 }
 
 /// Close sessions politely (outside any lock).
-pub fn close_all(clients: Vec<TdsClient>) {
+pub fn close_all(clients: Vec<SyncClient>) {
     for mut client in clients {
-        let _ = block_on(client.close_connection());
+        let _ = client.block_on(|c| c.close_connection());
     }
 }
 
 /// Start a new generation and return every idle session for closing.
-fn reset_pools(manager: &mut Manager) -> Vec<TdsClient> {
+fn reset_pools(manager: &mut Manager) -> Vec<SyncClient> {
     manager.generation += 1;
     std::mem::take(&mut manager.pools)
         .into_values()

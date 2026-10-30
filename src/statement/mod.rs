@@ -1,4 +1,4 @@
-//! Statement handles (`SqlHandle`) on top of one shared `TdsClient`.
+//! Statement handles (`SqlHandle`) on top of one shared `SyncClient`.
 //!
 //! * `wire`: which statement owns the connection's TDS stream and how it is
 //!   handed over (MARS emulation).

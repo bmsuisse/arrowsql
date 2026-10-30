@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use mssql_tds::connection::tds_client::{ResultSet, StatementResult, TdsClient};
+use mssql_tds::connection::tds_client::{ResultSet, StatementResult};
 use mssql_tds::datatypes::row_writer::RowWriter;
 use mssql_tds::query::metadata::ColumnMetadata;
 
@@ -16,7 +16,7 @@ use super::StmtShared;
 use crate::consts::*;
 use crate::decode::{RowBuffer, describe};
 use crate::diag::{self, DiagRecord};
-use crate::runtime::block_on;
+use crate::runtime::SyncClient;
 
 /// Rows read ahead by `fetchone` so per-row calls don't each hit the wire.
 pub const FETCHONE_READAHEAD: usize = 256;
@@ -82,6 +82,12 @@ impl StmtState {
 
     pub fn columns(&self) -> Option<Arc<Vec<ColumnMetadata>>> {
         self.columns.clone()
+    }
+
+    /// Nothing of this statement is on the wire or queued behind the current
+    /// result, so closing it needs no connection access.
+    pub(super) fn is_off_wire(&self) -> bool {
+        !self.freed && !self.on_wire && self.queued.is_empty()
     }
 
     pub fn is_freed(&self) -> bool {
@@ -159,17 +165,17 @@ impl StmtState {
 /// generic decode seam: any `RowWriter` (Python `RowBuffer`, Arrow builders)
 /// can be filled here. Returns `Ok(true)` when the result is exhausted.
 pub fn read_rows_into<W: RowWriter + Send>(
-    client: &mut TdsClient,
+    client: &mut SyncClient,
     sink: &mut W,
     rows_written: impl Fn(&W) -> usize,
     bytes_written: impl Fn(&W) -> usize,
     max_rows: usize,
     max_bytes: usize,
 ) -> mssql_tds::core::TdsResult<bool> {
-    block_on(async {
+    client.block_on(|c| async move {
         let start = rows_written(sink);
         while rows_written(sink) - start < max_rows && bytes_written(sink) < max_bytes {
-            if !client.next_row_into(sink).await? {
+            if !c.next_row_into(sink).await? {
                 return Ok(true);
             }
         }
@@ -179,7 +185,7 @@ pub fn read_rows_into<W: RowWriter + Send>(
 
 /// Read rows of the current result into a Python-bound buffer.
 pub(super) fn read_rows(
-    client: &mut TdsClient,
+    client: &mut SyncClient,
     sink: &mut RowBuffer,
     max_rows: usize,
     max_bytes: usize,
@@ -199,7 +205,7 @@ pub(super) fn server_error_record(e: &mssql_tds::error::SqlErrorInfo) -> DiagRec
 /// Errors the server reported for individual parameter sets of a prepared
 /// batch (executemany). They are only visible once the set's results were
 /// read, so they are collected whenever a batch ends.
-pub(super) fn prepared_batch_errors(client: &mut TdsClient) -> Vec<DiagRecord> {
+pub(super) fn prepared_batch_errors(client: &mut SyncClient) -> Vec<DiagRecord> {
     client
         .take_prepared_batch_results()
         .map(|batch| {
@@ -215,7 +221,7 @@ pub(super) fn prepared_batch_errors(client: &mut TdsClient) -> Vec<DiagRecord> {
 
 /// Pull up to `want` more rows of the current wire result into `state.pending`.
 pub(super) fn fill_pending(
-    client: &mut TdsClient,
+    client: &mut SyncClient,
     state: &mut StmtState,
     want: usize,
     max_bytes: usize,
@@ -243,7 +249,7 @@ pub(super) fn fill_pending(
 /// Like msodbcsql, read up to the first row of a freshly positioned result so
 /// errors raised before any row is produced (lock timeout, divide by zero,
 /// ...) fail the call that moved onto the result (`execute`, `nextset`).
-pub(super) fn surface_first_row_error(client: &mut TdsClient, state: &mut StmtState) -> SqlReturn {
+pub(super) fn surface_first_row_error(client: &mut SyncClient, state: &mut StmtState) -> SqlReturn {
     fill_pending(client, state, 1, FETCH_BATCH_BYTES);
     if state.pending.rows == 0
         && let Some(err) = state.pending_error.take()
@@ -289,6 +295,21 @@ pub enum FetchPlan {
 pub fn fetch(stmt: &StmtShared, n: usize, plan: FetchPlan) -> Fetched {
     let mut slot = stmt.conn.slot.lock();
     let mut state = stmt.state.lock();
+    deliver(&mut state, slot.client.as_mut(), n, plan)
+}
+
+/// [`fetch`] for callers that hold the GIL: serves the rows already buffered
+/// (or the end of a finished result) without touching the connection, and
+/// returns `None` when the wire would be needed or a lock is busy.
+pub fn fetch_buffered(stmt: &StmtShared, n: usize, plan: FetchPlan) -> Option<Fetched> {
+    let mut state = stmt.state.try_lock()?;
+    if state.pending_rows() < n && state.on_wire {
+        return None;
+    }
+    Some(deliver(&mut state, None, n, plan))
+}
+
+fn deliver(state: &mut StmtState, client: Option<&mut SyncClient>, n: usize, plan: FetchPlan) -> Fetched {
     state.diag.clear();
     if state.freed {
         return Fetched::without_rows(SQL_INVALID_HANDLE);
@@ -300,9 +321,9 @@ pub fn fetch(stmt: &StmtShared, n: usize, plan: FetchPlan) -> Fetched {
         return Fetched::without_rows(SQL_ERROR);
     }
     if state.pending_rows() < n
-        && let Some(client) = slot.client.as_mut()
+        && let Some(client) = client
     {
-        read_for_fetch(client, &mut state, n, plan);
+        read_for_fetch(client, state, n, plan);
     }
     let rows = state.take_pending(n);
     let ncols = state.ncols();
@@ -319,7 +340,7 @@ pub fn fetch(stmt: &StmtShared, n: usize, plan: FetchPlan) -> Fetched {
     Fetched { rows, ncols, info, ret, has_lob }
 }
 
-fn read_for_fetch(client: &mut TdsClient, state: &mut StmtState, n: usize, plan: FetchPlan) {
+fn read_for_fetch(client: &mut SyncClient, state: &mut StmtState, n: usize, plan: FetchPlan) {
     let readahead = match plan {
         FetchPlan::Exact { readahead } => readahead.max(n),
         FetchPlan::Batch => n,
@@ -369,8 +390,8 @@ fn install_queued(state: &mut StmtState, next: BufferedResult) -> SqlReturn {
     if state.diag.is_empty() { SQL_SUCCESS } else { SQL_SUCCESS_WITH_INFO }
 }
 
-fn advance_on_wire(client: &mut TdsClient, state: &mut StmtState) -> SqlReturn {
-    let mut ret = match block_on(client.advance()) {
+fn advance_on_wire(client: &mut SyncClient, state: &mut StmtState) -> SqlReturn {
+    let mut ret = match client.block_on(|c| c.advance()) {
         Ok(StatementResult::Rows) => {
             state.columns = Some(Arc::new(client.get_metadata().clone()));
             state.result_done = false;
