@@ -6,6 +6,7 @@
 //! matrix and the range checks follow Microsoft's `mssql-py-core`
 //! (`arrow_bulkcopy.rs`, MIT) so both engines accept and reject the same data.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use arrow_array::{
@@ -33,26 +34,27 @@ use mssql_tds::message::bulk_load::StreamingBulkLoadWriter;
 use uuid::Uuid;
 
 use super::arrow_source::ArrowBatches;
+use super::arrow_wire;
 use super::settings::{BulkSettings, Resolved, SourceShape};
-use super::{BulkFailure, Outcome, Rows, SourceFailure, run};
+use super::{BulkFailure, Outcome, run};
 use crate::statement::StmtShared;
 
 /// Days from `0001-01-01` to `1970-01-01`: Arrow dates count from the epoch,
 /// SQL `date` from year one.
-const EPOCH_DAYS_FROM_YEAR_ONE: i32 = 719_162;
+pub(super) const EPOCH_DAYS_FROM_YEAR_ONE: i32 = 719_162;
 /// Days from `1900-01-01` to `1970-01-01`, the origin of legacy `datetime`.
-const DAYS_1900_TO_EPOCH: i64 = 25_567;
+pub(super) const DAYS_1900_TO_EPOCH: i64 = 25_567;
 /// 100-ns ticks per second, the unit of SQL `time` / `datetime2` payloads.
-const TICKS_PER_SECOND: u64 = 10_000_000;
-const TICKS_PER_DAY: i64 = TICKS_PER_SECOND as i64 * 86_400;
+pub(super) const TICKS_PER_SECOND: u64 = 10_000_000;
+pub(super) const TICKS_PER_DAY: i64 = TICKS_PER_SECOND as i64 * 86_400;
 /// Last day `datetime2` / `date` can hold, counted from year one.
-const MAX_SQL_DAYS: i64 = 3_652_058;
+pub(super) const MAX_SQL_DAYS: i64 = 3_652_058;
 /// `datetime` counts 1/300 s ticks.
 const DATETIME_TICKS_PER_DAY: u64 = 86_400 * 300;
 
 /// How one Arrow column is read and what SQL value it becomes.
 #[derive(Debug, Clone, Copy)]
-enum Kind {
+pub(super) enum Kind {
     Null,
     Bool,
     Int8,
@@ -192,16 +194,113 @@ fn checked_scale(scale: i8) -> Result<u8, String> {
     u8::try_from(scale).map_err(|_| format!("negative Arrow decimal scale ({scale}) is not supported"))
 }
 
-/// The columns of one record batch in plan order, shared by its rows.
-struct BatchColumns {
-    plans: Arc<[ColumnPlan]>,
-    columns: Vec<ArrayRef>,
+/// Largest row buffer one window may fill, and the most rows it may hold.
+const WINDOW_BYTES: usize = 8 << 20;
+const WINDOW_ROWS: usize = 8192;
+
+/// How a window writes a run of columns.
+enum Step {
+    /// Plans `first..end`, already encoded into the window's row buffer.
+    Encoded { first: usize, end: usize },
+    /// One plan, converted to a `ColumnValues` and serialized by mssql-tds.
+    Value(usize),
 }
 
-/// One row of a batch.
+/// A run of consecutive rows of one record batch with the wire bytes of the
+/// columns that have a direct encoder.
+struct Window {
+    plans: Arc<[ColumnPlan]>,
+    columns: Arc<Vec<ArrayRef>>,
+    /// Index into the batch of this window's first row.
+    first_row: usize,
+    rows: usize,
+    steps: Vec<Step>,
+    /// Wire bytes of every `Encoded` step, row by row.
+    bytes: Vec<u8>,
+    /// Where each (row, `Encoded` step) pair starts in `bytes`, plus the end.
+    starts: Vec<usize>,
+    encoded_steps: usize,
+    /// Set instead of rows when the window could not be encoded.
+    error: Option<String>,
+}
+
+impl Window {
+    /// A window that fails the load when its single row is written.
+    fn failed(plans: &Arc<[ColumnPlan]>, message: String) -> Window {
+        Window {
+            plans: Arc::clone(plans),
+            columns: Arc::new(Vec::new()),
+            first_row: 0,
+            rows: 1,
+            steps: Vec::new(),
+            bytes: Vec::new(),
+            starts: Vec::new(),
+            encoded_steps: 0,
+            error: Some(message),
+        }
+    }
+
+    /// Encode rows of `batch` starting at `rows.start`, at most `rows.len()`.
+    fn encode(plans: &Arc<[ColumnPlan]>, batch: &RecordBatch, rows: Range<usize>) -> Window {
+        let columns = plans.iter().map(|plan| Arc::clone(batch.column(plan.source))).collect();
+        Self::encode_columns(plans, Arc::new(columns), rows).unwrap_or_else(|message| Window::failed(plans, message))
+    }
+
+    fn encode_columns(
+        plans: &Arc<[ColumnPlan]>,
+        columns: Arc<Vec<ArrayRef>>,
+        rows: Range<usize>,
+    ) -> Result<Window, String> {
+        // The cells borrow the arrays through this second handle, so the window can own the first.
+        let arrays = Arc::clone(&columns);
+        let mut cells = Vec::with_capacity(plans.len());
+        for (plan, column) in plans.iter().zip(arrays.iter()) {
+            cells.push(arrow_wire::cell(plan.kind, column.as_ref(), &plan.destination, rows.clone())?);
+        }
+        let mut steps: Vec<Step> = Vec::new();
+        for (index, cell) in cells.iter().enumerate() {
+            match (cell, steps.last_mut()) {
+                (Some(_), Some(Step::Encoded { end, .. })) => *end = index + 1,
+                (Some(_), _) => steps.push(Step::Encoded { first: index, end: index + 1 }),
+                (None, _) => steps.push(Step::Value(index)),
+            }
+        }
+        let encoded_steps = steps.iter().filter(|step| matches!(step, Step::Encoded { .. })).count();
+        let mut window = Window {
+            plans: Arc::clone(plans),
+            columns,
+            first_row: rows.start,
+            rows: 0,
+            steps,
+            bytes: Vec::new(),
+            starts: Vec::new(),
+            encoded_steps,
+            error: None,
+        };
+        for row in rows {
+            for step in &window.steps {
+                if let Step::Encoded { first, end } = *step {
+                    window.starts.push(window.bytes.len());
+                    for cell in cells[first..end].iter().flatten() {
+                        cell(row, &mut window.bytes)?;
+                    }
+                }
+            }
+            window.rows += 1;
+            if window.bytes.len() >= WINDOW_BYTES {
+                break;
+            }
+        }
+        window.starts.push(window.bytes.len());
+        Ok(window)
+    }
+}
+
+/// One row of a window.
 struct ArrowRow {
-    batch: Arc<BatchColumns>,
-    index: usize,
+    window: Arc<Window>,
+    /// Row within the window.
+    row: usize,
 }
 
 #[async_trait]
@@ -211,32 +310,78 @@ impl BulkLoadRow for ArrowRow {
         writer: &mut StreamingBulkLoadWriter<'_>,
         column_index: &mut usize,
     ) -> TdsResult<()> {
-        for (plan, column) in self.batch.plans.iter().zip(&self.batch.columns) {
-            let value = plan.value(column.as_ref(), self.index)?;
-            writer.write_column_value(*column_index, &value).await?;
-            *column_index += 1;
+        let window = &*self.window;
+        if let Some(message) = &window.error {
+            return Err(usage(message.clone()));
+        }
+        let mut encoded = self.row * window.encoded_steps;
+        for step in &window.steps {
+            match *step {
+                Step::Encoded { first, end } => {
+                    let bytes = &window.bytes[window.starts[encoded]..window.starts[encoded + 1]];
+                    writer.write_raw_bytes(bytes).await?;
+                    encoded += 1;
+                    *column_index += end - first;
+                }
+                Step::Value(index) => {
+                    let plan = &window.plans[index];
+                    let value = plan.value(window.columns[index].as_ref(), window.first_row + self.row)?;
+                    writer.write_column_value(*column_index, &value).await?;
+                    *column_index += 1;
+                }
+            }
         }
         Ok(())
     }
 }
 
-/// Rows of every batch of the stream, in order. A read failure ends the
-/// iteration and is recorded for the caller (an iterator cannot return one).
+/// Rows of every batch of the stream, in order. A failure (an unreadable
+/// batch, a value that cannot be encoded) is delivered as a row that fails
+/// when written, which aborts the load exactly like any other bad value.
 struct ArrowRows {
     batches: ArrowBatches,
     plans: Arc<[ColumnPlan]>,
-    current: Option<Arc<BatchColumns>>,
-    rows_in_current: usize,
+    batch: Option<RecordBatch>,
     next_row: usize,
-    failure: SourceFailure,
+    window: Option<Arc<Window>>,
+    window_row: usize,
+    done: bool,
 }
 
 impl ArrowRows {
-    fn enter(&mut self, batch: &RecordBatch) {
-        let columns = self.plans.iter().map(|plan| Arc::clone(batch.column(plan.source))).collect();
-        self.current = Some(Arc::new(BatchColumns { plans: Arc::clone(&self.plans), columns }));
-        self.rows_in_current = batch.num_rows();
-        self.next_row = 0;
+    /// Rows per window for `batch`, keeping a window's buffer near [`WINDOW_BYTES`].
+    fn window_size(batch: &RecordBatch) -> usize {
+        let row_bytes = (batch.get_array_memory_size() / batch.num_rows().max(1)).max(1);
+        (WINDOW_BYTES / row_bytes).clamp(1, WINDOW_ROWS)
+    }
+
+    /// Make the next window current; false when the stream has ended.
+    fn open_window(&mut self) -> bool {
+        loop {
+            if let Some(batch) = self.batch.as_ref().filter(|batch| self.next_row < batch.num_rows()) {
+                let end = (self.next_row + Self::window_size(batch)).min(batch.num_rows());
+                let window = Window::encode(&self.plans, batch, self.next_row..end);
+                self.next_row += window.rows;
+                self.done = window.error.is_some();
+                self.window = Some(Arc::new(window));
+                self.window_row = 0;
+                return true;
+            }
+            match self.batches.next() {
+                Some(Ok(batch)) => {
+                    self.batch = Some(batch);
+                    self.next_row = 0;
+                }
+                Some(Err(err)) => {
+                    let message = format!("Failed to read the next Arrow batch: {err}");
+                    self.window = Some(Arc::new(Window::failed(&self.plans, message)));
+                    self.window_row = 0;
+                    self.done = true;
+                    return true;
+                }
+                None => return false,
+            }
+        }
     }
 }
 
@@ -245,17 +390,13 @@ impl Iterator for ArrowRows {
 
     fn next(&mut self) -> Option<ArrowRow> {
         loop {
-            if let Some(batch) = self.current.as_ref().filter(|_| self.next_row < self.rows_in_current) {
-                let row = ArrowRow { batch: Arc::clone(batch), index: self.next_row };
-                self.next_row += 1;
+            if let Some(window) = self.window.as_ref().filter(|window| self.window_row < window.rows) {
+                let row = ArrowRow { window: Arc::clone(window), row: self.window_row };
+                self.window_row += 1;
                 return Some(row);
             }
-            match self.batches.next()? {
-                Ok(batch) => self.enter(&batch),
-                Err(err) => {
-                    self.failure.record(format!("Failed to read the next Arrow batch: {err}"));
-                    return None;
-                }
+            if self.done || !self.open_window() {
+                return None;
             }
         }
     }
@@ -274,16 +415,15 @@ pub fn load(
     };
     run(stmt, settings, &shape, |destination, resolved| {
         let plans = build_plans(&schema, destination, resolved).map_err(BulkFailure::Unsupported)?;
-        let failure = SourceFailure::default();
-        let iter = ArrowRows {
+        Ok(ArrowRows {
             batches,
             plans: plans.into(),
-            current: None,
-            rows_in_current: 0,
+            batch: None,
             next_row: 0,
-            failure: failure.clone(),
-        };
-        Ok(Rows { iter, failure })
+            window: None,
+            window_row: 0,
+            done: false,
+        })
     })
 }
 
@@ -394,7 +534,7 @@ impl ColumnPlan {
             }
             Kind::DateTime { unit } => {
                 let ticks = timestamp_ticks(array, row, unit)?;
-                let (days, time) = legacy_datetime(ticks)?;
+                let (days, time) = legacy_datetime_parts(ticks).map_err(usage)?;
                 Ok(ColumnValues::DateTime(SqlDateTime { days, time }))
             }
             Kind::SmallDateTime { unit } => {
@@ -469,36 +609,41 @@ fn narrow_int(value: i64, dest: &BulkCopyColumnMetadata) -> TdsResult<ColumnValu
     }
 }
 
-fn pow10(exponent: u32) -> TdsResult<u128> {
-    10u128.checked_pow(exponent).ok_or_else(|| usage("decimal scale overflow".to_string()))
+fn pow10(exponent: u32) -> Result<u128, String> {
+    10u128.checked_pow(exponent).ok_or_else(|| "decimal scale overflow".to_string())
 }
 
-/// A `decimal128` raw value (scaled by `from_scale`) as the destination's
-/// decimal. A value that does not fit the destination's scale or precision is
-/// rejected, never rounded.
-fn decimal_parts(raw: i128, from_scale: u8, dest: &BulkCopyColumnMetadata) -> TdsResult<DecimalParts> {
+/// Sign and magnitude of a `decimal128` raw value (scaled by `from_scale`) in
+/// the destination's scale. A value that does not fit the destination's scale
+/// or precision is rejected, never rounded.
+pub(super) fn decimal_magnitude(raw: i128, from_scale: u8, dest: &BulkCopyColumnMetadata) -> Result<(bool, u128), String> {
     let magnitude = raw.unsigned_abs();
     let scaled = if dest.scale >= from_scale {
         magnitude
             .checked_mul(pow10(u32::from(dest.scale - from_scale))?)
-            .ok_or_else(|| usage(format!("Decimal value out of range for column '{}'", dest.column_name)))?
+            .ok_or_else(|| format!("Decimal value out of range for column '{}'", dest.column_name))?
     } else {
         let divisor = pow10(u32::from(from_scale - dest.scale))?;
         if magnitude % divisor != 0 {
-            return Err(usage(format!(
+            return Err(format!(
                 "Input decimal scale {from_scale} exceeds target scale {} of column '{}'",
                 dest.scale, dest.column_name
-            )));
+            ));
         }
         magnitude / divisor
     };
     if scaled >= pow10(u32::from(dest.precision))? {
-        return Err(usage(format!(
+        return Err(format!(
             "Decimal value exceeds target precision {} of column '{}'",
             dest.precision, dest.column_name
-        )));
+        ));
     }
-    Ok(DecimalParts::new(raw >= 0, dest.precision, dest.scale, scaled))
+    Ok((raw >= 0, scaled))
+}
+
+fn decimal_parts(raw: i128, from_scale: u8, dest: &BulkCopyColumnMetadata) -> TdsResult<DecimalParts> {
+    let (positive, magnitude) = decimal_magnitude(raw, from_scale, dest).map_err(usage)?;
+    Ok(DecimalParts::new(positive, dest.precision, dest.scale, magnitude))
 }
 
 /// `raw` at `from_scale` as an integer at `to_scale`, half away from zero when
@@ -508,12 +653,12 @@ fn rescale_rounding(raw: i128, from_scale: u8, to_scale: u8) -> TdsResult<i128> 
     match from_scale.cmp(&to_scale) {
         Ordering::Equal => Ok(raw),
         Ordering::Less => {
-            let factor = i128::try_from(pow10(u32::from(to_scale - from_scale))?)
+            let factor = i128::try_from(pow10(u32::from(to_scale - from_scale)).map_err(usage)?)
                 .map_err(|_| usage("money value overflow".to_string()))?;
             raw.checked_mul(factor).ok_or_else(|| usage("money value overflow".to_string()))
         }
         Ordering::Greater => {
-            let divisor = i128::try_from(pow10(u32::from(from_scale - to_scale))?)
+            let divisor = i128::try_from(pow10(u32::from(from_scale - to_scale)).map_err(usage)?)
                 .map_err(|_| usage("decimal scale overflow".to_string()))?;
             let half = divisor / 2;
             Ok(if raw >= 0 { (raw + half) / divisor } else { (raw - half) / divisor })
@@ -570,7 +715,7 @@ fn datetime2(ticks_since_epoch: i64, scale: u8) -> TdsResult<SqlDateTime2> {
 
 /// Legacy `datetime`: (days since 1900-01-01, 1/300 s ticks), rounded to the
 /// nearest tick like SqlClient.
-fn legacy_datetime(ticks_since_epoch: i64) -> TdsResult<(i32, u32)> {
+pub(super) fn legacy_datetime_parts(ticks_since_epoch: i64) -> Result<(i32, u32), String> {
     let days = ticks_since_epoch.div_euclid(TICKS_PER_DAY) + DAYS_1900_TO_EPOCH;
     let micros = ticks_since_epoch.rem_euclid(TICKS_PER_DAY) as u64 / 10;
     let mut ticks = (micros * 300 + 500_000) / 1_000_000;
@@ -580,9 +725,9 @@ fn legacy_datetime(ticks_since_epoch: i64) -> TdsResult<(i32, u32)> {
         days += 1;
     }
     if !(-53_690..=2_958_463).contains(&days) {
-        return Err(usage(format!(
+        return Err(format!(
             "Timestamp out of DATETIME range (days since 1900 = {days}); valid 1753-01-01 to 9999-12-31"
-        )));
+        ));
     }
     Ok((days as i32, ticks as u32))
 }
@@ -644,13 +789,13 @@ mod tests {
     fn datetime_rounds_to_third_of_a_second_ticks() {
         // 1900-01-01 00:00:00.123 = 37 ticks (36.9 rounded).
         let ticks = -DAYS_1900_TO_EPOCH * TICKS_PER_DAY + 1_230_000;
-        assert_eq!(legacy_datetime(ticks).unwrap(), (0, 37));
+        assert_eq!(legacy_datetime_parts(ticks).unwrap(), (0, 37));
     }
 
     #[test]
     fn datetime_rounding_carries_into_the_next_day() {
         let ticks = -DAYS_1900_TO_EPOCH * TICKS_PER_DAY + TICKS_PER_DAY - 1;
-        assert_eq!(legacy_datetime(ticks).unwrap(), (1, 0));
+        assert_eq!(legacy_datetime_parts(ticks).unwrap(), (1, 0));
     }
 
     #[test]

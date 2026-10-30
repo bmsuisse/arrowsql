@@ -17,9 +17,10 @@
 
 mod arrow_encode;
 mod arrow_source;
+mod arrow_wire;
 mod settings;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use mssql_tds::connection::bulk_copy::{BulkCopy, BulkCopyResult, BulkLoadRow, ColumnMapping};
@@ -51,8 +52,6 @@ enum BulkFailure {
     /// Rejected before anything was sent; the caller may use another engine.
     Unsupported(String),
     Tds(TdsError),
-    /// The source failed while being read (for example a broken Arrow stream).
-    Source(String),
     /// The connection could not be taken (closed, freed handle).
     Connection(String),
 }
@@ -61,7 +60,7 @@ impl From<BulkFailure> for PyErr {
     fn from(failure: BulkFailure) -> PyErr {
         match failure {
             BulkFailure::Unsupported(message) => BulkUnsupported::new_err(message),
-            BulkFailure::Source(message) | BulkFailure::Connection(message) => PyRuntimeError::new_err(message),
+            BulkFailure::Connection(message) => PyRuntimeError::new_err(message),
             BulkFailure::Tds(err) => tds_error_to_py(err),
         }
     }
@@ -91,30 +90,6 @@ fn tds_error_to_py(err: TdsError) -> PyErr {
         }
         other => PyRuntimeError::new_err(other.to_string()),
     }
-}
-
-/// A source failure recorded by a row iterator, which cannot return `Result`.
-/// The load stops at the failure; the caller turns it into an error rather
-/// than report a silently truncated success.
-#[derive(Clone, Default)]
-pub struct SourceFailure(Arc<Mutex<Option<String>>>);
-
-impl SourceFailure {
-    pub fn record(&self, message: String) {
-        if let Ok(mut slot) = self.0.lock() {
-            slot.get_or_insert(message);
-        }
-    }
-
-    fn take(&self) -> Option<String> {
-        self.0.lock().ok().and_then(|mut slot| slot.take())
-    }
-}
-
-/// A source's rows plus where its read failures end up.
-pub struct Rows<I> {
-    pub iter: I,
-    pub failure: SourceFailure,
 }
 
 /// What a finished load reports to Python.
@@ -153,7 +128,7 @@ fn with_wire(
     let mut outcome = None;
     let code = with_exclusive_wire(stmt, |ex| {
         let result = load(ex.client);
-        if matches!(result, Err(BulkFailure::Tds(_) | BulkFailure::Source(_))) {
+        if matches!(result, Err(BulkFailure::Tds(_))) {
             recover(ex.client);
         }
         let ok = result.is_ok();
@@ -177,7 +152,7 @@ fn run<I, R>(
     stmt: &Arc<StmtShared>,
     settings: &BulkSettings,
     shape: &SourceShape,
-    plan: impl FnOnce(&[BulkCopyColumnMetadata], &[Resolved]) -> Result<Rows<I>, BulkFailure>,
+    plan: impl FnOnce(&[BulkCopyColumnMetadata], &[Resolved]) -> Result<I, BulkFailure>,
 ) -> Result<Outcome, BulkFailure>
 where
     I: Iterator<Item = R>,
@@ -196,17 +171,14 @@ where
                 .use_internal_transaction(settings.use_internal_transaction);
             let destination = bulk.retrieve_destination_metadata().await.map_err(BulkFailure::Tds)?;
             let resolved = settings::resolve(settings, shape, &destination).map_err(BulkFailure::Unsupported)?;
-            let Rows { iter, failure } = plan(&destination, &resolved)?;
+            let rows = plan(&destination, &resolved)?;
             for mapping in &resolved {
                 bulk = bulk.add_column_mapping(ColumnMapping::by_ordinal(
                     mapping.source,
                     mapping.destination_name.clone(),
                 ));
             }
-            let result = bulk.write_to_server_zerocopy(iter).await.map_err(BulkFailure::Tds)?;
-            if let Some(message) = failure.take() {
-                return Err(BulkFailure::Source(message));
-            }
+            let result = bulk.write_to_server_zerocopy(rows).await.map_err(BulkFailure::Tds)?;
             Ok(Outcome { result, batch_size: settings.batch_size })
         })
     })
