@@ -12,6 +12,7 @@ export (server-side file export; bcp only).
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,6 +58,11 @@ SPECS: dict[str, Spec] = {s.name: s for s in [
 
 
 def python_for(spec: Spec, main: Path) -> Path:
+    # RUST_PORT_VENV points the rust_port driver at a worktree's own venv; without it
+    # the driver runs the main checkout's build.
+    override = os.environ.get("RUST_PORT_VENV") if spec.name == "rust_port" else None
+    if override:
+        return Path(override) / "bin" / "python"
     return main / (spec.venv or ".venv-upstream") / "bin" / "python"
 
 
