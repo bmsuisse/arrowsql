@@ -15,6 +15,7 @@ from ..exceptions import (
     ProgrammingError,
     Warning,
 )
+from .._server_sqlstate import sqlstate_for_server_error
 from ..logging import logger
 
 _EXCEPTION_TYPES = {
@@ -77,6 +78,15 @@ def _classify_database_error(error: Exception, default_type: type[DatabaseError]
     return default_type
 
 
+def _server_error_identity(error: Exception):
+    """(sqlstate, native_error) of the first server error py-core reported, if any."""
+    for item in getattr(error, "sql_errors", ()):
+        if isinstance(item, dict) and isinstance(item.get("number"), int):
+            number = item["number"]
+            return sqlstate_for_server_error(number, item.get("class")), number
+    return None, None
+
+
 def translate_py_core_exception(error: Exception) -> Exception:
     """Translate py-core and recognized built-in errors to public exceptions."""
     for error_type in type(error).__mro__:
@@ -93,7 +103,8 @@ def translate_py_core_exception(error: Exception) -> Exception:
             error_type.__name__,
             public_type.__name__,
         )
-        translated = public_type(_ASYNC_DRIVER_ERROR, str(error))
+        sqlstate, native_error = _server_error_identity(error)
+        translated = public_type(_ASYNC_DRIVER_ERROR, str(error), sqlstate, native_error)
         for attribute in ("sql_errors", "info_messages"):
             if hasattr(error, attribute):
                 setattr(translated, attribute, getattr(error, attribute))

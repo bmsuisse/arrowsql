@@ -10,3 +10,4 @@ __pycache__/
 .worktrees/
 .codegraph/
 reviews/*.log
+.overlay-upstream/

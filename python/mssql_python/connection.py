@@ -209,19 +209,23 @@ _GETINFO_RETURN_TYPES = MappingProxyType(
 # Note: "utf-16" with BOM is NOT included as it's problematic for SQL_WCHAR
 UTF16_ENCODINGS: frozenset[str] = frozenset(["utf-16le", "utf-16be"])
 
-_SQLSTATE_RE = re.compile(r"^SQLSTATE:([A-Z0-9]{0,5}):(.*)", re.DOTALL)
+# Optional "NATIVE:<n>:" carries the SQL Server error number (bindings that have it).
+_SQLSTATE_RE = re.compile(r"^SQLSTATE:([A-Z0-9]{0,5}):(?:NATIVE:(-?\d+):)?(.*)", re.DOTALL)
 
 
 def _raise_connection_error(e: RuntimeError) -> None:
     """Map a RuntimeError from the C++ pybind layer to the correct DB-API 2.0 exception.
 
-    Connection::checkError() throws "SQLSTATE:XXXXX:<odbc_message>" so the SQLSTATE
-    can be mapped via sqlstate_to_exception(), consistent with cursor-level error handling.
+    Connection::checkError() throws "SQLSTATE:XXXXX:<odbc_message>" (optionally
+    "SQLSTATE:XXXXX:NATIVE:<number>:<odbc_message>") so the SQLSTATE can be mapped via
+    sqlstate_to_exception(), consistent with cursor-level error handling.
     """
     error_msg = str(e)
     match = _SQLSTATE_RE.match(error_msg)
     if match:
-        sqlstate, ddbc_error = match.group(1), match.group(2)
+        sqlstate, ddbc_error = match.group(1), match.group(3)
+        native_error = int(match.group(2)) if match.group(2) else None
+        native_error = native_error or None  # 0: driver-generated, not a server error
         # Handle malformed SQLSTATE prefix (empty or invalid code)
         if not sqlstate or len(sqlstate) != 5:
             logger.error("Connection error (malformed SQLSTATE): %s", ddbc_error)
@@ -229,12 +233,14 @@ def _raise_connection_error(e: RuntimeError) -> None:
                 driver_error="Connection operation failed",
                 ddbc_error=ddbc_error,
             ) from None
-        exc = sqlstate_to_exception(sqlstate, ddbc_error)
+        exc = sqlstate_to_exception(sqlstate, ddbc_error, native_error)
         if exc is None:
             logger.error("Unknown SQLSTATE %s, raising DatabaseError", sqlstate)
             raise DatabaseError(
                 driver_error=f"An error occurred with SQLSTATE code: {sqlstate}",
                 ddbc_error=ddbc_error,
+                sqlstate=sqlstate,
+                native_error=native_error,
             ) from None
         logger.error("Connection error (SQLSTATE %s): %s", sqlstate, ddbc_error)
         raise exc from None

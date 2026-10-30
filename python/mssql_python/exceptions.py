@@ -39,9 +39,20 @@ class Exception(builtins.Exception):
     Base class for all DB API 2.0 exceptions.
     """
 
-    def __init__(self, driver_error: str, ddbc_error: str) -> None:
+    def __init__(
+        self,
+        driver_error: str,
+        ddbc_error: str,
+        sqlstate: Optional[str] = None,
+        native_error: Optional[int] = None,
+    ) -> None:
         self.driver_error = driver_error
         self.ddbc_error = truncate_error_message(ddbc_error)
+        # Stable, locale-independent identifiers for programmatic handling (#581):
+        # the ODBC SQLSTATE and the SQL Server engine error number. None when the
+        # error was raised by the driver itself rather than reported by the server.
+        self.sqlstate = sqlstate
+        self.native_error = native_error
         if self.ddbc_error:
             # Both driver and DDBC errors are present
             self.message = f"Driver Error: {self.driver_error}; DDBC Error: {self.ddbc_error}"
@@ -55,15 +66,31 @@ class Exception(builtins.Exception):
         # emitting warnings for already-truncated "[Microsoft]..." messages.
         return (
             Exception._unpickle,
-            (self.__class__, self.driver_error, self.ddbc_error, self.message),
+            (
+                self.__class__,
+                self.driver_error,
+                self.ddbc_error,
+                self.message,
+                getattr(self, "sqlstate", None),
+                getattr(self, "native_error", None),
+            ),
         )
 
     @staticmethod
-    def _unpickle(cls, driver_error: str, ddbc_error: str, message: str):
+    def _unpickle(
+        cls,
+        driver_error: str,
+        ddbc_error: str,
+        message: str,
+        sqlstate: Optional[str] = None,
+        native_error: Optional[int] = None,
+    ):
         obj = cls.__new__(cls)
         obj.driver_error = driver_error
         obj.ddbc_error = ddbc_error
         obj.message = message
+        obj.sqlstate = sqlstate
+        obj.native_error = native_error
         builtins.Exception.__init__(obj, message)
         return obj
 
@@ -73,8 +100,14 @@ class Warning(Exception):
     Exception raised for important warnings like data truncations while inserting, etc.
     """
 
-    def __init__(self, driver_error: str, ddbc_error: str) -> None:
-        super().__init__(driver_error, ddbc_error)
+    def __init__(
+        self,
+        driver_error: str,
+        ddbc_error: str,
+        sqlstate: Optional[str] = None,
+        native_error: Optional[int] = None,
+    ) -> None:
+        super().__init__(driver_error, ddbc_error, sqlstate, native_error)
 
 
 class Error(Exception):
@@ -82,8 +115,14 @@ class Error(Exception):
     Base class for errors.
     """
 
-    def __init__(self, driver_error: str, ddbc_error: str) -> None:
-        super().__init__(driver_error, ddbc_error)
+    def __init__(
+        self,
+        driver_error: str,
+        ddbc_error: str,
+        sqlstate: Optional[str] = None,
+        native_error: Optional[int] = None,
+    ) -> None:
+        super().__init__(driver_error, ddbc_error, sqlstate, native_error)
 
 
 class InterfaceError(Error):
@@ -92,8 +131,14 @@ class InterfaceError(Error):
     interface rather than the database itself.
     """
 
-    def __init__(self, driver_error: str, ddbc_error: str) -> None:
-        super().__init__(driver_error, ddbc_error)
+    def __init__(
+        self,
+        driver_error: str,
+        ddbc_error: str,
+        sqlstate: Optional[str] = None,
+        native_error: Optional[int] = None,
+    ) -> None:
+        super().__init__(driver_error, ddbc_error, sqlstate, native_error)
 
 
 class DatabaseError(Error):
@@ -101,8 +146,14 @@ class DatabaseError(Error):
     Exception raised for errors that are related to the database.
     """
 
-    def __init__(self, driver_error: str, ddbc_error: str) -> None:
-        super().__init__(driver_error, ddbc_error)
+    def __init__(
+        self,
+        driver_error: str,
+        ddbc_error: str,
+        sqlstate: Optional[str] = None,
+        native_error: Optional[int] = None,
+    ) -> None:
+        super().__init__(driver_error, ddbc_error, sqlstate, native_error)
 
 
 class DataError(DatabaseError):
@@ -111,8 +162,14 @@ class DataError(DatabaseError):
     processed data like division by zero, numeric value out of range, etc.
     """
 
-    def __init__(self, driver_error: str, ddbc_error: str) -> None:
-        super().__init__(driver_error, ddbc_error)
+    def __init__(
+        self,
+        driver_error: str,
+        ddbc_error: str,
+        sqlstate: Optional[str] = None,
+        native_error: Optional[int] = None,
+    ) -> None:
+        super().__init__(driver_error, ddbc_error, sqlstate, native_error)
 
 
 class OperationalError(DatabaseError):
@@ -121,8 +178,14 @@ class OperationalError(DatabaseError):
     and not necessarily under the control of the programmer.
     """
 
-    def __init__(self, driver_error: str, ddbc_error: str) -> None:
-        super().__init__(driver_error, ddbc_error)
+    def __init__(
+        self,
+        driver_error: str,
+        ddbc_error: str,
+        sqlstate: Optional[str] = None,
+        native_error: Optional[int] = None,
+    ) -> None:
+        super().__init__(driver_error, ddbc_error, sqlstate, native_error)
 
 
 class IntegrityError(DatabaseError):
@@ -131,8 +194,14 @@ class IntegrityError(DatabaseError):
     e.g., a foreign key check fails.
     """
 
-    def __init__(self, driver_error: str, ddbc_error: str) -> None:
-        super().__init__(driver_error, ddbc_error)
+    def __init__(
+        self,
+        driver_error: str,
+        ddbc_error: str,
+        sqlstate: Optional[str] = None,
+        native_error: Optional[int] = None,
+    ) -> None:
+        super().__init__(driver_error, ddbc_error, sqlstate, native_error)
 
 
 class InternalError(DatabaseError):
@@ -141,8 +210,14 @@ class InternalError(DatabaseError):
     e.g., the cursor is not valid anymore, the transaction is out of sync, etc.
     """
 
-    def __init__(self, driver_error: str, ddbc_error: str) -> None:
-        super().__init__(driver_error, ddbc_error)
+    def __init__(
+        self,
+        driver_error: str,
+        ddbc_error: str,
+        sqlstate: Optional[str] = None,
+        native_error: Optional[int] = None,
+    ) -> None:
+        super().__init__(driver_error, ddbc_error, sqlstate, native_error)
 
 
 class ProgrammingError(DatabaseError):
@@ -152,8 +227,14 @@ class ProgrammingError(DatabaseError):
     wrong number of parameters specified, etc.
     """
 
-    def __init__(self, driver_error: str, ddbc_error: str) -> None:
-        super().__init__(driver_error, ddbc_error)
+    def __init__(
+        self,
+        driver_error: str,
+        ddbc_error: str,
+        sqlstate: Optional[str] = None,
+        native_error: Optional[int] = None,
+    ) -> None:
+        super().__init__(driver_error, ddbc_error, sqlstate, native_error)
 
 
 class NotSupportedError(DatabaseError):
@@ -163,12 +244,20 @@ class NotSupportedError(DatabaseError):
     on a connection that does not support transaction or has transactions turned off.
     """
 
-    def __init__(self, driver_error: str, ddbc_error: str) -> None:
-        super().__init__(driver_error, ddbc_error)
+    def __init__(
+        self,
+        driver_error: str,
+        ddbc_error: str,
+        sqlstate: Optional[str] = None,
+        native_error: Optional[int] = None,
+    ) -> None:
+        super().__init__(driver_error, ddbc_error, sqlstate, native_error)
 
 
 # Mapping SQLSTATE codes to custom exception classes
-def sqlstate_to_exception(sqlstate: str, ddbc_error: str) -> Optional[Exception]:
+def sqlstate_to_exception(
+    sqlstate: str, ddbc_error: str, native_error: Optional[int] = None
+) -> Optional[Exception]:
     """
     Map an SQLSTATE code to a custom exception class.
     This function maps an SQLSTATE code to a custom exception class based on the code.
@@ -176,6 +265,8 @@ def sqlstate_to_exception(sqlstate: str, ddbc_error: str) -> Optional[Exception]
     to handle the error.
     Args:
         sqlstate (str): The SQLSTATE code to map to a custom exception class.
+        ddbc_error (str): The DDBC error message.
+        native_error (int, optional): The SQL Server engine error number.
         Returns:
         mapping[str, Exception]: A mapping of SQLSTATE codes to custom exception classes.
     """
@@ -543,7 +634,11 @@ def sqlstate_to_exception(sqlstate: str, ddbc_error: str) -> Optional[Exception]
             driver_error="Corrupt file data source", ddbc_error=ddbc_error
         ),  # Corrupt file data source
     }
-    return mapping.get(sqlstate, None)
+    exc = mapping.get(sqlstate, None)
+    if exc is not None:
+        exc.sqlstate = sqlstate
+        exc.native_error = native_error
+    return exc
 
 
 def truncate_error_message(error_message: str) -> str:
@@ -564,7 +659,7 @@ def truncate_error_message(error_message: str) -> str:
         return error_message
 
 
-def raise_exception(sqlstate: str, ddbc_error: str) -> None:
+def raise_exception(sqlstate: str, ddbc_error: str, native_error: Optional[int] = None) -> None:
     """
     Raise a custom exception based on the given SQLSTATE code.
     This function raises a custom exception based on the provided SQLSTATE code.
@@ -573,11 +668,12 @@ def raise_exception(sqlstate: str, ddbc_error: str) -> None:
     Args:
         sqlstate (str): The SQLSTATE code to map to a custom exception.
         ddbc_error (str): The DDBC error message.
+        native_error (int, optional): The SQL Server engine error number.
 
     Raises:
         DatabaseError: If the SQLSTATE code is not found in the mapping.
     """
-    exception_class = sqlstate_to_exception(sqlstate, ddbc_error)
+    exception_class = sqlstate_to_exception(sqlstate, ddbc_error, native_error)
     if exception_class:
         logger.error(f"Raising exception: {exception_class}")
         raise exception_class
@@ -585,4 +681,6 @@ def raise_exception(sqlstate: str, ddbc_error: str) -> None:
     raise DatabaseError(
         driver_error=f"An error occurred with SQLSTATE code: {sqlstate}",
         ddbc_error=f"{ddbc_error}" if ddbc_error else "Unknown DDBC error",
+        sqlstate=sqlstate or None,
+        native_error=native_error,
     )
