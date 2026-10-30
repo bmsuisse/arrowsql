@@ -310,3 +310,61 @@ _read_small()
 _latency()
 _writes_small()
 _writes_bulk()
+
+
+# ------------------------------------------------- PARALLEL WRITE (rust_port only)
+
+_PAR_TABLE = "dbo.bench_wpar_taxi_3m"
+
+
+def _writes_parallel():
+    """mssql_python.write_arrow: N connections, each one TABLOCK bulk copy into a heap.
+
+    Compare with write.bulk_arrow_3m.heap.tablock (one stream, upstream bulkcopy_arrow)
+    and with the bcp CLI on the same table and data.
+    """
+    n_full, n_quick = 2_964_624, 750_000
+    # Own table: the bench_w_* tables are shared with the single-stream write workloads,
+    # and TABLOCK loads from concurrent runs on the same table block each other.
+
+    def conn_str(d):
+        i = d.info
+        return (f"Server={i.host},{i.port};Database={i.database};Uid={i.user};Pwd={i.password};"
+                "Encrypt=yes;TrustServerCertificate=yes")
+
+    for workers in (1, 2, 4, 8):
+        def setup(d, ctx):
+            t = _PAR_TABLE
+            d.execute(f"IF OBJECT_ID('{t}') IS NOT NULL DROP TABLE {t}")
+            d.execute(taxi_target_ddl(t, "heap"))
+
+        def prepare(d, ctx):
+            if d.name != "rust_port":
+                raise Unsupported("write_arrow is the Rust-port parallel loader")
+            ctx.payload(n_quick if ctx.quick else n_full).arrow()  # parquet read + casts stay untimed
+
+        def run(d, ctx, workers=workers):
+            if d.name != "rust_port":
+                raise Unsupported("write_arrow is the Rust-port parallel loader")
+            from mssql_python import write_arrow
+
+            p = ctx.payload(n_quick if ctx.quick else n_full)
+            result = write_arrow(conn_str(d), _PAR_TABLE, p.arrow(), workers=workers, table_lock=True)
+            return result["rows_copied"]
+
+        def verify(d, ctx, n):
+            got = int(d.scalar(f"SELECT COUNT_BIG(*) FROM {_PAR_TABLE}"))
+            if got != n:
+                raise RuntimeError(f"target has {got} rows, expected {n}")
+
+        def teardown(d, ctx):
+            t = _PAR_TABLE
+            d.execute(f"IF OBJECT_ID('{t}') IS NOT NULL DROP TABLE {t}")
+
+        _add(Workload(f"write.parallel_arrow_3m.w{workers}", "write",
+                      frozenset({"bulk_arrow", "tablock"}), run, dataset="taxi_all", setup=setup,
+                      prepare=prepare, verify=verify, teardown=teardown, repeats=5, quick_repeats=3,
+                      note=f"write_arrow, workers={workers}, batch 0 (one batch per stream), heap TABLOCK"))
+
+
+_writes_parallel()
