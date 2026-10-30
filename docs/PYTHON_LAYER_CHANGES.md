@@ -74,3 +74,12 @@ attributes; pre-#581 pickles (4 reduce args) still load.
   connection_str, query, partition_on=None, partitions=1, batch_size=65536)`
   reads integer-range partitions of a query over separate connections in
   parallel threads and returns one `ArrowTable` (`ArrowTable.concat`).
+
+## Packaging (docs/PACKAGING.md)
+
+- `cursor.py` `_bulkcopy_core_and_validate`: the `mssql_py_core` import failure
+  now names the `async-preview` extra (`RUST-PORT`). The import itself is
+  unchanged.
+- `pyproject.toml`: no required dependencies. `async-preview`, `arrow` and
+  `azure` are optional extras. No Python-layer code changed for them: the
+  imports were already lazy.

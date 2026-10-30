@@ -3518,9 +3518,10 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             mssql_py_core = import_module("mssql_py_core.mssql_py_core")
         except ImportError as exc:
             logger.error("bulkcopy: Failed to import mssql_py_core module")
+            # RUST-PORT: bulkcopy still needs mssql_py_core until it moves into the core.
             raise ImportError(
-                "Bulk copy requires the mssql_py_core library which is not available. "
-                "This is an unexpected error. "
+                "bulkcopy requires the optional 'async-preview' extra, which provides "
+                "mssql_py_core. Install it with: pip install 'mssql-python-rs-port[async-preview]'"
             ) from exc
 
         if not table_name or not isinstance(table_name, str):
