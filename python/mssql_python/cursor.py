@@ -332,6 +332,91 @@ class _ArrowReader:
         self._inner = None
 
 
+# RUST-PORT: ODBC SQL type code -> Python type for cursor.description[i][1].
+# Module-level so the table is built once, not on every layout miss.
+_SQL_TYPE_TO_PYTHON_TYPE = {
+    # String types
+    ddbc_sql_const.SQL_CHAR.value: str,
+    ddbc_sql_const.SQL_VARCHAR.value: str,
+    ddbc_sql_const.SQL_LONGVARCHAR.value: str,
+    ddbc_sql_const.SQL_WCHAR.value: str,
+    ddbc_sql_const.SQL_WVARCHAR.value: str,
+    ddbc_sql_const.SQL_WLONGVARCHAR.value: str,
+    # Integer types
+    ddbc_sql_const.SQL_INTEGER.value: int,
+    ddbc_sql_const.SQL_SMALLINT.value: int,
+    ddbc_sql_const.SQL_TINYINT.value: int,
+    ddbc_sql_const.SQL_BIGINT.value: int,
+    # Floating-point types
+    ddbc_sql_const.SQL_FLOAT.value: float,
+    ddbc_sql_const.SQL_DOUBLE.value: float,
+    ddbc_sql_const.SQL_REAL.value: float,
+    # Exact numeric types
+    ddbc_sql_const.SQL_DECIMAL.value: decimal.Decimal,
+    ddbc_sql_const.SQL_NUMERIC.value: decimal.Decimal,
+    # Date/time types: values the ODBC 18 driver actually reports
+    ddbc_sql_const.SQL_TYPE_DATE.value: datetime.date,  # 91 - date
+    ddbc_sql_const.SQL_TYPE_TIME.value: datetime.time,  # 92 - time (ODBC 3.x)
+    ddbc_sql_const.SQL_TYPE_TIMESTAMP.value: datetime.datetime,  # 93 - datetime/datetime2/smalldatetime
+    ddbc_sql_const.SQL_SS_TIME2.value: datetime.time,  # -154 - time
+    ddbc_sql_const.SQL_DATETIMEOFFSET.value: datetime.datetime,  # -155 - datetimeoffset
+    # ODBC 2.x date/time aliases (defensive, in case any driver reports these)
+    ddbc_sql_const.SQL_DATE.value: datetime.date,  # 9
+    ddbc_sql_const.SQL_TIME.value: datetime.time,  # 10
+    ddbc_sql_const.SQL_TIMESTAMP.value: datetime.datetime,  # 11
+    # Boolean
+    ddbc_sql_const.SQL_BIT.value: bool,
+    # Binary types
+    ddbc_sql_const.SQL_BINARY.value: bytes,
+    ddbc_sql_const.SQL_VARBINARY.value: bytes,
+    ddbc_sql_const.SQL_LONGVARBINARY.value: bytes,
+    ddbc_sql_const.SQL_SS_UDT.value: bytes,
+    # UUID
+    ddbc_sql_const.SQL_GUID.value: uuid.UUID,
+    # XML: driver reports SQL_SS_XML (-152), fetched as str
+    ddbc_sql_const.SQL_SS_XML.value: str,
+}
+
+
+# RUST-PORT: plain ints for the status checks on every execute and fetch.
+# `ddbc_sql_const.X.value` goes through enum's Python-level descriptor on each access.
+_SQL_HANDLE_STMT = ddbc_sql_const.SQL_HANDLE_STMT.value
+_SQL_SUCCESS_WITH_INFO = ddbc_sql_const.SQL_SUCCESS_WITH_INFO.value
+_SQL_NO_DATA = ddbc_sql_const.SQL_NO_DATA.value
+
+
+class _ResultLayout:  # pylint: disable=too-few-public-methods
+    """
+    RUST-PORT: metadata derived from one result-set layout.
+
+    Reused by every execute that returns the same column metadata with the same
+    lowercase setting, so repeated point lookups skip rebuilding description and
+    the column maps. converter_map is refreshed when the connection's converter
+    generation changes.
+    """
+
+    __slots__ = (
+        "lowercase",
+        "metadata",
+        "description",
+        "sql_types",
+        "column_map",
+        "column_map_lower",
+        "converter_generation",
+        "converter_map",
+    )
+
+    def __init__(self, lowercase, metadata, description, sql_types, column_map, column_map_lower):
+        self.lowercase = lowercase
+        self.metadata = metadata
+        self.description = description
+        self.sql_types = sql_types
+        self.column_map = column_map
+        self.column_map_lower = column_map_lower
+        self.converter_generation = None
+        self.converter_map = None
+
+
 class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-methods
     """
     Represents a database cursor, which is used to manage the context of a fetch operation.
@@ -440,6 +525,8 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         # self.description. Kept so output-converter dispatch can key on the integer
         # ODBC SQL type code (pyodbc-compatible), not just the mapped Python type. See #684.
         self._column_sql_types = None
+        # RUST-PORT: layout cache for the last result set (see _initialize_description).
+        self._layout = None
         self._uuid_str_indices = None  # Pre-computed UUID column indices for str conversion
         # Cache the effective native_uuid setting for this cursor's connection.
         # Resolution order: connection._native_uuid (if not None) → module-level setting.
@@ -1079,7 +1166,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         if self.hstmt:
             ret = ddbc_bindings.DDBCSQLResetStmt(self.hstmt)
             try:
-                check_error(ddbc_sql_const.SQL_HANDLE_STMT.value, self.hstmt, ret)
+                check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
             except Exception:
                 logger.warning("_soft_reset_cursor failed; falling back to full reset")
                 self._reset_cursor()
@@ -1152,10 +1239,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         Composite native fetches capture intermediate diagnostics directly
         into self.messages before subsequent ODBC calls can replace them.
         """
-        if self.hstmt and ret in (
-            ddbc_sql_const.SQL_SUCCESS_WITH_INFO.value,
-            ddbc_sql_const.SQL_NO_DATA.value,
-        ):
+        if self.hstmt and ret in (_SQL_SUCCESS_WITH_INFO, _SQL_NO_DATA):
             self.messages.extend(ddbc_bindings.DDBCSQLGetAllDiagRecords(self.hstmt))
 
     def _ensure_pyarrow(self) -> Any:
@@ -1377,24 +1461,38 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         return paraminfo
 
     def _initialize_description(self, column_metadata: Optional[Any] = None) -> None:
-        """Initialize the description attribute from column metadata."""
+        """
+        Initialize the description attribute from column metadata.
+
+        RUST-PORT: the description, SQL type codes and column maps are cached per
+        layout. When the metadata and the lowercase setting match the previous
+        result, the cached objects are reused instead of being rebuilt.
+        """
         if not column_metadata:
             self.description = None
             self._column_sql_types = None
+            self._layout = None
             return
 
+        lowercase = bool(get_settings().lowercase)
+        layout = self._layout
+        if layout is None or layout.lowercase != lowercase or layout.metadata != column_metadata:
+            layout = self._build_result_layout(list(column_metadata), lowercase)
+            self._layout = layout
+        self.description = layout.description
+        self._column_sql_types = layout.sql_types
+
+    def _build_result_layout(self, column_metadata: list, lowercase: bool) -> "_ResultLayout":
+        """RUST-PORT: build the description and maps for one result-set layout."""
         description = []
         # Raw ODBC SQL type codes, parallel to description, for output-converter
         # dispatch by integer SQL type (see _build_converter_map / #684).
         sql_type_codes = []
-        for _, col in enumerate(column_metadata):
-            # Get column name - lowercase it if the lowercase flag is set
+        for col in column_metadata:
             column_name = col["ColumnName"]
-
-            # Use the current global setting to ensure tests pass correctly
-            if get_settings().lowercase:
+            # Lowercase column names when the global flag is set
+            if lowercase:
                 column_name = column_name.lower()
-
             sql_type_codes.append(col["DataType"])
             # Add to description tuple (7 elements as per PEP-249)
             description.append(
@@ -1408,8 +1506,11 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                     col["Nullable"] == ddbc_sql_const.SQL_NULLABLE.value,  # null_ok
                 )
             )
-        self.description = description
-        self._column_sql_types = sql_type_codes
+        column_map = {col_desc[0]: i for i, col_desc in enumerate(description)}
+        column_map_lower = {k.lower(): v for k, v in column_map.items()} if lowercase else None
+        return _ResultLayout(
+            lowercase, column_metadata, description, sql_type_codes, column_map, column_map_lower
+        )
 
     def _build_converter_map(self):
         """
@@ -1549,49 +1650,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         Returns:
             Corresponding Python data type.
         """
-        sql_to_python_type = {
-            # String types
-            ddbc_sql_const.SQL_CHAR.value: str,
-            ddbc_sql_const.SQL_VARCHAR.value: str,
-            ddbc_sql_const.SQL_LONGVARCHAR.value: str,
-            ddbc_sql_const.SQL_WCHAR.value: str,
-            ddbc_sql_const.SQL_WVARCHAR.value: str,
-            ddbc_sql_const.SQL_WLONGVARCHAR.value: str,
-            # Integer types
-            ddbc_sql_const.SQL_INTEGER.value: int,
-            ddbc_sql_const.SQL_SMALLINT.value: int,
-            ddbc_sql_const.SQL_TINYINT.value: int,
-            ddbc_sql_const.SQL_BIGINT.value: int,
-            # Floating-point types
-            ddbc_sql_const.SQL_FLOAT.value: float,
-            ddbc_sql_const.SQL_DOUBLE.value: float,
-            ddbc_sql_const.SQL_REAL.value: float,
-            # Exact numeric types
-            ddbc_sql_const.SQL_DECIMAL.value: decimal.Decimal,
-            ddbc_sql_const.SQL_NUMERIC.value: decimal.Decimal,
-            # Date/time types — values the ODBC 18 driver actually reports
-            ddbc_sql_const.SQL_TYPE_DATE.value: datetime.date,  # 91 — date
-            ddbc_sql_const.SQL_TYPE_TIME.value: datetime.time,  # 92 — time (ODBC 3.x)
-            ddbc_sql_const.SQL_TYPE_TIMESTAMP.value: datetime.datetime,  # 93 — datetime/datetime2/smalldatetime
-            ddbc_sql_const.SQL_SS_TIME2.value: datetime.time,  # -154 — time
-            ddbc_sql_const.SQL_DATETIMEOFFSET.value: datetime.datetime,  # -155 — datetimeoffset
-            # ODBC 2.x date/time aliases (defensive, in case any driver reports these)
-            ddbc_sql_const.SQL_DATE.value: datetime.date,  # 9
-            ddbc_sql_const.SQL_TIME.value: datetime.time,  # 10
-            ddbc_sql_const.SQL_TIMESTAMP.value: datetime.datetime,  # 11
-            # Boolean
-            ddbc_sql_const.SQL_BIT.value: bool,
-            # Binary types
-            ddbc_sql_const.SQL_BINARY.value: bytes,
-            ddbc_sql_const.SQL_VARBINARY.value: bytes,
-            ddbc_sql_const.SQL_LONGVARBINARY.value: bytes,
-            ddbc_sql_const.SQL_SS_UDT.value: bytes,
-            # UUID
-            ddbc_sql_const.SQL_GUID.value: uuid.UUID,
-            # XML — driver reports SQL_SS_XML (-152), fetched as str
-            ddbc_sql_const.SQL_SS_XML.value: str,
-        }
-        return sql_to_python_type.get(sql_type, str)
+        return _SQL_TYPE_TO_PYTHON_TYPE.get(sql_type, str)
 
     @property
     def rownumber(self) -> int:
@@ -1834,9 +1893,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             else:
                 parameters = []
 
-        # Getting encoding setting
-        encoding_settings = self._get_encoding_settings()
-
         # Validate that inputsizes matches parameter count if both are present
         if parameters and self._inputsizes:
             if len(self._inputsizes) != len(parameters):
@@ -1858,6 +1914,8 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
 
         with perf_phase("py::execute::cpp_call"):
             if parameters:
+                # Only the parameterized call takes encoding settings.
+                encoding_settings = self._get_encoding_settings()
                 ret = ddbc_bindings.DDBCSQLExecute(
                     self.hstmt,
                     operation,
@@ -1873,7 +1931,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         try:
 
             # Check for errors but don't raise exceptions for info/warning messages
-            check_error(ddbc_sql_const.SQL_HANDLE_STMT.value, self.hstmt, ret)
+            check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning("Execute failed, resetting cursor: %s", e)
             self._reset_cursor()
@@ -1886,10 +1944,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         self.last_executed_stmt = operation
 
         with perf_phase("py::execute::post_execute"):
-            # Update rowcount after execution
-            # TODO: rowcount return code from SQL needs to be handled
-            self.rowcount = ddbc_bindings.DDBCSQLRowCount(self.hstmt)
-
             # Initialize description after execution
             # After successful execution, initialize description if there are results
             column_metadata = []
@@ -1905,18 +1959,21 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         if self.description:  # If we have column descriptions, it's likely a SELECT
             self.rowcount = -1
             self._reset_rownumber()
-            # Pre-build column map and converter map
-            self._cached_column_map = {
-                col_desc[0]: i for i, col_desc in enumerate(self.description)
-            }
-            self._cached_column_map_lower = (
-                {k.lower(): v for k, v in self._cached_column_map.items()}
-                if get_settings().lowercase
-                else None
-            )
-            self._cached_converter_map = self._build_converter_map()
+            # RUST-PORT: column maps come from the layout cache, which
+            # _initialize_description just set for this result. The converter map
+            # is rebuilt only when the connection's converter generation changes.
+            layout = self._layout
+            self._cached_column_map = layout.column_map
+            self._cached_column_map_lower = layout.column_map_lower
+            generation = self._connection._converters_generation
+            if layout.converter_generation != generation:
+                layout.converter_map = self._build_converter_map()
+                layout.converter_generation = generation
+            self._cached_converter_map = layout.converter_map
+            self._cached_converters_generation = generation
             self._uuid_str_indices = self._compute_uuid_str_indices()
         else:
+            # TODO: rowcount return code from SQL needs to be handled
             self.rowcount = ddbc_bindings.DDBCSQLRowCount(self.hstmt)
             self._clear_rownumber()
             self._cached_column_map = None
@@ -2859,9 +2916,9 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                     self.messages,
                 )
 
-            check_error(ddbc_sql_const.SQL_HANDLE_STMT.value, self.hstmt, ret)
+            check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
 
-            if ret == ddbc_sql_const.SQL_NO_DATA.value:
+            if ret == _SQL_NO_DATA:
                 # No more data available
                 if self._next_row_index == 0 and self.description is not None:
                     self.rowcount = 0
@@ -3010,7 +3067,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 )
 
             # Check for errors
-            check_error(ddbc_sql_const.SQL_HANDLE_STMT.value, self.hstmt, ret)
+            check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
 
             # Update rownumber for the number of rows actually fetched
             if rows_data and self._has_result_set:
