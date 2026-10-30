@@ -314,6 +314,9 @@ _writes_bulk()
 
 # ------------------------------------------------- PARALLEL WRITE (rust_port only)
 
+_PAR_TABLE = "dbo.bench_wpar_taxi_3m"
+
+
 def _writes_parallel():
     """mssql_python.write_arrow: N connections, each one TABLOCK bulk copy into a heap.
 
@@ -321,6 +324,8 @@ def _writes_parallel():
     and with the bcp CLI on the same table and data.
     """
     n_full, n_quick = 2_964_624, 750_000
+    # Own table: the bench_w_* tables are shared with the single-stream write workloads,
+    # and TABLOCK loads from concurrent runs on the same table block each other.
 
     def conn_str(d):
         i = d.info
@@ -329,7 +334,7 @@ def _writes_parallel():
 
     for workers in (1, 2, 4, 8):
         def setup(d, ctx):
-            t = ctx.table(d)
+            t = _PAR_TABLE
             d.execute(f"IF OBJECT_ID('{t}') IS NOT NULL DROP TABLE {t}")
             d.execute(taxi_target_ddl(t, "heap"))
 
@@ -344,16 +349,16 @@ def _writes_parallel():
             from mssql_python import write_arrow
 
             p = ctx.payload(n_quick if ctx.quick else n_full)
-            result = write_arrow(conn_str(d), ctx.table(d), p.arrow(), workers=workers, table_lock=True)
+            result = write_arrow(conn_str(d), _PAR_TABLE, p.arrow(), workers=workers, table_lock=True)
             return result["rows_copied"]
 
         def verify(d, ctx, n):
-            got = int(d.scalar(f"SELECT COUNT_BIG(*) FROM {ctx.table(d)}"))
+            got = int(d.scalar(f"SELECT COUNT_BIG(*) FROM {_PAR_TABLE}"))
             if got != n:
                 raise RuntimeError(f"target has {got} rows, expected {n}")
 
         def teardown(d, ctx):
-            t = ctx.table(d)
+            t = _PAR_TABLE
             d.execute(f"IF OBJECT_ID('{t}') IS NOT NULL DROP TABLE {t}")
 
         _add(Workload(f"write.parallel_arrow_3m.w{workers}", "write",
