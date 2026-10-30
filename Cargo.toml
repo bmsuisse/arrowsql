@@ -1,0 +1,36 @@
+[package]
+name = "ddbc_bindings"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Rust (PyO3 + mssql-tds) replacement for mssql-python's ODBC-based ddbc_bindings"
+publish = false
+
+[lib]
+name = "ddbc_bindings"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.29.0", features = ["extension-module", "chrono"] }
+# Microsoft's native TDS implementation (MIT). Pinned: the API is pre-1.0.
+mssql-tds = { git = "https://github.com/microsoft/mssql-rs", rev = "6b6b48ecbbbdad297039d1641e2be4775eed998b", default-features = false, features = ["gssapi"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros"] }
+parking_lot = "0.12"
+once_cell = "1"
+chrono = "0.4"
+uuid = "1"
+bigdecimal = "0.4"
+thiserror = "2"
+mimalloc = { version = "0.1", default-features = false }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"

@@ -1,0 +1,11 @@
+maturin>=1.9,<2.0
+pytest
+pytest-timeout
+pytest-asyncio
+psutil
+pyarrow==25.0.1
+polars
+pandas
+azure-identity
+zstandard
+mssql-python-rs==0.3.0

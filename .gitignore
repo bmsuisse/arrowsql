@@ -1,0 +1,11 @@
+.venv/
+.venv-upstream/
+.env.local
+data/
+target/
+*.so
+__pycache__/
+*.xml
+*.log
+.worktrees/
+.codegraph/

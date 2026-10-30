@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "mssql-python-rs-port"
+version = "0.1.0"
+description = "mssql-python with its ODBC/C++ core replaced by Rust (PyO3 + mssql-tds)"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    # bulkcopy() and the async_query package still use Microsoft's mssql_py_core.
+    "mssql-python-rs==0.3.0",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "mssql_python.ddbc_bindings"
+features = ["pyo3/extension-module"]

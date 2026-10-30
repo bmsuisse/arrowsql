@@ -1,0 +1,481 @@
+"""
+Copyright (c) Microsoft Corporation.
+Licensed under the MIT license.
+Type stubs for mssql_python package - based on actual public API
+"""
+
+from typing import (
+    Any,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Union,
+    Tuple,
+    Sequence,
+    Callable,
+    Iterator,
+    Iterable,
+)
+import datetime
+import logging
+import pyarrow
+
+# GLOBALS - DB-API 2.0 Required Module Globals
+# https://www.python.org/dev/peps/pep-0249/#module-interface
+apilevel: str  # "2.0"
+paramstyle: str  # "qmark"
+threadsafety: int  # 1
+
+# Module Settings - Properties that can be get/set at module level
+lowercase: bool  # Controls column name case behavior
+native_uuid: bool  # Controls UUID type handling
+native_provider: Optional[str]  # Selects the native ODBC provider ('msodbcsql18' or 'mssql-odbc')
+
+# Settings Class
+class Settings:
+    lowercase: bool
+    decimal_separator: str
+    native_uuid: bool
+    def __init__(self) -> None: ...
+
+# Module-level Configuration Functions
+def get_settings() -> Settings: ...
+def setDecimalSeparator(separator: str) -> None: ...
+def getDecimalSeparator() -> str: ...
+def pooling(max_size: int = 100, idle_timeout: int = 600, enabled: bool = True) -> None: ...
+def get_native_provider_info() -> Dict[str, object]: ...
+def get_info_constants() -> Dict[str, int]: ...
+
+# Logging Functions
+def setup_logging(mode: str = "file", log_level: int = logging.DEBUG) -> None: ...
+def get_logger() -> Optional[logging.Logger]: ...
+
+# DB-API 2.0 Type Objects
+# https://www.python.org/dev/peps/pep-0249/#type-objects
+class STRING:
+    """Type object for string-based database columns (e.g. CHAR, VARCHAR)."""
+
+    ...
+
+class BINARY:
+    """Type object for binary database columns (e.g. BINARY, VARBINARY)."""
+
+    ...
+
+class NUMBER:
+    """Type object for numeric database columns (e.g. INT, DECIMAL)."""
+
+    ...
+
+class DATETIME:
+    """Type object for date/time database columns (e.g. DATE, TIMESTAMP)."""
+
+    ...
+
+class ROWID:
+    """Type object for row identifier columns."""
+
+    ...
+
+# DB-API 2.0 Type Constructors
+# https://www.python.org/dev/peps/pep-0249/#type-constructors
+def Date(year: int, month: int, day: int) -> datetime.date: ...
+def Time(hour: int, minute: int, second: int) -> datetime.time: ...
+def Timestamp(
+    year: int,
+    month: int,
+    day: int,
+    hour: int,
+    minute: int,
+    second: int,
+    microsecond: int = 0,
+) -> datetime.datetime: ...
+def DateFromTicks(ticks: int) -> datetime.date: ...
+def TimeFromTicks(ticks: int) -> datetime.time: ...
+def TimestampFromTicks(ticks: int) -> datetime.datetime: ...
+def Binary(value: Union[str, bytes, bytearray, memoryview]) -> bytes: ...
+
+# DB-API 2.0 Exception Hierarchy
+# https://www.python.org/dev/peps/pep-0249/#exceptions
+class Warning(Exception):
+    def __init__(self, driver_error: str, ddbc_error: str) -> None: ...
+    driver_error: str
+    ddbc_error: str
+    message: str
+
+class Error(Exception):
+    def __init__(self, driver_error: str, ddbc_error: str) -> None: ...
+    driver_error: str
+    ddbc_error: str
+    message: str
+
+class InterfaceError(Error):
+    def __init__(self, driver_error: str, ddbc_error: str) -> None: ...
+
+class DatabaseError(Error):
+    def __init__(self, driver_error: str, ddbc_error: str) -> None: ...
+
+class DataError(DatabaseError):
+    def __init__(self, driver_error: str, ddbc_error: str) -> None: ...
+
+class OperationalError(DatabaseError):
+    def __init__(self, driver_error: str, ddbc_error: str) -> None: ...
+
+class IntegrityError(DatabaseError):
+    def __init__(self, driver_error: str, ddbc_error: str) -> None: ...
+
+class InternalError(DatabaseError):
+    def __init__(self, driver_error: str, ddbc_error: str) -> None: ...
+
+class ProgrammingError(DatabaseError):
+    def __init__(self, driver_error: str, ddbc_error: str) -> None: ...
+
+class NotSupportedError(DatabaseError):
+    def __init__(self, driver_error: str, ddbc_error: str) -> None: ...
+
+# Row Object
+class Row:
+    """
+    Represents a database result row.
+
+    Supports both index-based and name-based column access.
+    """
+
+    def __init__(
+        self,
+        values: List[Any],
+        column_map: Dict[str, int],
+        cursor: Optional["Cursor"] = None,
+        converter_map: Optional[List[Any]] = None,
+        uuid_str_indices: Optional[Tuple[int, ...]] = None,
+        column_map_lower: Optional[Dict[str, int]] = None,
+        column_names: Optional[Tuple[str, ...]] = None,
+    ) -> None: ...
+    @property
+    def _mapping(self) -> "RowMapping": ...
+    def __getitem__(self, index: int) -> Any: ...
+    def __getattr__(self, name: str) -> Any: ...
+    def __eq__(self, other: Any) -> bool: ...
+    def __len__(self) -> int: ...
+    def __iter__(self) -> Iterator[Any]: ...
+    def __str__(self) -> str: ...
+    def __repr__(self) -> str: ...
+
+class RowMapping(Mapping[str, Any]):
+    """Read-only mapping view (column name -> value) over a Row."""
+
+    def __init__(self, row: "Row") -> None: ...
+    def __getitem__(self, key: str) -> Any: ...
+    def __iter__(self) -> Iterator[str]: ...
+    def __len__(self) -> int: ...
+    def __repr__(self) -> str: ...
+
+# DB-API 2.0 Cursor Object
+# https://www.python.org/dev/peps/pep-0249/#cursor-objects
+class Cursor:
+    """
+    Database cursor for executing SQL operations and fetching results.
+
+    This class should not be instantiated directly. Use Connection.cursor() instead.
+    """
+
+    # DB-API 2.0 Required Attributes
+    description: Optional[
+        List[
+            Tuple[
+                str,
+                Any,
+                Optional[int],
+                Optional[int],
+                Optional[int],
+                Optional[int],
+                Optional[bool],
+            ]
+        ]
+    ]
+    rowcount: int
+    arraysize: int
+
+    # Extension Attributes
+    closed: bool
+    messages: List[str]
+
+    @property
+    def rownumber(self) -> int: ...
+    @property
+    def connection(self) -> "Connection": ...
+    def __init__(self, connection: "Connection", timeout: int = 0) -> None: ...
+
+    # DB-API 2.0 Required Methods
+    def callproc(
+        self, procname: str, parameters: Optional[Sequence[Any]] = None
+    ) -> Optional[Sequence[Any]]: ...
+    def close(self) -> None: ...
+    def execute(
+        self,
+        operation: str,
+        *parameters: Any,
+        use_prepare: bool = True,
+        reset_cursor: bool = True,
+    ) -> "Cursor": ...
+    def executemany(
+        self,
+        operation: str,
+        seq_of_parameters: Union[Sequence[Sequence[Any]], Sequence[Mapping[str, Any]]],
+    ) -> None: ...
+    def fetchone(self) -> Optional[Row]: ...
+    def fetchmany(self, size: Optional[int] = None) -> List[Row]: ...
+    def fetchall(self) -> List[Row]: ...
+    def nextset(self) -> Optional[bool]: ...
+    def setinputsizes(self, sizes: List[Union[int, Tuple[Any, ...]]]) -> None: ...
+    def setoutputsize(self, size: int, column: Optional[int] = None) -> None: ...
+
+    # Arrow Extension Methods (requires pyarrow)
+    def arrow_batch(self, batch_size: int = 8192) -> pyarrow.RecordBatch: ...
+    def arrow(self, batch_size: int = 8192) -> pyarrow.Table: ...
+    def arrow_reader(self, batch_size: int = 8192) -> "_ArrowReader": ...
+
+# pyarrow.RecordBatchReader-compatible wrapper returned by Cursor.arrow_reader.
+# Not part of the DB-API 2.0 surface and not intended to be instantiated
+# directly by users; declared here so the return type of arrow_reader is
+# accurate for static type checkers.  Attributes not listed here (e.g.
+# ``read_all``, ``read_pandas``, ``cast``) are delegated at runtime to the
+# wrapped ``pyarrow.RecordBatchReader`` via ``__getattr__``.
+class _ArrowReader:
+    @property
+    def closed(self) -> bool: ...
+    @property
+    def schema(self) -> pyarrow.Schema: ...
+    def read_next_batch(self) -> pyarrow.RecordBatch: ...
+    def close(self) -> None: ...
+    def __arrow_c_stream__(self, requested_schema: Any = ...) -> Any: ...
+    def __iter__(self) -> "_ArrowReader": ...
+    def __next__(self) -> pyarrow.RecordBatch: ...
+    def __enter__(self) -> "_ArrowReader": ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None: ...
+    def __getattr__(self, name: str) -> Any: ...
+
+    # Bulk Copy
+    def bulkcopy(
+        self,
+        table_name: str,
+        data: Iterable[Union[Tuple[Any, ...], Row]],
+        batch_size: int = 0,
+        timeout: int = 30,
+        column_mappings: Optional[Union[List[str], List[Tuple[int, str]]]] = None,
+        keep_identity: bool = False,
+        check_constraints: bool = False,
+        table_lock: bool = False,
+        keep_nulls: bool = False,
+        fire_triggers: bool = False,
+        use_internal_transaction: bool = False,
+    ) -> Dict[str, Any]: ...
+    def bulkcopy_arrow(
+        self,
+        table_name: str,
+        source: Any,
+        batch_size: int = 0,
+        timeout: int = 30,
+        column_mappings: Optional[Union[List[str], List[Tuple[int, str]]]] = None,
+        keep_identity: bool = False,
+        check_constraints: bool = False,
+        table_lock: bool = False,
+        keep_nulls: bool = False,
+        fire_triggers: bool = False,
+        use_internal_transaction: bool = False,
+    ) -> Dict[str, Any]: ...
+
+# DB-API 2.0 Connection Object
+# https://www.python.org/dev/peps/pep-0249/#connection-objects
+class Connection:
+    """
+    Database connection object.
+
+    This class should not be instantiated directly. Use the connect() function instead.
+    """
+
+    # DB-API 2.0 Exception Attributes
+    Warning: type[Warning]
+    Error: type[Error]
+    InterfaceError: type[InterfaceError]
+    DatabaseError: type[DatabaseError]
+    DataError: type[DataError]
+    OperationalError: type[OperationalError]
+    IntegrityError: type[IntegrityError]
+    InternalError: type[InternalError]
+    ProgrammingError: type[ProgrammingError]
+    NotSupportedError: type[NotSupportedError]
+
+    # Connection Properties
+    @property
+    def timeout(self) -> int: ...
+    @timeout.setter
+    def timeout(self, value: int) -> None: ...
+    @property
+    def autocommit(self) -> bool: ...
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None: ...
+    @property
+    def searchescape(self) -> str: ...
+    def __init__(
+        self,
+        connection_str: str = "",
+        autocommit: bool = False,
+        attrs_before: Optional[Dict[int, Union[int, str, bytes]]] = None,
+        timeout: int = 0,
+        native_uuid: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> None: ...
+
+    # DB-API 2.0 Required Methods
+    def cursor(self) -> Cursor: ...
+    def commit(self) -> None: ...
+    def rollback(self) -> None: ...
+    def close(self) -> None: ...
+
+    # Extension Methods
+    def setautocommit(self, value: bool = False) -> None: ...
+    def setencoding(self, encoding: Optional[str] = None, ctype: Optional[int] = None) -> None: ...
+    def getencoding(self) -> Dict[str, Union[str, int]]: ...
+    def setdecoding(
+        self, sqltype: int, encoding: Optional[str] = None, ctype: Optional[int] = None
+    ) -> None: ...
+    def getdecoding(self, sqltype: int) -> Dict[str, Union[str, int]]: ...
+    def set_attr(self, attribute: int, value: Union[int, str, bytes, bytearray]) -> None: ...
+    def add_output_converter(
+        self, sqltype: Union[int, type], func: Callable[[Any], Any]
+    ) -> None: ...
+    def get_output_converter(self, sqltype: Union[int, type]) -> Optional[Callable[[Any], Any]]: ...
+    def remove_output_converter(self, sqltype: Union[int, type]) -> None: ...
+    def clear_output_converters(self) -> None: ...
+    def execute(self, sql: str, *args: Any) -> Cursor: ...
+    def batch_execute(
+        self,
+        statements: List[str],
+        params: Optional[List[Union[None, Any, Tuple[Any, ...], List[Any]]]] = None,
+        reuse_cursor: Optional[Cursor] = None,
+        auto_close: bool = False,
+    ) -> Tuple[List[Union[List[Row], int]], Cursor]: ...
+    def getinfo(self, info_type: int) -> Union[str, int, bool, None]: ...
+
+    # Context Manager Support
+    def __enter__(self) -> "Connection": ...
+    def __exit__(self, *args: Any) -> None: ...
+
+# Module Connection Function
+def connect(
+    connection_str: str = "",
+    autocommit: bool = False,
+    attrs_before: Optional[Dict[int, Union[int, str, bytes]]] = None,
+    timeout: int = 0,
+    native_uuid: Optional[bool] = None,
+    **kwargs: Any,
+) -> Connection: ...
+
+# SQL Type Constants
+SQL_CHAR: int
+SQL_VARCHAR: int
+SQL_LONGVARCHAR: int
+SQL_WCHAR: int
+SQL_WVARCHAR: int
+SQL_WLONGVARCHAR: int
+SQL_DECIMAL: int
+SQL_NUMERIC: int
+SQL_BIT: int
+SQL_TINYINT: int
+SQL_SMALLINT: int
+SQL_INTEGER: int
+SQL_BIGINT: int
+SQL_REAL: int
+SQL_FLOAT: int
+SQL_DOUBLE: int
+SQL_BINARY: int
+SQL_VARBINARY: int
+SQL_LONGVARBINARY: int
+SQL_DATE: int
+SQL_TIME: int
+SQL_TIMESTAMP: int
+# SQL Server-specific type constants (pyodbc parity)
+SQL_SS_TIME2: int
+SQL_SS_XML: int
+SQL_SS_VARIANT: int
+SQL_WMETADATA: int
+
+# Connection Attribute Constants
+SQL_ATTR_ACCESS_MODE: int
+SQL_ATTR_CONNECTION_TIMEOUT: int
+SQL_ATTR_CURRENT_CATALOG: int
+SQL_ATTR_LOGIN_TIMEOUT: int
+SQL_ATTR_PACKET_SIZE: int
+SQL_ATTR_TXN_ISOLATION: int
+SQL_TXN_ISOLATION_LEVEL: int
+
+# Legacy Statement Options (not information types)
+SQL_CONCURRENCY: int
+SQL_ROWSET_SIZE: int
+SQL_ROW_NUMBER: int
+
+# Transaction Isolation Level Constants
+SQL_TXN_READ_UNCOMMITTED: int
+SQL_TXN_READ_COMMITTED: int
+SQL_TXN_REPEATABLE_READ: int
+SQL_TXN_SERIALIZABLE: int
+
+# Access Mode Constants
+SQL_MODE_READ_WRITE: int
+SQL_MODE_READ_ONLY: int
+
+# GetInfo Constants for Connection.getinfo()
+SQL_DRIVER_NAME: int
+SQL_DRIVER_VER: int
+SQL_DRIVER_ODBC_VER: int
+SQL_DRIVER_HLIB: int
+SQL_DRIVER_HENV: int
+SQL_DRIVER_HDBC: int
+SQL_DATA_SOURCE_NAME: int
+SQL_DATABASE_NAME: int
+SQL_SERVER_NAME: int
+SQL_USER_NAME: int
+SQL_SQL_CONFORMANCE: int
+SQL_KEYWORDS: int
+SQL_IDENTIFIER_QUOTE_CHAR: int
+SQL_SEARCH_PATTERN_ESCAPE: int
+SQL_CATALOG_TERM: int
+SQL_SCHEMA_TERM: int
+SQL_TABLE_TERM: int
+SQL_PROCEDURE_TERM: int
+SQL_TXN_CAPABLE: int
+SQL_DEFAULT_TXN_ISOLATION: int
+SQL_NUMERIC_FUNCTIONS: int
+SQL_STRING_FUNCTIONS: int
+SQL_DATETIME_FUNCTIONS: int
+SQL_TIMEDATE_FUNCTIONS: int
+SQL_SYSTEM_FUNCTIONS: int
+SQL_MAX_COLUMN_NAME_LEN: int
+SQL_MAX_TABLE_NAME_LEN: int
+SQL_MAX_SCHEMA_NAME_LEN: int
+SQL_MAX_CATALOG_NAME_LEN: int
+SQL_MAX_IDENTIFIER_LEN: int
+SQL_CATALOG_NAME: int
+SQL_DESCRIBE_PARAMETER: int
+SQL_STATIC_CURSOR_ATTRIBUTES1: int
+SQL_STATIC_CURSOR_ATTRIBUTES2: int
+SQL_KEYSET_CURSOR_ATTRIBUTES1: int
+SQL_KEYSET_CURSOR_ATTRIBUTES2: int
+SQL_OJ_CAPABILITIES: int
+
+# SQLGetInfo Return Values (not information types)
+SQL_IC_UPPER: int
+SQL_IC_LOWER: int
+SQL_IC_SENSITIVE: int
+SQL_IC_MIXED: int
+SQL_SC_SQL92_ENTRY: int
+SQL_SC_FIPS127_2_TRANSITIONAL: int
+SQL_SC_SQL92_INTERMEDIATE: int
+SQL_SC_SQL92_FULL: int
+
+# Deprecated legacy values (127/128/129), not SQL conformance flags
+SQL_SQL92_ENTRY_SQL: int
+SQL_SQL92_INTERMEDIATE_SQL: int
+SQL_SQL92_FULL_SQL: int
