@@ -11,6 +11,7 @@ pub mod batch;
 pub mod null_types;
 pub mod placeholders;
 pub mod py_types;
+pub mod udt;
 
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::message::parameters::rpc_parameters::{RpcParameter, StatusFlags};

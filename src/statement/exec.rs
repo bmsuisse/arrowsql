@@ -24,8 +24,10 @@ use super::wire::{self, DRAIN_BUDGET_BYTES, Slot};
 use crate::connection::ConnShared;
 use crate::consts::*;
 use crate::decode::RowBuffer;
+use crate::decode::buffer::Cell;
 use crate::diag::{self, DiagRecord};
 use crate::params::ParamSet;
+use crate::params::udt::{self, DescribedParam};
 use crate::runtime::block_on;
 
 /// Rows per TDS request in executemany.
@@ -160,27 +162,34 @@ fn prepare_session(
     Ok(())
 }
 
+/// Why describing a statement's parameters failed.
+enum DescribeFailure {
+    /// The server rejected the describe query (e.g. it cannot infer a type).
+    Rejected(Vec<DiagRecord>),
+    /// Timeout, cancellation or a broken connection: the requester's error.
+    Interrupted(Vec<DiagRecord>),
+}
+
 /// Give untyped NULL parameters the type SQL Server infers for them.
 ///
-/// A failure of the describe query itself is ignored (the statement's own
-/// execution reports it), but a timeout, cancellation or broken connection
+/// A rejected describe query is ignored (the statement's own execution
+/// reports the problem), but a timeout, cancellation or broken connection
 /// is the requester's error.
 fn resolve_null_types(ex: &mut Exclusive<'_>, sql: &str, params: &mut ParamSet) -> Result<(), Vec<DiagRecord>> {
     if params.untyped_nulls.is_empty() {
         return Ok(());
     }
-    let described = match ex.conn.cached_param_types(sql) {
-        Some(types) => types,
-        None => {
-            let types = describe_parameters(ex, sql)?;
-            ex.conn.cache_param_types(sql, types.clone());
-            types
-        }
+    let described = match described_params(ex, sql) {
+        Ok(described) => described,
+        Err(DescribeFailure::Rejected(_)) => return Ok(()),
+        Err(DescribeFailure::Interrupted(records)) => return Err(records),
     };
     for &i in &params.untyped_nulls {
         let name = format!("@P{}", i + 1);
-        if let Some((_, type_name)) = described.iter().find(|(n, _)| n.eq_ignore_ascii_case(&name))
-            && let Some(sql_type) = crate::params::null_types::null_of(type_name)
+        if let Some(sql_type) = described
+            .iter()
+            .find(|param| param.name.eq_ignore_ascii_case(&name))
+            .and_then(|param| crate::params::null_types::null_of(&param.system_type))
         {
             params.types[i] = sql_type;
         }
@@ -188,9 +197,24 @@ fn resolve_null_types(ex: &mut Exclusive<'_>, sql: &str, params: &mut ParamSet) 
     Ok(())
 }
 
-/// `(parameter name, suggested type name)` pairs from
-/// `sp_describe_undeclared_parameters`; empty if the server rejects the query.
-fn describe_parameters(ex: &mut Exclusive<'_>, sql: &str) -> Result<Vec<(String, String)>, Vec<DiagRecord>> {
+/// Name the CLR UDT behind each SQL_SS_UDT parameter. A failed describe fails
+/// the execute with the server's error, as the UDT name cannot be guessed.
+fn resolve_udt_names(ex: &mut Exclusive<'_>, sql: &str, params: &mut ParamSet) -> Result<(), Vec<DiagRecord>> {
+    if !udt::has_unresolved_udt(params) {
+        return Ok(());
+    }
+    let described = described_params(ex, sql).map_err(|failure| match failure {
+        DescribeFailure::Rejected(records) | DescribeFailure::Interrupted(records) => records,
+    })?;
+    udt::resolve_udt_names(params, &described).map_err(|message| vec![DiagRecord::driver("HY004", message)])
+}
+
+/// Parameter metadata of `sql` from `sp_describe_undeclared_parameters`,
+/// cached per SQL text. Failures are not cached.
+fn described_params(ex: &mut Exclusive<'_>, sql: &str) -> Result<Vec<DescribedParam>, DescribeFailure> {
+    if let Some(described) = ex.conn.cached_param_types(sql) {
+        return Ok(described);
+    }
     let escaped = sql.replace('\'', "''");
     let query = format!("EXEC sp_describe_undeclared_parameters @tsql = N'{escaped}'");
     let mut rows = RowBuffer::new();
@@ -204,31 +228,41 @@ fn describe_parameters(ex: &mut Exclusive<'_>, sql: &str) -> Result<Vec<(String,
     });
     let _ = client.take_info_messages();
     match outcome {
-        Ok(()) => Ok(parameter_types(&rows)),
-        Err(TdsError::SqlServerError { .. }) => {
+        Ok(()) => {
+            let described = described_rows(&rows);
+            ex.conn.cache_param_types(sql, described.clone());
+            Ok(described)
+        }
+        Err(err @ TdsError::SqlServerError { .. }) => {
             recover(client);
-            Ok(Vec::new())
+            Err(DescribeFailure::Rejected(diag::records_for_error(&err, "HY000")))
         }
         Err(other) => {
             recover(client);
-            Err(diag::records_for_error(&other, "HY000"))
+            Err(DescribeFailure::Interrupted(diag::records_for_error(&other, "HY000")))
         }
     }
 }
 
-fn parameter_types(rows: &RowBuffer) -> Vec<(String, String)> {
+fn described_rows(rows: &RowBuffer) -> Vec<DescribedParam> {
     let ncols = rows.cells.len().checked_div(rows.rows).unwrap_or(0);
-    let mut types = Vec::new();
-    for row in rows.cells.chunks(ncols.max(1)) {
-        // Columns: parameter_ordinal, name, suggested_system_type_id,
-        // suggested_system_type_name, ...
-        if let (Some(name), Some(type_name)) =
-            (row.get(1).and_then(|c| rows.text(c)), row.get(3).and_then(|c| rows.text(c)))
-        {
-            types.push((name, type_name));
-        }
-    }
-    types
+    rows.cells.chunks(ncols.max(1)).filter_map(|row| describe_row(rows, row)).collect()
+}
+
+/// One describe row. Columns: parameter_ordinal, name, suggested_system_type_id,
+/// suggested_system_type_name, ..., suggested_user_type_database,
+/// suggested_user_type_schema, suggested_user_type_name.
+fn describe_row(rows: &RowBuffer, row: &[Cell]) -> Option<DescribedParam> {
+    let text = |index: usize| row.get(index).and_then(|c| rows.text(c));
+    let system_type_id = match row.get(2)? {
+        Cell::Int(id) => Some(*id),
+        _ => None,
+    };
+    Some(DescribedParam {
+        name: text(1)?,
+        system_type: text(3)?,
+        udt: udt::udt_name(system_type_id, text(8), text(9), text(10)),
+    })
 }
 
 /// Run one command and leave its first result current.
@@ -245,6 +279,10 @@ fn run_command(ex: &mut Exclusive<'_>, command: Command) -> SqlReturn {
         }
         Command::Parameterized(sql, mut params) => {
             if let Err(records) = resolve_null_types(ex, &sql, &mut params) {
+                ex.state.diag.extend(records);
+                return SQL_ERROR;
+            }
+            if let Err(records) = resolve_udt_names(ex, &sql, &mut params) {
                 ex.state.diag.extend(records);
                 return SQL_ERROR;
             }
