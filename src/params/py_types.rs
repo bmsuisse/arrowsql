@@ -25,6 +25,8 @@ use pyo3::types::{
     PyType,
 };
 
+use crate::params::udt;
+
 static DECIMAL_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static UUID_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static JSON_DUMPS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -437,20 +439,9 @@ pub(crate) fn py_to_sql_type_with_hint(
         InputSqlType::Vector => hinted_vector(py_obj, hint),
         InputSqlType::Money | InputSqlType::SmallMoney => hinted_money(py_obj, hint),
         InputSqlType::Variant => Ok(SqlType::Variant(Box::new(py_to_sql_type(py_obj)?))),
-        // `mssql-tds` now has the contract this once waited on (`SqlType::Udt`,
-        // `UdtTypeName`, `write_udt_type_name`). What is still missing is on
-        // the Python side: `setinputsizes` has no way to carry the type name.
-        // Tracked in microsoft/mssql-python#816, fixed by #818 (AB#48445),
-        // which resolves the name via SQLDescribeParam instead.
-        InputSqlType::Udt => Err(unsupported_udt_parameter()),
+        // LOCAL: the type name is resolved at execute time (params::udt).
+        InputSqlType::Udt => udt::hinted_udt(py_obj),
     }
-}
-
-fn unsupported_udt_parameter() -> Error {
-    Error::UsageError(
-        "SQL_SS_UDT parameters require a server UDT type name, which setinputsizes does not provide"
-            .to_string(),
-    )
 }
 
 /// Constructs the typed NULL required when inference has no Python value.
@@ -493,7 +484,7 @@ pub(crate) fn null_sql_type(hint: ParameterHint) -> TdsResult<SqlType> {
         InputSqlType::Binary => SqlType::Binary(None, checked_length(size, 8_000, "BINARY")?),
         InputSqlType::VarBinary => sized_varbinary(None, size),
         InputSqlType::LongVarBinary => SqlType::VarBinaryMax(None),
-        InputSqlType::Udt => return Err(unsupported_udt_parameter()),
+        InputSqlType::Udt => udt::null_udt(),
         InputSqlType::Date => SqlType::Date(None),
         InputSqlType::Time | InputSqlType::DateTime | InputSqlType::DateTimeOffset => {
             // TODO(mssql-tds): Carry NULL temporal scale independently of the

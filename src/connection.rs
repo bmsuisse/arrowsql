@@ -17,6 +17,7 @@ use pyo3::types::{PyBytes, PyDict};
 
 use crate::consts::*;
 use crate::diag::{self, DiagRecord};
+use crate::params::udt::DescribedParam;
 use crate::runtime::block_on;
 use crate::statement::{SqlHandle, StmtShared, release_wire};
 
@@ -38,7 +39,7 @@ pub struct ConnShared {
     /// statement when it could not be sent immediately.
     pending_session_sql: Mutex<Vec<String>>,
     /// sp_describe_undeclared_parameters results per SQL text.
-    param_types: Mutex<HashMap<String, Vec<(String, String)>>>,
+    param_types: Mutex<HashMap<String, Vec<DescribedParam>>>,
 }
 
 impl ConnShared {
@@ -54,11 +55,11 @@ impl ConnShared {
         self.implicit_txn.store(on, Ordering::Release);
     }
 
-    pub fn cached_param_types(&self, sql: &str) -> Option<Vec<(String, String)>> {
+    pub fn cached_param_types(&self, sql: &str) -> Option<Vec<DescribedParam>> {
         self.param_types.lock().get(sql).cloned()
     }
 
-    pub fn cache_param_types(&self, sql: &str, types: Vec<(String, String)>) {
+    pub fn cache_param_types(&self, sql: &str, types: Vec<DescribedParam>) {
         let mut cache = self.param_types.lock();
         if cache.len() >= PARAM_TYPE_CACHE_SIZE {
             cache.clear();

@@ -29,10 +29,12 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::connection::{ConnShared, Slot};
 use crate::consts::*;
+use crate::decode::buffer::Cell;
 use crate::decode::{RowBuffer, describe, python as pyconv};
 use crate::diag::{self, DiagRecord};
 use crate::params::ParamSet;
 use crate::params::py_types::py_to_sql_type;
+use crate::params::udt::{self, DescribedParam};
 use crate::runtime::block_on;
 
 static NEXT_STMT_ID: AtomicU64 = AtomicU64::new(1);
@@ -280,53 +282,91 @@ enum Command {
     RawRpc(String, Vec<RpcParameter>),
 }
 
+/// Parameter metadata of `sql` from `sp_describe_undeclared_parameters`.
+/// Cached per SQL text; a failed describe is returned as diagnostics and not cached.
+fn described_params(
+    conn: &ConnShared,
+    client: &mut TdsClient,
+    sql: &str,
+) -> Result<Vec<DescribedParam>, Vec<DiagRecord>> {
+    if let Some(described) = conn.cached_param_types(sql) {
+        return Ok(described);
+    }
+    let escaped = sql.replace('\'', "''");
+    let query = format!("EXEC sp_describe_undeclared_parameters @tsql = N'{escaped}'");
+    let mut rows = RowBuffer::new();
+    let outcome = block_on(async {
+        let result = client.execute(query, ()).await?;
+        if result == StatementResult::Rows {
+            while client.next_row_into(&mut rows).await? {}
+        }
+        client.close_query().await
+    });
+    let _ = client.take_info_messages();
+    if let Err(err) = outcome {
+        let _ = block_on(client.close_query());
+        return Err(diag::records_for_error(&err, "HY000"));
+    }
+    let ncols = rows.cells.len().checked_div(rows.rows).unwrap_or(0);
+    let described: Vec<DescribedParam> = rows
+        .cells
+        .chunks(ncols.max(1))
+        .filter_map(|row| describe_row(&rows, row))
+        .collect();
+    conn.cache_param_types(sql, described.clone());
+    Ok(described)
+}
+
+/// One describe row. Columns: parameter_ordinal, name, suggested_system_type_id,
+/// suggested_system_type_name, ..., suggested_user_type_database,
+/// suggested_user_type_schema, suggested_user_type_name.
+fn describe_row(rows: &RowBuffer, row: &[Cell]) -> Option<DescribedParam> {
+    let text = |index: usize| row.get(index).and_then(|c| rows.text(c));
+    let system_type_id = match row.get(2)? {
+        Cell::Int(id) => Some(*id),
+        _ => None,
+    };
+    Some(DescribedParam {
+        name: text(1)?,
+        system_type: text(3)?,
+        udt: udt::udt_name(system_type_id, text(8), text(9), text(10)),
+    })
+}
+
 /// Give untyped NULL parameters the type SQL Server infers for them.
 fn resolve_null_types(conn: &ConnShared, client: &mut TdsClient, sql: &str, params: &mut ParamSet) {
     if params.untyped_nulls.is_empty() {
         return;
     }
-    let described = match conn.cached_param_types(sql) {
-        Some(types) => types,
-        None => {
-            let escaped = sql.replace('\'', "''");
-            let query = format!("EXEC sp_describe_undeclared_parameters @tsql = N'{escaped}'");
-            let mut rows = RowBuffer::new();
-            let ok = block_on(async {
-                let result = client.execute(query, ()).await?;
-                if result == StatementResult::Rows {
-                    while client.next_row_into(&mut rows).await? {}
-                }
-                client.close_query().await
-            });
-            let _ = client.take_info_messages();
-            if ok.is_err() {
-                let _ = block_on(client.close_query());
-                Vec::new()
-            } else {
-                let ncols = rows.cells.len().checked_div(rows.rows).unwrap_or(0);
-                let mut types = Vec::new();
-                for row in rows.cells.chunks(ncols.max(1)) {
-                    // Columns: parameter_ordinal, name, suggested_system_type_id,
-                    // suggested_system_type_name, ...
-                    if let (Some(name), Some(type_name)) =
-                        (row.get(1).and_then(|c| rows.text(c)), row.get(3).and_then(|c| rows.text(c)))
-                    {
-                        types.push((name, type_name));
-                    }
-                }
-                conn.cache_param_types(sql, types.clone());
-                types
-            }
-        }
+    let Ok(described) = described_params(conn, client, sql) else {
+        return;
     };
     for &i in &params.untyped_nulls {
         let name = format!("@P{}", i + 1);
-        if let Some((_, type_name)) = described.iter().find(|(n, _)| n.eq_ignore_ascii_case(&name))
-            && let Some(sql_type) = crate::params::null_types::null_of(type_name)
+        if let Some(sql_type) = described
+            .iter()
+            .find(|param| param.name.eq_ignore_ascii_case(&name))
+            .and_then(|param| crate::params::null_types::null_of(&param.system_type))
         {
             params.types[i] = sql_type;
         }
     }
+}
+
+/// Name the CLR UDT behind each SQL_SS_UDT parameter. A failed describe fails
+/// the execute with the server's error, as the UDT name cannot be guessed.
+fn resolve_udt_names(
+    conn: &ConnShared,
+    client: &mut TdsClient,
+    sql: &str,
+    params: &mut ParamSet,
+) -> Result<(), Vec<DiagRecord>> {
+    if !udt::has_unresolved_udt(params) {
+        return Ok(());
+    }
+    let described = described_params(conn, client, sql)?;
+    udt::resolve_udt_names(params, &described)
+        .map_err(|message| vec![DiagRecord::driver("HY004", message)])
 }
 
 /// Apply deferred session settings and, in manual-commit mode, make sure a
@@ -391,6 +431,10 @@ fn execute_command(stmt: &Arc<StmtShared>, command: Command) -> SqlReturn {
     let command = match command {
         Command::Rpc(sql, mut params) => {
             resolve_null_types(conn, client, &sql, &mut params);
+            if let Err(records) = resolve_udt_names(conn, client, &sql, &mut params) {
+                state.diag.extend(records);
+                return SQL_ERROR;
+            }
             Command::RawRpc(sql, params.into_rpc())
         }
         other => other,
