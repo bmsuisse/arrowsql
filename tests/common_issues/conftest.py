@@ -20,6 +20,17 @@ def pytest_configure(config):
     )
 
 
+def pytest_collection_modifyitems(config, items):
+    """On the Rust port, upstream_bug tests are plain tests: the port must get them right."""
+    from mssql_python import ddbc_bindings
+
+    if not getattr(ddbc_bindings, "__rust_port__", False):
+        return
+    for item in items:
+        if item.get_closest_marker("upstream_bug"):
+            item.own_markers = [m for m in item.own_markers if m.name != "xfail"]
+
+
 @pytest.fixture(scope="session")
 def conn_str():
     value = os.environ.get("DB_CONNECTION_STRING")
