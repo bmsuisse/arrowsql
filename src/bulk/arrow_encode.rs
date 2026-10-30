@@ -522,13 +522,13 @@ impl ColumnPlan {
             }
             Kind::Money { scale } => {
                 let raw = downcast::<Decimal128Array>(array)?.value(row);
-                let cents = i64::try_from(rescale_rounding(raw, scale, 4)?)
+                let cents = i64::try_from(rescale_rounding(raw, scale, 4).map_err(usage)?)
                     .map_err(|_| usage(format!("Value out of range for MONEY column '{}'", dest.column_name)))?;
                 Ok(ColumnValues::Money(SqlMoney { lsb_part: (cents & 0xFFFF_FFFF) as i32, msb_part: (cents >> 32) as i32 }))
             }
             Kind::SmallMoney { scale } => {
                 let raw = downcast::<Decimal128Array>(array)?.value(row);
-                let int_val = i32::try_from(rescale_rounding(raw, scale, 4)?)
+                let int_val = i32::try_from(rescale_rounding(raw, scale, 4).map_err(usage)?)
                     .map_err(|_| usage(format!("Value out of range for SMALLMONEY column '{}'", dest.column_name)))?;
                 Ok(ColumnValues::SmallMoney(SqlSmallMoney { int_val }))
             }
@@ -651,18 +651,17 @@ fn decimal_parts(raw: i128, from_scale: u8, dest: &BulkCopyColumnMetadata) -> Td
 
 /// `raw` at `from_scale` as an integer at `to_scale`, half away from zero when
 /// the scale shrinks.
-fn rescale_rounding(raw: i128, from_scale: u8, to_scale: u8) -> TdsResult<i128> {
+pub(super) fn rescale_rounding(raw: i128, from_scale: u8, to_scale: u8) -> Result<i128, String> {
     use std::cmp::Ordering;
+    let overflow = || "money value overflow".to_string();
     match from_scale.cmp(&to_scale) {
         Ordering::Equal => Ok(raw),
         Ordering::Less => {
-            let factor = i128::try_from(pow10(u32::from(to_scale - from_scale)).map_err(usage)?)
-                .map_err(|_| usage("money value overflow".to_string()))?;
-            raw.checked_mul(factor).ok_or_else(|| usage("money value overflow".to_string()))
+            let factor = i128::try_from(pow10(u32::from(to_scale - from_scale))?).map_err(|_| overflow())?;
+            raw.checked_mul(factor).ok_or_else(overflow)
         }
         Ordering::Greater => {
-            let divisor = i128::try_from(pow10(u32::from(from_scale - to_scale)).map_err(usage)?)
-                .map_err(|_| usage("decimal scale overflow".to_string()))?;
+            let divisor = i128::try_from(pow10(u32::from(from_scale - to_scale))?).map_err(|_| overflow())?;
             let half = divisor / 2;
             Ok(if raw >= 0 { (raw + half) / divisor } else { (raw - half) / divisor })
         }

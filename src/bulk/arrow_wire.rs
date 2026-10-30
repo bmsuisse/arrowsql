@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::arrow_encode::{
     EPOCH_DAYS_FROM_YEAR_ONE, Kind, MAX_SQL_DAYS, TICKS_PER_DAY, TICKS_PER_SECOND, decimal_magnitude,
-    legacy_datetime_parts, small_datetime_parts,
+    legacy_datetime_parts, rescale_rounding, small_datetime_parts,
 };
 use super::wire::{
     self, BIGBINARY, BIGCHAR, BIGVARBINARY, BIGVARCHAR, Layout, NCHAR, NVARCHAR, finite, put_number,
@@ -327,9 +327,27 @@ fn typed_cell<'a>(
             let bytes = Bytes::of(kind, array)?;
             Some(Box::new(move |row, out| wire::put_binary(out, layout, bytes.get(row))))
         }
+        Kind::Money { scale } => {
+            let values = downcast::<Decimal128Array>(array)?.values();
+            let name = dest.column_name.as_str();
+            Some(Box::new(move |row, out| {
+                let scaled = i64::try_from(rescale_rounding(values[row], scale, 4)?)
+                    .map_err(|_| format!("Value out of range for MONEY column '{name}'"))?;
+                wire::put_money(out, layout, scaled);
+                Ok(())
+            }))
+        }
+        Kind::SmallMoney { scale } => {
+            let values = downcast::<Decimal128Array>(array)?.values();
+            let name = dest.column_name.as_str();
+            Some(Box::new(move |row, out| {
+                let scaled = i32::try_from(rescale_rounding(values[row], scale, 4)?)
+                    .map_err(|_| format!("Value out of range for SMALLMONEY column '{name}'"))?;
+                wire::put_small_money(out, layout, scaled);
+                Ok(())
+            }))
+        }
         Kind::Null
-        | Kind::Money { .. }
-        | Kind::SmallMoney { .. }
         | Kind::Utf8Uuid
         | Kind::Xml
         | Kind::Json => None,

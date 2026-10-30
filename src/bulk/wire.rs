@@ -147,6 +147,23 @@ pub fn put_small_datetime(out: &mut Vec<u8>, layout: Layout, days: u16, minutes:
     out.extend_from_slice(&minutes.to_le_bytes());
 }
 
+/// MONEY: the value scaled by 10^4, high half first.
+pub fn put_money(out: &mut Vec<u8>, layout: Layout, scaled: i64) {
+    if !layout.fixed_type {
+        out.push(8);
+    }
+    out.extend_from_slice(&((scaled >> 32) as i32).to_le_bytes());
+    out.extend_from_slice(&((scaled & 0xFFFF_FFFF) as i32).to_le_bytes());
+}
+
+/// SMALLMONEY: the value scaled by 10^4.
+pub fn put_small_money(out: &mut Vec<u8>, layout: Layout, scaled: i32) {
+    if layout.length_prefixed() {
+        out.push(4);
+    }
+    out.extend_from_slice(&scaled.to_le_bytes());
+}
+
 /// A decimal given as sign and magnitude already scaled to the column.
 pub fn put_decimal(out: &mut Vec<u8>, layout: Layout, positive: bool, magnitude: u128) {
     let value_bytes = decimal_value_bytes(layout.precision);

@@ -29,7 +29,7 @@ use super::arrow_encode::{
 use super::arrow_wire::split_days;
 use super::settings::{BulkSettings, Resolved, SourceShape};
 use super::wire::{self, BIGBINARY, BIGCHAR, BIGVARBINARY, BIGVARCHAR, Layout, NCHAR, NVARCHAR, finite, put_number};
-use super::{BulkFailure, Outcome, run};
+use super::{Outcome, run};
 use crate::params::py_types::py_to_column_value;
 use crate::statement::StmtShared;
 
@@ -49,6 +49,8 @@ enum Conv {
     Real,
     Float,
     Decimal,
+    Money,
+    SmallMoney,
     Date,
     Time { scale: u8 },
     DateTime2 { scale: u8 },
@@ -79,6 +81,8 @@ fn conversion_for(dest: &BulkCopyColumnMetadata, layout: Layout) -> Conv {
         S::Real => Conv::Real,
         S::Float => Conv::Float,
         S::Decimal | S::Numeric => Conv::Decimal,
+        S::Money => Conv::Money,
+        S::SmallMoney => Conv::SmallMoney,
         S::Date => Conv::Date,
         S::Time => Conv::Time { scale: dest.scale.min(7) },
         S::DateTime2 => Conv::DateTime2 { scale: dest.scale.min(7) },
@@ -381,6 +385,16 @@ fn encode_cell(column: &Column, cell: &Bound<'_, PyAny>, out: &mut Vec<u8>) -> R
             let (positive, magnitude) = to_decimal(cell, dest)?;
             wire::put_decimal(out, layout, positive, magnitude);
         }
+        Conv::Money => {
+            let scaled = i64::try_from(to_money(cell, dest)?)
+                .map_err(|_| format!("Value out of range for MONEY column '{name}'"))?;
+            wire::put_money(out, layout, scaled);
+        }
+        Conv::SmallMoney => {
+            let scaled = i32::try_from(to_money(cell, dest)?)
+                .map_err(|_| format!("Value out of range for SMALLMONEY column '{name}'"))?;
+            wire::put_small_money(out, layout, scaled);
+        }
         Conv::Date => {
             let date = temporal(cell, "date")?;
             let date = date.cast::<PyDate>().map_err(|_| unsupported(cell, "DATE"))?;
@@ -583,17 +597,13 @@ fn utc_offset_minutes(value: &Bound<'_, PyAny>) -> Result<i16, String> {
 /// Sign and magnitude of a Python Decimal, int, float or numeric string at the
 /// destination's scale. A value that does not fit is rejected, never rounded.
 fn to_decimal(cell: &Bound<'_, PyAny>, dest: &BulkCopyColumnMetadata) -> Result<(bool, u128), String> {
-    let text = if cell.is_instance_of::<PyString>() || cell.is_instance_of::<PyInt>() || cell.is_instance_of::<PyFloat>() || is_decimal(cell)
-    {
-        cell.str().map_err(|err| err.to_string())?.to_string()
-    } else {
-        return Err(unsupported(cell, "DECIMAL"));
-    };
-    parse_decimal(&text, dest)
+    parse_decimal(&number_text(cell, "DECIMAL")?, dest)
 }
 
-fn parse_decimal(text: &str, dest: &BulkCopyColumnMetadata) -> Result<(bool, u128), String> {
-    let bad = || format!("Invalid decimal value '{text}' for column '{}'", dest.column_name);
+/// A decimal string as `(negative, digits, shift)`: the value is
+/// `digits * 10^shift`.
+fn decimal_digits(text: &str, column: &str) -> Result<(bool, u128, i64), String> {
+    let bad = || format!("Invalid decimal value '{text}' for column '{column}'");
     let trimmed = text.trim();
     let (negative, unsigned) = match trimmed.as_bytes().first() {
         Some(b'-') => (true, &trimmed[1..]),
@@ -616,16 +626,20 @@ fn parse_decimal(text: &str, dest: &BulkCopyColumnMetadata) -> Result<(bool, u12
         digits = digits
             .checked_mul(10)
             .and_then(|d| d.checked_add(u128::from(byte - b'0')))
-            .ok_or_else(|| format!("Decimal value exceeds target precision {} of column '{}'", dest.precision, dest.column_name))?;
+            .ok_or_else(|| format!("Decimal value '{text}' is out of range for column '{column}'"))?;
     }
-    // The value is digits * 10^(exponent - fraction digits); scale it to the column.
-    let shift = i64::from(exponent) - fraction.len() as i64 + i64::from(dest.scale);
-    let scaled = if shift >= 0 {
-        let factor = 10u128.checked_pow(u32::try_from(shift).map_err(|_| bad())?).ok_or_else(bad)?;
-        digits.checked_mul(factor).ok_or_else(|| format!("Decimal value exceeds target precision {} of column '{}'", dest.precision, dest.column_name))?
+    Ok((negative, digits, i64::from(exponent) - fraction.len() as i64))
+}
+
+fn parse_decimal(text: &str, dest: &BulkCopyColumnMetadata) -> Result<(bool, u128), String> {
+    let (negative, digits, shift) = decimal_digits(text, &dest.column_name)?;
+    let too_wide = || format!("Decimal value exceeds target precision {} of column '{}'", dest.precision, dest.column_name);
+    let to_scale = shift + i64::from(dest.scale);
+    let scaled = if to_scale >= 0 {
+        let factor = 10u128.checked_pow(u32::try_from(to_scale).map_err(|_| too_wide())?).ok_or_else(too_wide)?;
+        digits.checked_mul(factor).ok_or_else(too_wide)?
     } else {
-        let divisor = 10u128.checked_pow(u32::try_from(-shift).map_err(|_| bad())?);
-        match divisor {
+        match 10u128.checked_pow(u32::try_from(-to_scale).unwrap_or(u32::MAX)) {
             Some(divisor) if digits % divisor == 0 => digits / divisor,
             _ if digits == 0 => 0,
             _ => {
@@ -636,11 +650,46 @@ fn parse_decimal(text: &str, dest: &BulkCopyColumnMetadata) -> Result<(bool, u12
             }
         }
     };
-    let limit = 10u128.checked_pow(u32::from(dest.precision)).ok_or_else(bad)?;
+    let limit = 10u128.checked_pow(u32::from(dest.precision)).ok_or_else(too_wide)?;
     if scaled >= limit {
-        return Err(format!("Decimal value exceeds target precision {} of column '{}'", dest.precision, dest.column_name));
+        return Err(too_wide());
     }
     Ok((!negative, scaled))
+}
+
+/// A Python number as MONEY: scaled by 10^4, rounded half to even.
+fn to_money(cell: &Bound<'_, PyAny>, dest: &BulkCopyColumnMetadata) -> Result<i128, String> {
+    let text = number_text(cell, "MONEY")?;
+    let (negative, digits, shift) = decimal_digits(&text, &dest.column_name)?;
+    let overflow = || format!("Value {text} out of range for column '{}'", dest.column_name);
+    let to_scale = shift + 4;
+    let scaled = if to_scale >= 0 {
+        let factor = 10u128.checked_pow(u32::try_from(to_scale).map_err(|_| overflow())?).ok_or_else(overflow)?;
+        digits.checked_mul(factor).ok_or_else(overflow)?
+    } else {
+        match 10u128.checked_pow(u32::try_from(-to_scale).unwrap_or(u32::MAX)) {
+            Some(divisor) => {
+                let (quotient, remainder) = (digits / divisor, digits % divisor);
+                let round_up = remainder * 2 > divisor || (remainder * 2 == divisor && quotient % 2 == 1);
+                quotient + u128::from(round_up)
+            }
+            None => 0,
+        }
+    };
+    let scaled = i128::try_from(scaled).map_err(|_| overflow())?;
+    Ok(if negative { -scaled } else { scaled })
+}
+
+/// The text of a number (or numeric string) cell.
+fn number_text(cell: &Bound<'_, PyAny>, sql: &str) -> Result<String, String> {
+    let numeric = cell.is_instance_of::<PyString>()
+        || cell.is_instance_of::<PyInt>()
+        || cell.is_instance_of::<PyFloat>()
+        || is_decimal(cell);
+    if !numeric {
+        return Err(unsupported(cell, sql));
+    }
+    Ok(cell.str().map_err(|err| err.to_string())?.to_string())
 }
 
 /// Load the rows of the Python iterator `rows` into the destination of `settings`.
