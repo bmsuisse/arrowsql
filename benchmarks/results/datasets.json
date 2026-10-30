@@ -1,0 +1,42 @@
+{
+  "taxi_100k": {
+    "table": "dbo.yellow_trips_100k",
+    "rows": 100000,
+    "bytes_per_row": 115.0
+  },
+  "taxi_narrow": {
+    "table": "dbo.yellow_trips",
+    "rows": 2964624,
+    "bytes_per_row": 29.0
+  },
+  "taxi_all": {
+    "table": "dbo.yellow_trips",
+    "rows": 2964624,
+    "bytes_per_row": 113.68
+  },
+  "strings": {
+    "table": "dbo.bench_strings",
+    "rows": 200000,
+    "bytes_per_row": 2094.14
+  },
+  "decimals": {
+    "table": "dbo.bench_decimals",
+    "rows": 500000,
+    "bytes_per_row": 64.0
+  },
+  "datetimes": {
+    "table": "dbo.bench_datetimes",
+    "rows": 500000,
+    "bytes_per_row": 59.0
+  },
+  "lob": {
+    "table": "dbo.bench_lob",
+    "rows": 2000,
+    "bytes_per_row": 100804.0
+  },
+  "wide": {
+    "table": "dbo.bench_wide",
+    "rows": 20000,
+    "bytes_per_row": 2241.58
+  }
+}
