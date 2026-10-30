@@ -295,6 +295,21 @@ pub enum FetchPlan {
 pub fn fetch(stmt: &StmtShared, n: usize, plan: FetchPlan) -> Fetched {
     let mut slot = stmt.conn.slot.lock();
     let mut state = stmt.state.lock();
+    deliver(&mut state, slot.client.as_mut(), n, plan)
+}
+
+/// [`fetch`] for callers that hold the GIL: serves the rows already buffered
+/// (or the end of a finished result) without touching the connection, and
+/// returns `None` when the wire would be needed or a lock is busy.
+pub fn fetch_buffered(stmt: &StmtShared, n: usize, plan: FetchPlan) -> Option<Fetched> {
+    let mut state = stmt.state.try_lock()?;
+    if state.pending_rows() < n && state.on_wire {
+        return None;
+    }
+    Some(deliver(&mut state, None, n, plan))
+}
+
+fn deliver(state: &mut StmtState, client: Option<&mut SyncClient>, n: usize, plan: FetchPlan) -> Fetched {
     state.diag.clear();
     if state.freed {
         return Fetched::without_rows(SQL_INVALID_HANDLE);
@@ -306,9 +321,9 @@ pub fn fetch(stmt: &StmtShared, n: usize, plan: FetchPlan) -> Fetched {
         return Fetched::without_rows(SQL_ERROR);
     }
     if state.pending_rows() < n
-        && let Some(client) = slot.client.as_mut()
+        && let Some(client) = client
     {
-        read_for_fetch(client, &mut state, n, plan);
+        read_for_fetch(client, state, n, plan);
     }
     let rows = state.take_pending(n);
     let ncols = state.ncols();

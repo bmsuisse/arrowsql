@@ -8,7 +8,7 @@ use mssql_tds::datatypes::sqltypes::SqlType;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use super::cursor::{FETCHALL_BATCH_ROWS, FETCHONE_READAHEAD, FetchPlan, fetch, next_result};
+use super::cursor::{FETCHALL_BATCH_ROWS, FETCHONE_READAHEAD, Fetched, FetchPlan, StmtState, fetch, fetch_buffered, next_result};
 use super::exec::{Command, execute_batch, execute_command};
 use super::{StmtShared, close_cursor, stmt_of};
 use crate::consts::*;
@@ -33,6 +33,22 @@ pub fn append_messages(py: Python<'_>, messages: Option<&Bound<'_, PyAny>>, info
         list.append(PyTuple::new(py, [diag::state_label(record), record.message.clone()])?)?;
     }
     Ok(())
+}
+
+/// Read or update the statement state. The lock is only ever held briefly, so
+/// take it while keeping the GIL; releasing and re-acquiring the GIL for a
+/// getter costs more than the getter and, with many threads, a thread switch.
+/// Falls back to a GIL-free wait when an execution holds the state.
+fn with_state<R: Send>(py: Python<'_>, stmt: &StmtShared, f: impl FnOnce(&mut StmtState) -> R + Send) -> R {
+    if let Some(mut state) = stmt.state.try_lock() {
+        return f(&mut state);
+    }
+    py.detach(|| f(&mut stmt.state.lock()))
+}
+
+/// [`fetch`] that avoids releasing the GIL when no wire read is needed.
+fn fetch_with_gil(py: Python<'_>, stmt: &StmtShared, n: usize, plan: FetchPlan) -> Fetched {
+    fetch_buffered(stmt, n, plan).unwrap_or_else(|| py.detach(|| fetch(stmt, n, plan)))
 }
 
 /// Replace the statement's diagnostics with one driver record.
@@ -167,7 +183,7 @@ pub fn execute_many(
 #[pyo3(name = "DDBCSQLRowCount")]
 pub fn row_count(py: Python<'_>, statement_handle: &Bound<'_, PyAny>) -> PyResult<i64> {
     let stmt = stmt_of(statement_handle)?;
-    Ok(py.detach(|| stmt.state.lock().rowcount()))
+    Ok(with_state(py, &stmt, |state| state.rowcount()))
 }
 
 #[pyfunction]
@@ -179,7 +195,7 @@ pub fn num_result_cols(
     messages: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<i64> {
     let stmt = stmt_of(statementHandle)?;
-    Ok(py.detach(|| stmt.state.lock().ncols() as i64))
+    Ok(with_state(py, &stmt, |state| state.ncols() as i64))
 }
 
 #[pyfunction]
@@ -192,7 +208,7 @@ pub fn describe_col(
     messages: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<i16> {
     let stmt = stmt_of(StatementHandle)?;
-    let columns = py.detach(|| stmt.state.lock().columns());
+    let columns = with_state(py, &stmt, |state| state.columns());
     let Some(columns) = columns else { return Ok(SQL_SUCCESS) };
     for meta in columns.iter() {
         let d = PyDict::new(py);
@@ -219,7 +235,7 @@ pub fn fetch_one(
     messages: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<i16> {
     let stmt = stmt_of(StatementHandle)?;
-    let fetched = py.detach(|| fetch(&stmt, 1, FetchPlan::Exact { readahead: FETCHONE_READAHEAD }));
+    let fetched = fetch_with_gil(py, &stmt, 1, FetchPlan::Exact { readahead: FETCHONE_READAHEAD });
     append_messages(py, messages, &fetched.info)?;
     if fetched.rows.rows > 0 {
         pyconv::extend_with_row(py, &fetched.rows, &fetched.rows.cells[..fetched.ncols], row)?;
@@ -241,7 +257,7 @@ pub fn fetch_many(
     messages: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<i16> {
     let stmt = stmt_of(StatementHandle)?;
-    let fetched = py.detach(|| fetch(&stmt, fetchSize, FetchPlan::Exact { readahead: fetchSize }));
+    let fetched = fetch_with_gil(py, &stmt, fetchSize, FetchPlan::Exact { readahead: fetchSize });
     append_messages(py, messages, &fetched.info)?;
     pyconv::append_rows(py, &fetched.rows, fetched.ncols, rows, bulk_utf16_errors(fetched.has_lob))?;
     // An empty fetchmany at end-of-data is a success with no rows upstream.
@@ -292,7 +308,7 @@ pub fn fetch_scroll(
     if FetchOrientation != SQL_FETCH_NEXT {
         return Ok(reject(py, &stmt, DiagRecord::driver("HY106", "Fetch type out of range")));
     }
-    let fetched = py.detach(|| fetch(&stmt, 1, FetchPlan::Exact { readahead: FETCHONE_READAHEAD }));
+    let fetched = fetch_with_gil(py, &stmt, 1, FetchPlan::Exact { readahead: FETCHONE_READAHEAD });
     if fetched.rows.rows > 0 && row_data.is_empty() {
         pyconv::extend_with_row(py, &fetched.rows, &fetched.rows.cells[..fetched.ncols], row_data)?;
     }
@@ -320,11 +336,11 @@ pub fn reset_stmt(py: Python<'_>, statement_handle: &Bound<'_, PyAny>) -> PyResu
             return Ok(SQL_SUCCESS);
         }
     }
-    if py.detach(|| stmt.state.lock().is_freed()) {
+    if with_state(py, &stmt, |state| state.is_freed()) {
         return Ok(SQL_INVALID_HANDLE);
     }
     close_cursor(py, &stmt, false);
-    py.detach(|| stmt.state.lock().diag.clear());
+    with_state(py, &stmt, |state| state.diag.clear());
     Ok(SQL_SUCCESS)
 }
 
@@ -358,7 +374,7 @@ pub fn set_stmt_attr(stmt: &Bound<'_, PyAny>, attr: i32, value: &Bound<'_, PyAny
 pub fn get_all_diag_records<'py>(py: Python<'py>, handle: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyList>> {
     let out = PyList::empty(py);
     if let Ok(stmt) = stmt_of(handle) {
-        let records = py.detach(|| stmt.state.lock().diag.clone());
+        let records = with_state(py, &stmt, |state| state.diag.clone());
         for record in records {
             out.append(PyTuple::new(py, [diag::state_label(&record), record.message])?)?;
         }
@@ -387,7 +403,7 @@ pub fn check_error(
         info.ddbcErrorMsg = "Invalid handle!".to_string();
         return Ok(info);
     };
-    if let Some(record) = py.detach(|| stmt.state.lock().diag.first().cloned()) {
+    if let Some(record) = with_state(py, &stmt, |state| state.diag.first().cloned()) {
         info.sqlState = record.sqlstate;
         info.ddbcErrorMsg = record.message;
         info.nativeError = record.native_error;
