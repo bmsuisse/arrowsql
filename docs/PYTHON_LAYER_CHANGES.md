@@ -75,3 +75,20 @@ attributes; pre-#581 pickles (4 reduce args) still load.
   reads integer-range partitions of a query over separate connections in
   parallel threads and returns one `ArrowTable` (`ArrowTable.concat`).
 - `bulk_parallel.py` (new) + `__init__.py` export: `mssql_python.write_arrow(connection_str, table, source, workers=4, batch_size=0, table_lock=True)` cuts an Arrow source into slices and bulk-loads them over `workers` connections, each with `cursor.bulkcopy_arrow(table_lock=True)`. Heap targets only; other targets fall back to one worker with a `RuntimeWarning`.
+
+## Per-query overhead: cached result layout (`cursor.py`, RUST-PORT)
+
+`docs/PERFORMANCE_RESEARCH.md` §6 measured that about a third of upstream's
+point-lookup client time was rebuilding `cursor.description` and the type map on
+every `execute()`. The port now caches that work per result layout.
+
+| Location | Change |
+|---|---|
+| `cursor.py` `_SQL_TYPE_TO_PYTHON_TYPE` (module level) | The ODBC type-code table is built once, not on each `_map_data_type` call. |
+| `cursor.py` `_ResultLayout` (new) | Holds the metadata list, description, SQL type codes, column maps and the converter map for one result layout. |
+| `cursor.py` `_initialize_description` | Reuses the cached `_ResultLayout` when the column metadata and the `lowercase` setting match the previous result; otherwise builds one (`_build_result_layout`). |
+| `cursor.py` `execute` | Takes the column maps and converter map from the layout. The converter map is rebuilt only when `connection._converters_generation` changes. Drops the `SQLRowCount` call that was immediately overwritten for SELECTs. |
+
+Behaviour is unchanged: each execute still returns a new `description` only when
+the layout differs, the description list is never mutated in place, and the
+converter map is still keyed on the converter generation.
