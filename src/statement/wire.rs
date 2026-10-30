@@ -11,7 +11,7 @@
 
 use std::sync::{Arc, Weak};
 
-use mssql_tds::connection::tds_client::{ResultSet, StatementResult, TdsClient};
+use mssql_tds::connection::tds_client::{ResultSet, StatementResult};
 use mssql_tds::error::Error as TdsError;
 
 use super::StmtShared;
@@ -19,11 +19,11 @@ use super::cancel::StmtCancel;
 use super::cursor::{BufferedResult, StmtState, fill_pending, read_rows};
 use crate::decode::RowBuffer;
 use crate::diag::{self, DiagRecord};
-use crate::runtime::block_on;
+use crate::runtime::SyncClient;
 
 /// The TDS client plus which statement currently owns its live batch.
 pub struct Slot {
-    pub client: Option<TdsClient>,
+    pub client: Option<SyncClient>,
     pub owner: Option<(u64, Weak<StmtShared>)>,
 }
 
@@ -117,7 +117,7 @@ pub fn abandon_result(stmt: &StmtShared, generation: u64) {
     }
 }
 
-fn discard_owner(client: &mut TdsClient, owned: &StmtShared) {
+fn discard_owner(client: &mut SyncClient, owned: &StmtShared) {
     let mut state = owned.state.lock();
     // A read error also ends the result: only `close_query` resynchronises
     // after one.
@@ -131,21 +131,21 @@ fn discard_owner(client: &mut TdsClient, owned: &StmtShared) {
 /// end and the batch closed normally; only a result with a lot of data still
 /// to come is cut short with a TDS attention, which is what makes closing a
 /// cursor over a huge result cheap.
-fn abandon(client: &mut TdsClient, exhausted: bool) {
+fn abandon(client: &mut SyncClient, exhausted: bool) {
     if !client.has_open_batch() {
         return;
     }
     let _ = if exhausted || skim_to_end(client) {
-        block_on(client.close_query())
+        client.block_on(|c| c.close_query())
     } else {
-        block_on(client.cancel_query(ABANDON_SETTLE_SECS))
+        client.block_on(|c| c.cancel_query(ABANDON_SETTLE_SECS))
     };
     let _ = client.take_info_messages();
 }
 
 /// Read and drop the rest of the current result's rows, up to
 /// [`SKIM_BUDGET_BYTES`]. Returns whether the result ended within the budget.
-fn skim_to_end(client: &mut TdsClient) -> bool {
+fn skim_to_end(client: &mut SyncClient) -> bool {
     if !client.on_rows() {
         return true;
     }
@@ -171,7 +171,7 @@ fn skim_to_end(client: &mut TdsClient) -> bool {
 /// With a requester, the buffering stops when the requester is cancelled or
 /// its timeout expires.
 fn buffer_owner(
-    client: &mut TdsClient,
+    client: &mut SyncClient,
     owned: &StmtShared,
     requester: Option<(&Arc<StmtCancel>, u32)>,
 ) {
@@ -193,7 +193,7 @@ fn buffer_owner(
 
 /// Read the rest of the current result and every later result of the batch
 /// into `state`, until `budget` bytes are buffered.
-pub(super) fn buffer_all(client: &mut TdsClient, state: &mut StmtState, budget: usize) {
+pub(super) fn buffer_all(client: &mut SyncClient, state: &mut StmtState, budget: usize) {
     fill_pending(client, state, usize::MAX, budget);
     let over_budget = !state.result_done && state.pending_error.is_none();
     if over_budget {
@@ -202,7 +202,7 @@ pub(super) fn buffer_all(client: &mut TdsClient, state: &mut StmtState, budget: 
     }
     let mut used = state.pending.byte_size();
     while client.has_open_batch() && !client.is_connection_dead() {
-        let advanced = block_on(client.advance());
+        let advanced = client.block_on(|c| c.advance());
         let info: Vec<DiagRecord> = diag::info_records(&client.take_info_messages()).collect();
         match advanced {
             Ok(StatementResult::End) => {
@@ -251,7 +251,7 @@ pub(super) fn buffer_all(client: &mut TdsClient, state: &mut StmtState, budget: 
 
 /// After a read error: does the batch go on (a statement error under
 /// `BatchErrorMode::Continue`) or is it over?
-fn batch_continues(client: &TdsClient, err: Option<&TdsError>) -> bool {
+fn batch_continues(client: &SyncClient, err: Option<&TdsError>) -> bool {
     client.has_open_batch()
         && !client.is_connection_dead()
         && err.is_none_or(|e| matches!(e, TdsError::SqlServerError { .. }))
@@ -259,7 +259,7 @@ fn batch_continues(client: &TdsClient, err: Option<&TdsError>) -> bool {
 
 /// The budget ran out inside the current result: the rest is abandoned and
 /// the cursor reports it once the buffered rows are delivered.
-fn cut_off(client: &mut TdsClient, state: &mut StmtState) {
+fn cut_off(client: &mut SyncClient, state: &mut StmtState) {
     state.result_done = true;
     state.pending_error = Some(vec![over_budget_record()]);
     state.on_wire = false;

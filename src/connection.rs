@@ -8,8 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use mssql_tds::connection::tds_client::TdsClient;
-use mssql_tds::connection_provider::tds_connection_provider::TdsConnectionProvider;
+use crate::runtime::SyncClient;
 use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -19,7 +18,6 @@ use crate::consts::*;
 use crate::diag::{self, DiagRecord};
 use crate::pooling::{self, Acquired, IdleClient, Lease};
 use crate::params::udt::DescribedParam;
-use crate::runtime::block_on;
 use crate::statement::{SqlHandle, StmtShared};
 
 pub use crate::statement::Slot;
@@ -58,7 +56,7 @@ pub struct ConnShared {
 }
 
 impl ConnShared {
-    fn new(client: TdsClient, attrs: &ConnAttrs) -> Arc<Self> {
+    fn new(client: SyncClient, attrs: &ConnAttrs) -> Arc<Self> {
         Arc::new(Self {
             slot: Mutex::new(Slot { client: Some(client), owner: None }),
             autocommit: AtomicBool::new(attrs.autocommit),
@@ -246,7 +244,7 @@ fn call_token_factory(py: Python<'_>, factory: &Py<PyAny>) -> PyResult<FactoryTo
 
 /// The session a new `Connection` runs on.
 struct Session {
-    client: TdsClient,
+    client: SyncClient,
     token: Option<String>,
     token_expiry: i64,
     /// Came out of the pool: server-side state is reset by the next request.
@@ -279,7 +277,7 @@ impl Connection {
     fn client_op<T>(
         &self,
         py: Python<'_>,
-        op: impl FnOnce(&mut TdsClient) -> Result<T, mssql_tds::error::Error> + Send,
+        op: impl FnOnce(&mut SyncClient) -> Result<T, mssql_tds::error::Error> + Send,
     ) -> PyResult<T>
     where
         T: Send,
@@ -300,16 +298,16 @@ impl Connection {
 
     fn run_session_sql(&self, py: Python<'_>, sql: String) -> PyResult<()> {
         self.client_op(py, move |client| {
-            block_on(async {
-                client.execute(sql, ()).await?;
-                client.close_query().await
+            client.block_on(|c| async move {
+                c.execute(sql, ()).await?;
+                c.close_query().await
             })
         })
     }
 
     /// Take the client out of the slot, ready to be retired. `None` when the
     /// connection was already closed.
-    fn take_client(&self, transaction_already_rolled_back: bool, pooled: bool) -> PyResult<Option<TdsClient>> {
+    fn take_client(&self, transaction_already_rolled_back: bool, pooled: bool) -> PyResult<Option<SyncClient>> {
         let mut slot = self.shared.slot.lock();
         let Some(client) = slot.client.as_ref() else {
             self.closed.store(true, Ordering::Release);
@@ -326,14 +324,14 @@ impl Connection {
     }
 
     /// Close a non-pooled session, or sanitise a pooled one and return it.
-    fn retire(&self, mut client: TdsClient, transaction_already_rolled_back: bool) -> PyResult<()> {
+    fn retire(&self, mut client: SyncClient, transaction_already_rolled_back: bool) -> PyResult<()> {
         let Some(membership) = self.pool.lock().take() else {
-            let _ = block_on(client.close_connection());
+            let _ = client.block_on(|c| c.close_connection());
             return Ok(());
         };
         if let Err(err) = sanitise(&mut client, transaction_already_rolled_back) {
             // Never keep a session whose state could not be cleaned up.
-            let _ = block_on(client.close_connection());
+            let _ = client.block_on(|c| c.close_connection());
             return Err(err);
         }
         let entry = IdleClient { client, token: membership.token, token_expiry: membership.token_expiry };
@@ -345,12 +343,12 @@ impl Connection {
 }
 
 /// End the caller's work on a session that is about to be pooled.
-fn sanitise(client: &mut TdsClient, transaction_already_rolled_back: bool) -> PyResult<()> {
+fn sanitise(client: &mut SyncClient, transaction_already_rolled_back: bool) -> PyResult<()> {
     if client.is_connection_dead() {
         return Err(driver_error("08S01", "Communication link failure"));
     }
     if !transaction_already_rolled_back && client.has_active_transaction() {
-        block_on(client.rollback_transaction(None, None)).map_err(|e| tds_error(&e, "HY000"))?;
+        client.block_on(|c| c.rollback_transaction(None, None)).map_err(|e| tds_error(&e, "HY000"))?;
     }
     Ok(())
 }
@@ -417,7 +415,7 @@ fn connect(py: Python<'_>, conn_str: &str, attrs: &ConnAttrs, token: Option<Stri
     }
     let datasource = context.data_source.clone();
     let client = py
-        .detach(|| block_on(TdsConnectionProvider {}.create_client(context, &datasource, None)))
+        .detach(|| SyncClient::connect(context, &datasource))
         .map_err(|e| tds_error(&e, "08001"))?;
     Ok(Session { client, token, token_expiry: expiry, reused: false })
 }
@@ -483,7 +481,7 @@ impl Connection {
     fn commit(&self, py: Python<'_>) -> PyResult<()> {
         self.client_op(py, |client| {
             if client.has_active_transaction() {
-                block_on(client.commit_transaction(None, None))
+                client.block_on(|c| c.commit_transaction(None, None))
             } else {
                 Ok(())
             }
@@ -493,7 +491,7 @@ impl Connection {
     fn rollback(&self, py: Python<'_>) -> PyResult<()> {
         self.client_op(py, |client| {
             if client.has_active_transaction() {
-                block_on(client.rollback_transaction(None, None))
+                client.block_on(|c| c.rollback_transaction(None, None))
             } else {
                 Ok(())
             }

@@ -310,6 +310,16 @@ pub fn more_results(py: Python<'_>, statement_handle: &Bound<'_, PyAny>) -> PyRe
 #[pyo3(name = "DDBCSQLResetStmt")]
 pub fn reset_stmt(py: Python<'_>, statement_handle: &Bound<'_, PyAny>) -> PyResult<i16> {
     let stmt = stmt_of(statement_handle)?;
+    // Common case after a fully fetched result: no wire access, no GIL
+    // release. `try_lock` because an execution on another thread may hold
+    // the state while we hold the GIL.
+    if let Some(mut state) = stmt.state.try_lock() {
+        if state.is_off_wire() {
+            state.reset_results();
+            state.diag.clear();
+            return Ok(SQL_SUCCESS);
+        }
+    }
     if py.detach(|| stmt.state.lock().is_freed()) {
         return Ok(SQL_INVALID_HANDLE);
     }

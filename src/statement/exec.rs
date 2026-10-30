@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use mssql_tds::connection::tds_client::{
     BatchErrorMode, ExecuteOptions, PreparedBatchResult, PreparedStatement, ResultSet, StatementResult,
-    TdsClient,
 };
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::error::Error as TdsError;
@@ -28,7 +27,7 @@ use crate::decode::buffer::Cell;
 use crate::diag::{self, DiagRecord};
 use crate::params::ParamSet;
 use crate::params::udt::{self, DescribedParam};
-use crate::runtime::block_on;
+use crate::runtime::SyncClient;
 
 /// Rows per TDS request in executemany.
 const EXECUTEMANY_CHUNK: usize = 2000;
@@ -49,7 +48,7 @@ pub enum Command {
 /// Everything a command needs while it holds the wire.
 pub struct Exclusive<'a> {
     pub conn: &'a ConnShared,
-    pub client: &'a mut TdsClient,
+    pub client: &'a mut SyncClient,
     pub state: &'a mut StmtState,
     pub cancel: &'a Arc<StmtCancel>,
     pub timeout: u32,
@@ -119,9 +118,9 @@ impl Drop for ExecutingGuard<'_> {
 }
 
 /// Restore the client to a usable state after a failed request.
-fn recover(client: &mut TdsClient) {
+fn recover(client: &mut SyncClient) {
     if client.has_open_batch() {
-        let _ = block_on(client.cancel_query(RECOVER_SETTLE_SECS));
+        let _ = client.block_on(|c| c.cancel_query(RECOVER_SETTLE_SECS));
     }
     let _ = client.take_info_messages();
 }
@@ -130,7 +129,7 @@ fn recover(client: &mut TdsClient) {
 /// transaction is open before the next statement.
 fn prepare_session(
     conn: &ConnShared,
-    client: &mut TdsClient,
+    client: &mut SyncClient,
     timeout: u32,
     cancel: &StmtCancel,
 ) -> Result<(), Vec<DiagRecord>> {
@@ -147,9 +146,10 @@ fn prepare_session(
     if statements.is_empty() {
         return Ok(());
     }
-    let result = block_on(async {
-        client.execute(statements.join("; "), options(timeout, cancel)).await?;
-        client.close_query().await
+    let opts = options(timeout, cancel);
+    let result = client.block_on(|c| async move {
+        c.execute(statements.join("; "), opts).await?;
+        c.close_query().await
     });
     let _ = client.take_info_messages();
     if let Err(err) = result {
@@ -220,11 +220,12 @@ fn described_params(ex: &mut Exclusive<'_>, sql: &str) -> Result<Vec<DescribedPa
     let mut rows = RowBuffer::new();
     let opts = options(ex.timeout, ex.cancel);
     let client = &mut *ex.client;
-    let outcome = block_on(async {
-        if client.execute(query, opts).await? == StatementResult::Rows {
-            while client.next_row_into(&mut rows).await? {}
+    let sink = &mut rows;
+    let outcome = client.block_on(|c| async move {
+        if c.execute(query, opts).await? == StatementResult::Rows {
+            while c.next_row_into(sink).await? {}
         }
-        client.close_query().await
+        c.close_query().await
     });
     let _ = client.take_info_messages();
     match outcome {
@@ -275,7 +276,7 @@ fn run_command(ex: &mut Exclusive<'_>, command: Command) -> SqlReturn {
     let result = match command {
         Command::Batch(sql) => {
             let opts = options(ex.timeout, ex.cancel).on_error(batch_mode);
-            block_on(ex.client.execute(sql, opts))
+            ex.client.block_on(|c| c.execute(sql, opts))
         }
         Command::Parameterized(sql, mut params) => {
             if let Err(records) = resolve_null_types(ex, &sql, &mut params) {
@@ -287,11 +288,11 @@ fn run_command(ex: &mut Exclusive<'_>, command: Command) -> SqlReturn {
                 return SQL_ERROR;
             }
             let opts = options(ex.timeout, ex.cancel);
-            block_on(ex.client.execute_sp_executesql(sql, params.into_rpc(), opts))
+            ex.client.block_on(|c| c.execute_sp_executesql(sql, params.into_rpc(), opts))
         }
         Command::Typed(sql, params) => {
             let opts = options(ex.timeout, ex.cancel);
-            block_on(ex.client.execute_sp_executesql(sql, params, opts))
+            ex.client.block_on(|c| c.execute_sp_executesql(sql, params, opts))
         }
     };
     let ret = apply_result(ex, result);
@@ -365,7 +366,7 @@ fn run_batch(ex: &mut Exclusive<'_>, sql: String, mut rows: Vec<Vec<SqlType>>, a
         let is_last = remaining.len() == 0;
         let params = chunk.into_iter().enumerate().map(move |(i, types)| Ok((base + i, name_positionally(types))));
         let opts = options(ex.timeout, ex.cancel);
-        let result = block_on(ex.client.begin_execute_prepared_batch(&mut prepared, params, &mut orphaned, opts));
+        let result = ex.client.block_on(|c| c.begin_execute_prepared_batch(&mut prepared, params, &mut orphaned, opts));
         ex.state.diag.extend(diag::info_records(&ex.client.take_info_messages()));
         ret = progress.absorb_chunk(ex, result, is_last);
         if ret != SQL_SUCCESS {
@@ -380,7 +381,7 @@ fn run_batch(ex: &mut Exclusive<'_>, sql: String, mut rows: Vec<Vec<SqlType>>, a
         // clear; a stream left open for OUTPUT rows keeps it until the
         // session is reset.
         if !ex.client.has_open_batch() {
-            let _ = block_on(ex.client.unprepare(id, ()));
+            let _ = ex.client.block_on(|c| c.unprepare(id, ()));
         }
     }
     let _ = ex.client.take_info_messages();
