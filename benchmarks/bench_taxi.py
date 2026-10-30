@@ -103,7 +103,30 @@ def run_mssql_python(quick: bool) -> dict:
             mssql_python.connect(cs, autocommit=True).close()
         return 50
 
+    def arrow_100k():
+        cur = conn.cursor()
+        cur.execute(ALL_COLS)
+        return cur.arrow().num_rows
+
+    def arrow_3m_all_cols():
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM dbo.yellow_trips")
+        return cur.arrow(batch_size=65_536).num_rows
+
+    def duckdb_over_arrow_3m():
+        import duckdb
+
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM dbo.yellow_trips")
+        reader = cur.arrow_reader(batch_size=65_536)
+        return duckdb.sql(
+            "SELECT PULocationID, count(*), avg(total_amount) FROM reader GROUP BY 1"
+        ).fetchall().__len__()
+
     workloads = {
+        "arrow_100k_all_cols": arrow_100k,
+        "arrow_3m_all_cols": arrow_3m_all_cols,
+        "duckdb_over_arrow_3m": duckdb_over_arrow_3m,
         "fetchall_100k_all_cols": fetchall_100k,
         "fetchone_100k_all_cols": fetchone_100k,
         "fetchmany_3m_narrow": fetchmany_3m,
@@ -113,7 +136,8 @@ def run_mssql_python(quick: bool) -> dict:
         "connect_close_x50": connect_close_50,
     }
     if quick:
-        workloads.pop("fetchmany_3m_narrow")
+        for name in ("fetchmany_3m_narrow", "arrow_3m_all_cols", "duckdb_over_arrow_3m"):
+            workloads.pop(name)
     return {name: timed(fn, repeats) for name, fn in workloads.items()}
 
 

@@ -9,3 +9,4 @@ pandas
 azure-identity
 zstandard
 mssql-python-rs==0.3.0
+duckdb
