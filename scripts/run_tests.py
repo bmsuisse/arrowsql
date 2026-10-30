@@ -2,6 +2,7 @@
 
     python scripts/run_tests.py <db-id> <pytest args...>
     python scripts/run_tests.py sync_io tests/upstream/test_004_cursor.py -x
+    RUN_TESTS_PYTHON=.venv-upstream/bin/python python scripts/run_tests.py me tests/common_issues/test_x.py
 
 Uses this worktree's .venv, loads DB_CONNECTION_STRING from the main
 checkout's .env.local and points it at database rs_agent_<db-id> (created if
@@ -47,7 +48,8 @@ def main() -> int:
         return 2
     db = "rs_agent_" + re.sub(r"\W", "_", sys.argv[1])
     env = {**os.environ, **load_env(main_checkout() / ".env.local")}
-    python = ROOT / ".venv" / "bin" / "python"
+    # RUN_TESTS_PYTHON selects another interpreter, e.g. <main>/.venv-upstream/bin/python for ground truth.
+    python = Path(os.environ.get("RUN_TESTS_PYTHON", ROOT / ".venv" / "bin" / "python"))
     ensure_database(python, env["DB_CONNECTION_STRING"], db)
     env["DB_CONNECTION_STRING"] = env["DB_CONNECTION_STRING"].replace("Database=master", f"Database={db}")
     args = [str(ROOT / a) if (ROOT / a.split("::")[0]).exists() else a for a in sys.argv[2:]]
