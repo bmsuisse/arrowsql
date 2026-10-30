@@ -67,6 +67,13 @@ fn clear() {
     drop(drained);
 }
 
+/// Runs in a forked child. The idle sockets belong to the parent, so they are
+/// leaked, not closed: a close would write to the parent's live connection.
+pub fn forget_after_fork() {
+    let inherited = IDLE.lock().take();
+    std::mem::forget(inherited);
+}
+
 #[pyfunction]
 #[pyo3(signature = (max_size=100, idle_timeout=600))]
 pub fn enable_pooling(max_size: i64, idle_timeout: i64) {
