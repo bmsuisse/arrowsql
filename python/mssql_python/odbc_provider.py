@@ -155,6 +155,12 @@ class ProviderManager:
         """
         provider = cls.effective()
         package = _PACKAGE_BY_PROVIDER[provider]
+        # RUST-PORT: the Rust bindings speak TDS natively; no ODBC driver
+        # package needs to be importable.
+        from mssql_python import ddbc_bindings
+
+        if getattr(ddbc_bindings, "__rust_port__", False):
+            return cls.resolve()
         try:
             importlib.import_module(package)
         except ModuleNotFoundError as exc:
