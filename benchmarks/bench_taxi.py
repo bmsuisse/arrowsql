@@ -40,7 +40,10 @@ def conn_str() -> str:
 
 
 def timed(fn, repeats: int) -> dict:
-    fn()  # warm-up: connection setup, plan cache, page cache
+    try:
+        fn()  # warm-up: connection setup, plan cache, page cache
+    except Exception as exc:  # a driver that lacks a feature still reports the rest
+        return {"error": f"{type(exc).__name__}: {exc}"[:200]}
     samples = []
     for _ in range(repeats):
         start = time.perf_counter()
