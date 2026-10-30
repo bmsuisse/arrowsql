@@ -18,6 +18,7 @@ import fnmatch
 import json
 import os
 import platform
+import fcntl
 import subprocess
 import sys
 import time
@@ -61,13 +62,19 @@ def oom_first():
         pass
 
 
+BENCH_LOCK = Path.home() / "devops" / ".mssql-rs-bench.lock"
+
+
 def run_child(spec, main: Path, argv: list[str], timeout: int, pooled: bool = False):
     cmd = [str(python_for(spec, main)), "-I", str(HERE / "child.py"), "--driver", spec.name, *argv]
-    try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=child_env(spec, main, pooled),
-                           preexec_fn=oom_first)
-    except subprocess.TimeoutExpired:
-        return {"status": "timeout", "reason": f"exceeded {timeout}s"}
+    # One measurement at a time machine-wide: parallel agents otherwise time each other's load.
+    with open(BENCH_LOCK, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                               env=child_env(spec, main, pooled), preexec_fn=oom_first)
+        except subprocess.TimeoutExpired:
+            return {"status": "timeout", "reason": f"exceeded {timeout}s"}
     for line in reversed(p.stdout.splitlines()):
         if line.startswith("BENCHRESULT "):
             return json.loads(line[len("BENCHRESULT "):])
