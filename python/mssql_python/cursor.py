@@ -3272,7 +3272,9 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         rows; the cursor stays usable. ``rownumber`` is not advanced.
         """
         self._check_closed()
-        return ddbc_bindings.DDBCArrowStream(self.hstmt, max(batch_size, 1), max(prefetch, 1))
+        return ddbc_bindings.DDBCArrowStream(
+            self.hstmt, max(batch_size, 1), max(prefetch, 1), self
+        )
 
     def nextset(self) -> Optional[bool]:
         """

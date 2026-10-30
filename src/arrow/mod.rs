@@ -118,18 +118,20 @@ pub fn fetch_arrow_table(
 }
 
 /// Stream the rest of the current result as Arrow batches decoded ahead on a
-/// background thread (`prefetch` batches deep).
+/// background thread (`prefetch` batches deep). `owner` (the Python cursor)
+/// is kept alive for as long as the stream.
 #[pyfunction]
-#[pyo3(name = "DDBCArrowStream", signature = (StatementHandle, batch_size=DEFAULT_BATCH_ROWS, prefetch=2))]
+#[pyo3(name = "DDBCArrowStream", signature = (StatementHandle, batch_size=DEFAULT_BATCH_ROWS, prefetch=2, owner=None))]
 #[allow(non_snake_case)]
 pub fn arrow_stream(
     StatementHandle: &Bound<'_, PyAny>,
     batch_size: usize,
     prefetch: usize,
+    owner: Option<Py<PyAny>>,
 ) -> PyResult<ArrowStream> {
     let stmt = statement::stmt_of(StatementHandle)?;
     let (plan, generation) = current_plan(&stmt)?;
-    Ok(ArrowStream::start(stmt, plan, generation, batch_size.max(1), prefetch))
+    Ok(ArrowStream::start(stmt, plan, generation, batch_size.max(1), prefetch, owner))
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

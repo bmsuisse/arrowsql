@@ -45,7 +45,10 @@ decode/buffer.rs RowBuffer (GIL-free) ──► decode/python.rs (GIL held) ─�
 | `pooling.rs` | connection pool (RESETCONNECTION on reuse) |
 | `rowfactory.rs` | `construct_rows` (Row objects without `__init__`) |
 | `types.rs` | `ParamInfo`, `NumericData`, `ErrorInfo` |
-| `arrow.rs` | Arrow fetch (stub; seam described in the file) |
+| `arrow/plan.rs` | SQL column -> Arrow type (mirrors upstream's C++ mapping) |
+| `arrow/sink.rs` | `ArrowSink`: `RowWriter` decoding TDS rows into Arrow buffers |
+| `arrow/export.rs` | PyCapsule export, `ArrowTable`, pipelined `ArrowStream` |
+| `arrow/mod.rs` | `DDBCSQLFetchArrowBatch`, `DDBCArrowFetchTable`, `DDBCArrowStream` |
 | `logging.rs` | log-level bridge (stub) |
 
 ## Return codes and diagnostics
@@ -111,7 +114,49 @@ before reading the next. An error met while reading ahead is held in
 `statement::read_rows_into<W: RowWriter + Send>(client, sink, rows_fn,
 bytes_fn, max_rows, max_bytes)` drives mssql-tds's row decoder into any
 `mssql_tds::datatypes::row_writer::RowWriter`. `RowBuffer` is the Python
-sink; an Arrow sink implements the same trait (see `arrow.rs`).
+sink; `arrow::sink::ArrowSink` is the Arrow one. Batch sinks implement
+`statement::BatchSink` and are filled by `statement::fetch_into`, which
+takes rows already buffered as cells first (read ahead by `fetchone`,
+or drained for MARS emulation) and then decodes straight off the wire, so
+Arrow and row fetches interleave on one result.
+
+## Arrow
+
+`ArrowSink` keeps one plain buffer set per column (values, offsets,
+validity bits) and writes each value as mssql-tds decodes it: no Python
+objects, no per-cell allocation, UTF-16 converted to UTF-8 in one pass
+(ASCII fast path, else `encoding_rs`) straight into the column's data
+buffer. A whole batch is decoded with the GIL released; `finish()` wraps
+the buffers as arrow-rs arrays without copying.
+
+Why arrow-rs (`arrow-array`/`-buffer`/`-data`/`-schema`, `ffi` feature)
+rather than `pyo3-arrow` or a hand-written C Data Interface: `pyo3-arrow`
+pins its own pyo3 version (we are on 0.29) and brings a large API we don't
+need; hand-writing the release callbacks for schemas, arrays and streams
+is exactly the kind of unsafe code arrow-rs already gets right. We use it
+only for the array wrappers and the FFI export, not for building.
+
+Three ways out (see `docs/ARROW_PLAN.md`):
+
+- `DDBCSQLFetchArrowBatch`: upstream's contract (struct-array capsules)
+  behind `cursor.arrow()`, `arrow_batch()`, `arrow_reader()`.
+- `DDBCArrowFetchTable` -> `ArrowTable` (`cursor.fetchall_arrow()`,
+  `fetchmany_arrow()`): all batches decoded in one GIL-free call; the
+  table exports `__arrow_c_stream__` any number of times.
+- `DDBCArrowStream` -> `ArrowStream` (`cursor.arrow_stream()`): a producer
+  thread runs `fetch_into` batch by batch (locks taken per batch, so other
+  statements on the connection can interleave) into a bounded channel.
+  It stops when the receiver is dropped, or when the statement's
+  `StmtState::generation` changes (re-execute, nextset, close). A stream
+  dropped before its end discards the rest of the result
+  (`statement::abandon_result`). It holds the Python cursor so a
+  temporary cursor isn't freed under it.
+
+`mssql_python.read_arrow()` (`python/mssql_python/arrow_parallel.py`)
+splits a query on an integer column and reads the ranges over separate
+connections from plain threads; decode is GIL-free so they run in
+parallel. `ArrowTable.concat` joins the parts. One TDS session is capped by
+SQL Server's serialization rate, so this is the only way past it.
 
 ## executemany
 

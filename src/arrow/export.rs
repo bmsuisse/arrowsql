@@ -65,6 +65,40 @@ impl ArrowTable {
 
 #[pymethods]
 impl ArrowTable {
+    /// One table holding the batches of `tables`, which must share a schema
+    /// (nullability may differ; the result's fields are nullable if any is).
+    #[staticmethod]
+    fn concat(tables: Vec<PyRef<'_, ArrowTable>>) -> PyResult<ArrowTable> {
+        let Some(first) = tables.first() else {
+            return Err(PyValueError::new_err("concat() needs at least one table"));
+        };
+        let mut fields: Vec<arrow_schema::Field> =
+            first.schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+        for table in &tables[1..] {
+            let other = table.schema.fields();
+            let same = other.len() == fields.len()
+                && fields.iter().zip(other.iter()).all(|(a, b)| {
+                    a.name() == b.name() && a.data_type() == b.data_type()
+                });
+            if !same {
+                return Err(PyValueError::new_err("concat() needs tables with the same columns"));
+            }
+            for (field, theirs) in fields.iter_mut().zip(other.iter()) {
+                if theirs.is_nullable() && !field.is_nullable() {
+                    *field = field.clone().with_nullable(true);
+                }
+            }
+        }
+        let schema: SchemaRef = Arc::new(arrow_schema::Schema::new(fields));
+        let mut batches = Vec::new();
+        for table in &tables {
+            for batch in &table.batches {
+                batches.push(batch.clone().with_schema(schema.clone()).map_err(arrow_err)?);
+            }
+        }
+        Ok(ArrowTable::new(schema, batches))
+    }
+
     #[getter]
     fn num_rows(&self) -> usize {
         self.batches.iter().map(RecordBatch::num_rows).sum()
@@ -129,6 +163,11 @@ struct StreamCore {
     consumed: AtomicBool,
     /// The producer reached the end of the result.
     exhausted: Arc<AtomicBool>,
+    /// The Python cursor, kept alive by the stream and by every C stream
+    /// exported from it: `cur.execute(q).arrow_stream()` leaves no other
+    /// reference, and freeing the cursor would free the statement mid-stream.
+    /// (Dropped without the GIL on a consumer thread, pyo3 defers the decref.)
+    _owner: Option<Py<PyAny>>,
 }
 
 impl StreamCore {
@@ -228,7 +267,14 @@ pub struct ArrowStream {
 }
 
 impl ArrowStream {
-    pub fn start(stmt: Arc<StmtShared>, plan: Plan, generation: u64, batch_rows: usize, depth: usize) -> ArrowStream {
+    pub fn start(
+        stmt: Arc<StmtShared>,
+        plan: Plan,
+        generation: u64,
+        batch_rows: usize,
+        depth: usize,
+        owner: Option<Py<PyAny>>,
+    ) -> ArrowStream {
         let (tx, rx) = sync_channel(depth.max(1));
         let exhausted = Arc::new(AtomicBool::new(false));
         let producer = {
@@ -248,6 +294,7 @@ impl ArrowStream {
                 exporting: AtomicBool::new(false),
                 consumed: AtomicBool::new(false),
                 exhausted,
+                _owner: owner,
             }),
         }
     }

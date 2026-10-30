@@ -49,7 +49,10 @@ Connection errors raise `RuntimeError("SQLSTATE:XXXXX:NATIVE:<n>:<message>")`.
 | `DDBCSQLSetStmtAttr` | `(stmt, attr, value)` | partial (`SQL_ATTR_QUERY_TIMEOUT`; others accepted) | statement.rs |
 | `DDBCSQLCheckError` | `(handleType, handle, retcode) -> ErrorInfo` | impl (first record, with `nativeError`) | statement.rs |
 | `DDBCSQLGetAllDiagRecords` | `(handle) -> list[("[SSSSS] (native)", message)]` | impl (C++ tuple shape; native number in the state label) | statement.rs |
-| `DDBCSQLFetchArrowBatch` | `(StatementHandle, capsules, arrowBatchSize, charCtype, messages=None)` | stub | arrow.rs |
+| `DDBCSQLFetchArrowBatch` | `(StatementHandle, capsules, arrowBatchSize, charCtype, messages=None)` | implemented | arrow/mod.rs |
+| `DDBCArrowFetchTable` (port-only) | `(StatementHandle, max_rows=-1, batch_size=65536, messages=None) -> (ret, ArrowTable)` | implemented | arrow/mod.rs |
+| `DDBCArrowStream` (port-only) | `(StatementHandle, batch_size=65536, prefetch=2, owner=None) -> ArrowStream` | implemented | arrow/mod.rs |
+| `ArrowTable`, `ArrowStream` (port-only classes) | Arrow PyCapsule protocol; `ArrowTable.concat(tables)` | implemented | arrow/export.rs |
 | `DDBCSQLFetch` | `(StatementHandle)` | stub (unused by the Python layer) | lib.rs |
 | `DDBCSQLGetData` | `(StatementHandle, colCount, row, charEncoding, wcharEncoding, charCtype, messages=None)` | stub (unused) | lib.rs |
 | `DDBCSQLTables` | `(StatementHandle, catalog="", schema="", table="", tableType="")` | partial (`sp_tables`) | catalog.rs |

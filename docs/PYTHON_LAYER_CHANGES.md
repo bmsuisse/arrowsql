@@ -70,3 +70,7 @@ attributes; pre-#581 pickles (4 reduce args) still load.
   need no pyarrow: the objects implement the Arrow PyCapsule protocol. The
   upstream methods `arrow()`, `arrow_batch()`, `arrow_reader()` are unchanged
   and run on the same native decoder through `DDBCSQLFetchArrowBatch`.
+- `arrow_parallel.py` (new) + `__init__.py` export: `mssql_python.read_arrow(
+  connection_str, query, partition_on=None, partitions=1, batch_size=65536)`
+  reads integer-range partitions of a query over separate connections in
+  parallel threads and returns one `ArrowTable` (`ArrowTable.concat`).

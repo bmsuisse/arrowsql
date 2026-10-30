@@ -64,6 +64,9 @@ from .connection_string_builder import _ConnectionStringBuilder
 # Cursor Objects
 from .cursor import Cursor
 
+# RUST-PORT: partitioned parallel Arrow reads
+from .arrow_parallel import read_arrow
+
 # Row Objects
 from .row import Row, RowMapping
 

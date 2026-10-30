@@ -212,6 +212,18 @@ def test_arrow_stream_into_duckdb(cursor):
     assert result == (100_000, 100_000 * 100_001 // 2)
 
 
+def test_arrow_stream_keeps_temporary_cursor_alive(conn):
+    """`conn.cursor().execute(q).arrow_stream()` leaves the stream as the
+    only reference to the cursor; collecting the cursor must not free the
+    statement under the stream."""
+    stream = conn.cursor().execute(numbers(50_000)).arrow_stream(batch_size=4096)
+    gc.collect()
+    reader = pa.RecordBatchReader.from_stream(stream)
+    del stream
+    gc.collect()
+    assert sum(batch.num_rows for batch in reader) == 50_000
+
+
 def test_arrow_stream_schema_peek_does_not_consume(cursor):
     cursor.execute(numbers(10))
     stream = cursor.arrow_stream()
@@ -278,6 +290,43 @@ def test_stream_error_mid_result_surfaces(cursor):
     with pytest.raises(Exception, match="(?i)divide by zero"):
         for _ in reader:
             pass
+
+
+def test_table_concat(cursor):
+    cursor.execute("SELECT 1 AS a, NULL AS b")
+    first = cursor.fetchall_arrow()
+    cursor.execute("SELECT 2 AS a, NULL AS b")
+    both = ddbc_bindings.ArrowTable.concat([first, cursor.fetchall_arrow()])
+    assert pa.table(both).column("a").to_pylist() == [1, 2]
+    cursor.execute("SELECT N'x' AS a")
+    with pytest.raises(ValueError, match="same columns"):
+        ddbc_bindings.ArrowTable.concat([first, cursor.fetchall_arrow()])
+
+
+def test_read_arrow_partitioned_matches_single(conn_str, cursor, table_name):
+    import mssql_python
+
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (id int NULL, v nvarchar(20))")
+    cursor.execute(
+        f"INSERT INTO dbo.{table_name} SELECT n, CONCAT(N'v', n) FROM ({numbers(10_007)}) t"
+    )
+    cursor.execute(f"INSERT INTO dbo.{table_name} VALUES (NULL, N'null-id')")
+    cursor.connection.commit()
+    query = f"SELECT id, v FROM dbo.{table_name}"
+    single = pa.table(mssql_python.read_arrow(conn_str, query))
+    parallel = pa.table(mssql_python.read_arrow(conn_str, query, partition_on="id", partitions=4))
+    assert parallel.num_rows == single.num_rows == 10_008
+    key = [("id", "ascending")]
+    assert parallel.sort_by(key).equals(single.sort_by(key))
+
+
+def test_read_arrow_rejects_non_integer_partition(conn_str):
+    import mssql_python
+
+    with pytest.raises(TypeError, match="integer"):
+        mssql_python.read_arrow(
+            conn_str, "SELECT N'a' AS s", partition_on="s", partitions=2
+        )
 
 
 def test_large_stream_bounded_memory(cursor):
