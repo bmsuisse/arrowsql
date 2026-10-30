@@ -18,7 +18,6 @@ import fnmatch
 import json
 import os
 import platform
-import fcntl
 import subprocess
 import sys
 import time
