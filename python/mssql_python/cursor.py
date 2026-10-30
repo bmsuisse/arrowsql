@@ -3510,19 +3510,8 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         return isinstance(data, (pa.Table, pa.RecordBatch, pa.RecordBatchReader))
 
     @staticmethod
-    def _bulkcopy_core_and_validate(table_name, batch_size, timeout):
-        """Import the native core and validate the args shared by ``bulkcopy``
-        and ``bulkcopy_arrow``. Returns the native ``mssql_py_core`` extension."""
-        try:
-            # Upgrading from a bundled core can remove the package's __init__.py.
-            mssql_py_core = import_module("mssql_py_core.mssql_py_core")
-        except ImportError as exc:
-            logger.error("bulkcopy: Failed to import mssql_py_core module")
-            raise ImportError(
-                "Bulk copy requires the mssql_py_core library which is not available. "
-                "This is an unexpected error. "
-            ) from exc
-
+    def _bulkcopy_validate(table_name, batch_size, timeout):
+        """Validate the args shared by ``bulkcopy`` and ``bulkcopy_arrow``."""
         if not table_name or not isinstance(table_name, str):
             logger.error("bulkcopy: Invalid table_name parameter")
             raise ValueError("table_name must be a non-empty string")
@@ -3539,7 +3528,37 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         if timeout < 0:
             raise ValueError(f"timeout must be non-negative, got {timeout}")
 
-        return mssql_py_core
+    @staticmethod
+    def _bulkcopy_import_core():
+        """Import the ``mssql_py_core`` extension, the fallback bulk copy engine."""
+        try:
+            # Upgrading from a bundled core can remove the package's __init__.py.
+            return import_module("mssql_py_core.mssql_py_core")
+        except ImportError as exc:
+            logger.error("bulkcopy: Failed to import mssql_py_core module")
+            raise ImportError(
+                "Bulk copy requires the mssql_py_core library which is not available. "
+                "This is an unexpected error. "
+            ) from exc
+
+    @classmethod
+    def _bulkcopy_core_and_validate(cls, table_name, batch_size, timeout):
+        """Validate the shared args, then import the ``mssql_py_core`` fallback engine."""
+        cls._bulkcopy_validate(table_name, batch_size, timeout)
+        return cls._bulkcopy_import_core()
+
+    # RUST-PORT: bulk copy runs in-process on this cursor's connection.
+    def _native_bulk_handle(self, function_name):
+        """Return the native statement handle when ``ddbc_bindings`` can run
+        ``function_name`` on this cursor's connection, else None (the caller
+        then uses ``mssql_py_core``)."""
+        handle = getattr(self, "hstmt", None)
+        handle_type = getattr(ddbc_bindings, "SqlHandle", None)
+        if handle is None or handle_type is None or not isinstance(handle, handle_type):
+            return None
+        if not hasattr(ddbc_bindings, function_name):
+            return None
+        return handle
 
     @staticmethod
     def _bulkcopy_teardown(pycore_context, pycore_cursor, pycore_connection):
@@ -3744,6 +3763,28 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         finally:
             self._bulkcopy_teardown(pycore_context, pycore_cursor, pycore_connection)
 
+    # RUST-PORT
+    def _bulkcopy_arrow_native(self, table_name, source, **options):
+        """Run ``bulkcopy_arrow`` in-process. Returns None when this cursor or
+        source is one only ``mssql_py_core`` can handle."""
+        handle = self._native_bulk_handle("DDBCBulkCopyArrow")
+        if handle is None:
+            return None
+        # An iterable of RecordBatch is not re-readable, so only mssql_py_core takes it.
+        if not (hasattr(source, "__arrow_c_stream__") or hasattr(source, "__arrow_c_array__")):
+            return None
+        self._check_closed()
+        # No fallback on BulkUnsupported: mssql_py_core accepts exactly the same
+        # (Arrow type, SQL type) pairs, and a one-shot reader is gone by then.
+        result = ddbc_bindings.DDBCBulkCopyArrow(handle, table_name, source, **options)
+        logger.info(
+            "bulkcopy_arrow: completed natively - rows_copied=%s, batch_count=%s, elapsed_time=%s",
+            result.get("rows_copied", "N/A"),
+            result.get("batch_count", "N/A"),
+            result.get("elapsed_time", "N/A"),
+        )
+        return result
+
     def bulkcopy_arrow(
         self,
         table_name: str,
@@ -3812,7 +3853,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         """
         is_logging_enabled = logger.is_debug_enabled
 
-        mssql_py_core = self._bulkcopy_core_and_validate(table_name, batch_size, timeout)
+        self._bulkcopy_validate(table_name, batch_size, timeout)
 
         if source is None or isinstance(source, (str, bytes)):
             got = "None" if source is None else type(source).__name__
@@ -3821,6 +3862,26 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 "an iterable of RecordBatch, or an object implementing "
                 f"__arrow_c_stream__/__arrow_c_array__, got {got}"
             )
+
+        # RUST-PORT: load in-process on this connection; mssql_py_core only
+        # takes over for schemas the native encoders do not cover.
+        native_result = self._bulkcopy_arrow_native(
+            table_name,
+            source,
+            batch_size=batch_size,
+            timeout=timeout,
+            column_mappings=column_mappings,
+            keep_identity=keep_identity,
+            check_constraints=check_constraints,
+            table_lock=table_lock,
+            keep_nulls=keep_nulls,
+            fire_triggers=fire_triggers,
+            use_internal_transaction=use_internal_transaction,
+        )
+        if native_result is not None:
+            return native_result
+
+        mssql_py_core = self._bulkcopy_import_core()
 
         pycore_context = self._build_pycore_context()
 
