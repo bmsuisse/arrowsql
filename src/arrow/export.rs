@@ -279,6 +279,7 @@ impl ArrowStream {
         slf
     }
 
+    #[pyo3(signature = (*_args))]
     fn __exit__(&self, py: Python<'_>, _args: &Bound<'_, PyTuple>) {
         self.close(py);
     }

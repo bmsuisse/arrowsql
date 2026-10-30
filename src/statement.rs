@@ -670,6 +670,14 @@ impl SqlHandle {
     }
 
     fn _cancel(&self) {
+        // Like SQLCancel, only an operation in flight is cancelled. Every
+        // network operation holds the state lock, so if it is free the
+        // statement is idle; arming the handle then would instead fail some
+        // later, unrelated read on the connection (e.g. close()).
+        if let Some(idle) = self.inner.state.try_lock() {
+            drop(idle);
+            return;
+        }
         if let Some(handle) = self.inner.cancel.lock().as_ref() {
             handle.cancel();
         }
