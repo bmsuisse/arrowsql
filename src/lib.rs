@@ -134,7 +134,7 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(statement::set_stmt_attr, m)?)?;
     m.add_function(wrap_pyfunction!(statement::get_all_diag_records, m)?)?;
     m.add_function(wrap_pyfunction!(statement::check_error, m)?)?;
-    m.add_function(wrap_pyfunction!(arrow::fetch_arrow_batch, m)?)?;
+    arrow::register(m)?;
 
     m.add_function(wrap_pyfunction!(catalog::tables, m)?)?;
     m.add_function(wrap_pyfunction!(catalog::columns, m)?)?;

@@ -71,6 +71,9 @@ pub struct StmtState {
     queued: VecDeque<BufferedResult>,
     pub query_timeout: u32,
     freed: bool,
+    /// Bumped whenever the current results are discarded (execute, close).
+    /// Background Arrow producers stop when it no longer matches theirs.
+    pub generation: u64,
 }
 
 impl StmtState {
@@ -83,6 +86,7 @@ impl StmtState {
     }
 
     fn reset_results(&mut self) {
+        self.generation += 1;
         self.columns = None;
         self.rowcount = -1;
         self.on_wire = false;
@@ -493,7 +497,134 @@ fn fetch(stmt: &StmtShared, n: usize, readahead: usize) -> Fetched {
     Fetched { rows, ncols, info, ret }
 }
 
-fn append_messages(py: Python<'_>, messages: Option<&Bound<'_, PyAny>>, info: &[DiagRecord]) -> PyResult<()> {
+/// A sink that whole batches are decoded into (e.g. Arrow builders). It is
+/// filled from rows already buffered as `RowBuffer` cells (read ahead by
+/// `fetchone`, or drained off the wire for MARS emulation), then straight
+/// from the wire through `read_rows_into`.
+pub trait BatchSink: RowWriter + Send {
+    /// Complete rows written so far.
+    fn rows(&self) -> usize;
+    /// Approximate bytes held.
+    fn byte_size(&self) -> usize;
+    /// Append the rows of `rows`, an `ncols`-wide buffer.
+    fn push_buffered(&mut self, rows: &RowBuffer, ncols: usize);
+    /// Drop the values of a row that was only partly decoded when an error hit.
+    fn truncate_to_rows(&mut self);
+}
+
+/// Outcome of `fetch_into`.
+pub struct SinkFetch {
+    pub ret: SqlReturn,
+    /// Info records produced by this fetch (for the `messages` list).
+    pub info: Vec<DiagRecord>,
+    /// The statement moved on to other results since `generation` was taken.
+    pub stale: bool,
+}
+
+/// Current result columns and result generation; `None` without a result.
+pub fn result_columns(stmt: &StmtShared) -> Option<(Arc<Vec<ColumnMetadata>>, u64)> {
+    let state = stmt.state.lock();
+    state.columns.clone().map(|c| (c, state.generation))
+}
+
+/// Deliver up to `n` rows of the current result into `sink`: buffered rows
+/// first, then rows decoded straight off the wire. With `generation`, does
+/// nothing (and reports `stale`) if the statement moved on to other results.
+pub fn fetch_into<S: BatchSink>(
+    stmt: &StmtShared,
+    sink: &mut S,
+    n: usize,
+    generation: Option<u64>,
+) -> SinkFetch {
+    let mut slot = stmt.conn.slot.lock();
+    let mut state = stmt.state.lock();
+    if state.freed || generation.is_some_and(|g| g != state.generation) {
+        return SinkFetch { ret: SQL_NO_DATA, info: vec![], stale: true };
+    }
+    state.diag.clear();
+    if state.columns.is_none() {
+        state.diag.push(DiagRecord::new(
+            "24000",
+            0,
+            "[Microsoft][ODBC Driver Manager] Invalid cursor state",
+        ));
+        return SinkFetch { ret: SQL_ERROR, info: vec![], stale: false };
+    }
+    let ncols = state.ncols();
+    let start = sink.rows();
+    if n > 0 && state.pending_rows() > 0 {
+        let buffered = state.take_pending(n);
+        sink.push_buffered(&buffered, ncols);
+    }
+    let want = n - (sink.rows() - start);
+    let mut error = None;
+    if want > 0
+        && state.pending_rows() == 0
+        && state.pending_error.is_none()
+        && state.on_wire
+        && !state.result_done
+        && let Some(client) = slot.client.as_mut()
+    {
+        if client.on_rows() {
+            match read_rows_into(client, sink, S::rows, S::byte_size, want, usize::MAX) {
+                Ok(done) => state.result_done = done,
+                Err(err) => {
+                    sink.truncate_to_rows();
+                    state.result_done = true;
+                    error = Some(diag::records_for_error(&err, "HY000"));
+                    if !client.has_open_batch() {
+                        state.on_wire = false;
+                    }
+                }
+            }
+        } else {
+            state.result_done = true;
+        }
+        state.diag.extend(diag::info_records(&client.take_info_messages()));
+    }
+    let delivered = sink.rows() - start;
+    if let Some(err) = error {
+        // Rows decoded before the error are delivered; the error comes next.
+        if delivered == 0 {
+            state.diag.extend(err);
+            return SinkFetch { ret: SQL_ERROR, info: vec![], stale: false };
+        }
+        state.pending_error = Some(err);
+    }
+    let info = state.diag.clone();
+    let ret = if delivered > 0 || n == 0 {
+        if info.is_empty() { SQL_SUCCESS } else { SQL_SUCCESS_WITH_INFO }
+    } else if let Some(err) = state.pending_error.take() {
+        state.diag = err;
+        SQL_ERROR
+    } else {
+        SQL_NO_DATA
+    };
+    SinkFetch { ret, info, stale: false }
+}
+
+/// Discard the current result if it is still generation `generation`: an
+/// Arrow stream was dropped before its end, so nobody will read the rest.
+pub fn abandon_result(stmt: &StmtShared, generation: u64) {
+    let mut slot = stmt.conn.slot.lock();
+    if stmt.state.lock().generation != generation {
+        return;
+    }
+    if slot.owner.as_ref().is_some_and(|(id, _)| *id == stmt.id) {
+        release_wire(&mut slot, stmt.id);
+    }
+    let mut state = stmt.state.lock();
+    if state.generation == generation {
+        state.reset_results();
+    }
+}
+
+/// Error records of the statement (after a failed `fetch_into`).
+pub fn diag_records(stmt: &StmtShared) -> Vec<DiagRecord> {
+    stmt.state.lock().diag.clone()
+}
+
+pub fn append_messages(py: Python<'_>, messages: Option<&Bound<'_, PyAny>>, info: &[DiagRecord]) -> PyResult<()> {
     let Some(messages) = messages else { return Ok(()) };
     if messages.is_none() || info.is_empty() {
         return Ok(());
@@ -505,7 +636,7 @@ fn append_messages(py: Python<'_>, messages: Option<&Bound<'_, PyAny>>, info: &[
     Ok(())
 }
 
-fn stmt_of(handle: &Bound<'_, PyAny>) -> PyResult<Arc<StmtShared>> {
+pub fn stmt_of(handle: &Bound<'_, PyAny>) -> PyResult<Arc<StmtShared>> {
     Ok(handle.cast::<SqlHandle>()?.get().inner.clone())
 }
 
@@ -875,6 +1006,7 @@ pub fn more_results(py: Python<'_>, statement_handle: &Bound<'_, PyAny>) -> PyRe
         let mut slot = stmt.conn.slot.lock();
         let mut state = stmt.state.lock();
         state.diag.clear();
+        state.generation += 1;
         state.pending.clear();
         state.pending_pos = 0;
         state.pending_error = None;
