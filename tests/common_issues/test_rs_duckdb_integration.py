@@ -227,14 +227,13 @@ def test_time7_arrow_keeps_nanoseconds_duckdb_truncates_to_micro(cursor):
     assert con.execute("SELECT tm FROM t").fetchone() == (datetime.time(12, 34, 56, 123456),)
 
 
-@pytest.mark.upstream_bug(
+@pytest.mark.xfail(
+    strict=True,
     reason=(
-        "DATETIME2(7) fractional seconds are truncated to microseconds in the Arrow "
-        "result (timestamp[us]); the server value carries 100ns digits and TIME(7) "
-        "keeps nanoseconds, so the handling is inconsistent"
-    )
+        "documented contract: DATETIME2(7) maps to timestamp[us] in Arrow (100ns digits "
+        "truncated); both upstream and the port keep it for compatibility"
+    ),
 )
-@pytest.mark.xfail(strict=True, reason="upstream bug")
 def test_datetime2_7_keeps_100ns_in_arrow(cursor):
     cursor.execute("SELECT CAST('2024-01-02 03:04:05.1234567' AS DATETIME2(7)) ts")
     t = cursor.arrow()
