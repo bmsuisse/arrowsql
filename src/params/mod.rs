@@ -14,28 +14,54 @@ pub mod py_types;
 
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::message::parameters::rpc_parameters::{RpcParameter, StatusFlags};
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PySequence};
+use pyo3::types::{PyInt, PyList, PySequence, PyTuple};
 
 use py_types::{ParameterHint, py_to_sql_type, py_to_sql_type_with_hint};
 
-/// Parse `setinputsizes()` entries as handed to DDBCSQLExecute. Each entry is
-/// either an int SQL type or a (sql_type, size, scale) tuple; anything else
-/// is ignored.
-fn parse_hint(item: &Bound<'_, PyAny>) -> Option<ParameterHint> {
+/// Parses one `setinputsizes()` entry. cursor.py always builds a
+/// `(sql_type, c_type, column_size, decimal_digits)` tuple; `None` leaves the
+/// parameter to inference. Malformed entries raise, as upstream's tuple cast does.
+fn parse_hint(item: &Bound<'_, PyAny>) -> PyResult<Option<ParameterHint>> {
     if item.is_none() {
-        return None;
+        return Ok(None);
     }
-    if let Ok(sql_type) = item.extract::<i32>() {
-        return ParameterHint::new(sql_type, 0, 0).ok();
+    let fields = item.cast::<PyTuple>().map_err(|_| {
+        PyTypeError::new_err("setinputsizes entries must be (sql_type, c_type, size, scale) tuples")
+    })?;
+    if fields.len() != 4 {
+        return Err(PyValueError::new_err(format!(
+            "setinputsizes entries must have 4 fields, got {}",
+            fields.len()
+        )));
     }
-    if let Ok(seq) = item.cast::<PySequence>() {
-        let sql_type = seq.get_item(0).ok()?.extract::<i32>().ok()?;
-        let size = seq.get_item(1).ok().and_then(|v| v.extract::<u32>().ok()).unwrap_or(0);
-        let scale = seq.get_item(2).ok().and_then(|v| v.extract::<u8>().ok()).unwrap_or(0);
-        return ParameterHint::new(sql_type, size, scale).ok();
+    let sql_type = fields.get_item(0)?.extract::<i32>()?;
+    let size = u32::try_from(saturating_size(&fields.get_item(2)?)?).unwrap_or(u32::MAX);
+    let scale = u8::try_from(saturating_size(&fields.get_item(3)?)?).unwrap_or(u8::MAX);
+    ParameterHint::new(sql_type, size, scale)
+        .map(Some)
+        .map_err(|error| conversion_error(&error))
+}
+
+/// Reads a non-negative `setinputsizes()` integer. Values beyond `u64` saturate
+/// rather than fail, so the caller clamps oversized precision and scale to the
+/// SQL Server limits as upstream does.
+fn saturating_size(value: &Bound<'_, PyAny>) -> PyResult<u64> {
+    if !value.is_instance_of::<PyInt>() {
+        return Err(PyTypeError::new_err(
+            "setinputsizes column size and decimal digits must be integers",
+        ));
     }
-    None
+    if let Ok(number) = value.extract::<u64>() {
+        return Ok(number);
+    }
+    if value.lt(0)? {
+        return Err(PyValueError::new_err(
+            "setinputsizes column size and decimal digits must be non-negative",
+        ));
+    }
+    Ok(u64::MAX)
 }
 
 /// Converted parameters, before naming. `untyped_nulls` lists positions of
@@ -63,10 +89,12 @@ pub fn build_rpc_params(
 ) -> PyResult<ParamSet> {
     let seq = params.cast::<PySequence>()?;
     let hints: Vec<Option<ParameterHint>> = match input_sizes {
-        Some(sizes) if !sizes.is_none() => match sizes.cast::<PyList>() {
-            Ok(list) => list.iter().map(|i| parse_hint(&i)).collect(),
-            Err(_) => Vec::new(),
-        },
+        Some(sizes) if !sizes.is_none() => sizes
+            .cast::<PyList>()
+            .map_err(|_| PyTypeError::new_err("setinputsizes must be a list"))?
+            .iter()
+            .map(|entry| parse_hint(&entry))
+            .collect::<PyResult<_>>()?,
         _ => Vec::new(),
     };
     let len = seq.len()?;
@@ -74,7 +102,13 @@ pub fn build_rpc_params(
     let mut untyped_nulls = Vec::new();
     for i in 0..len {
         let value = seq.get_item(i)?;
-        let hint = hints.get(i).copied().flatten();
+        // A NULL whose hint carries metadata a SQL NULL cannot hold is typed by
+        // the server, the same as an untyped NULL.
+        let hint = hints
+            .get(i)
+            .copied()
+            .flatten()
+            .filter(|hint| !(value.is_none() && hint.null_needs_server_type()));
         if hint.is_none() && value.is_none() {
             untyped_nulls.push(i);
         }
@@ -88,18 +122,16 @@ pub fn build_rpc_params(
     Ok(ParamSet { types, untyped_nulls })
 }
 
-/// Out-of-range values raise ValueError (like the C++ binding); values of an
-/// unsupported type raise TypeError.
+/// Maps a conversion failure to the Python exception upstream raises for it.
+///
+/// `TypeConversionError` marks a value the target type cannot represent
+/// (overflow, out of range, precision, non-finite) and raises `ValueError`.
+/// `UsageError` marks a value of a type the driver cannot bind and raises
+/// `TypeError`. The message is passed through unprefixed so it matches upstream.
 pub fn conversion_error(err: &mssql_tds::error::Error) -> PyErr {
-    let msg = err.to_string();
-    let lower = msg.to_ascii_lowercase();
-    if lower.contains("precision") {
-        pyo3::exceptions::PyValueError::new_err(format!(
-            "Precision of the numeric value is too high - the maximum precision supported by SQL Server is 38 ({msg})"
-        ))
-    } else if lower.contains("range") || lower.contains("overflow") {
-        pyo3::exceptions::PyValueError::new_err(msg)
-    } else {
-        pyo3::exceptions::PyTypeError::new_err(msg)
+    match err {
+        mssql_tds::error::Error::TypeConversionError(msg) => PyValueError::new_err(msg.clone()),
+        mssql_tds::error::Error::UsageError(msg) => PyTypeError::new_err(msg.clone()),
+        other => PyTypeError::new_err(other.to_string()),
     }
 }
