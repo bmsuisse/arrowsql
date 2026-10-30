@@ -24,6 +24,8 @@ mod runtime;
 mod statement;
 mod types;
 mod arrow;
+#[cfg(unix)]
+mod aio;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -135,6 +137,8 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(statement::get_all_diag_records, m)?)?;
     m.add_function(wrap_pyfunction!(statement::check_error, m)?)?;
     arrow::register(m)?;
+    #[cfg(unix)]
+    aio::register(m)?;
 
     m.add_function(wrap_pyfunction!(catalog::tables, m)?)?;
     m.add_function(wrap_pyfunction!(catalog::columns, m)?)?;
