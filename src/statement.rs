@@ -29,7 +29,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::connection::{ConnShared, Slot};
 use crate::consts::*;
-use crate::decode::{RowBuffer, describe, python as pyconv};
+use crate::decode::{RowBuffer, describe, python as pyconv, text};
 use crate::diag::{self, DiagRecord};
 use crate::params::ParamSet;
 use crate::params::py_types::py_to_sql_type;
@@ -452,6 +452,8 @@ struct Fetched {
     /// Info records produced by this fetch (for the `messages` list).
     info: Vec<DiagRecord>,
     ret: SqlReturn,
+    /// The result set has a LOB column, so upstream streams it row by row.
+    has_lob: bool,
 }
 
 /// Deliver up to `n` rows. `readahead` controls how many rows to pull from
@@ -461,7 +463,13 @@ fn fetch(stmt: &StmtShared, n: usize, readahead: usize) -> Fetched {
     let mut state = stmt.state.lock();
     state.diag.clear();
     if state.freed {
-        return Fetched { rows: RowBuffer::new(), ncols: 0, info: vec![], ret: SQL_INVALID_HANDLE };
+        return Fetched {
+            rows: RowBuffer::new(),
+            ncols: 0,
+            info: vec![],
+            ret: SQL_INVALID_HANDLE,
+            has_lob: false,
+        };
     }
     if state.columns.is_none() {
         state.diag.push(DiagRecord::new(
@@ -469,7 +477,13 @@ fn fetch(stmt: &StmtShared, n: usize, readahead: usize) -> Fetched {
             0,
             "[Microsoft][ODBC Driver Manager] Invalid cursor state",
         ));
-        return Fetched { rows: RowBuffer::new(), ncols: 0, info: vec![], ret: SQL_ERROR };
+        return Fetched {
+            rows: RowBuffer::new(),
+            ncols: 0,
+            info: vec![],
+            ret: SQL_ERROR,
+            has_lob: false,
+        };
     }
     if state.pending_rows() < n
         && let Some(client) = slot.client.as_mut()
@@ -479,6 +493,7 @@ fn fetch(stmt: &StmtShared, n: usize, readahead: usize) -> Fetched {
     }
     let rows = state.take_pending(n);
     let ncols = state.ncols();
+    let has_lob = state.columns.as_ref().is_some_and(|cols| cols.iter().any(describe::is_lob));
     let info = state.diag.clone();
     let ret = if rows.rows > 0 {
         if info.is_empty() { SQL_SUCCESS } else { SQL_SUCCESS_WITH_INFO }
@@ -490,7 +505,13 @@ fn fetch(stmt: &StmtShared, n: usize, readahead: usize) -> Fetched {
     };
     drop(state);
     drop(slot);
-    Fetched { rows, ncols, info, ret }
+    Fetched { rows, ncols, info, ret, has_lob }
+}
+
+/// Malformed UTF-16 policy for a batch fetch. Upstream binds bounded columns
+/// in bulk, which is lossy; a LOB column forces row-wise, strict decoding.
+fn bulk_utf16_errors(has_lob: bool) -> text::Utf16Errors {
+    if has_lob { text::Utf16Errors::Strict } else { text::Utf16Errors::BulkBounded }
 }
 
 fn append_messages(py: Python<'_>, messages: Option<&Bound<'_, PyAny>>, info: &[DiagRecord]) -> PyResult<()> {
@@ -808,7 +829,7 @@ pub fn fetch_many(
     let stmt = stmt_of(StatementHandle)?;
     let fetched = py.detach(|| fetch(&stmt, fetchSize, fetchSize));
     append_messages(py, messages, &fetched.info)?;
-    pyconv::append_rows(py, &fetched.rows, fetched.ncols, rows)?;
+    pyconv::append_rows(py, &fetched.rows, fetched.ncols, rows, bulk_utf16_errors(fetched.has_lob))?;
     // An empty fetchmany at end-of-data is a success with no rows upstream.
     Ok(if fetched.ret == SQL_NO_DATA { SQL_SUCCESS } else { fetched.ret })
 }
@@ -830,7 +851,8 @@ pub fn fetch_all(
     loop {
         let fetched = py.detach(|| fetch(&stmt, FETCHALL_BATCH_ROWS, FETCHALL_BATCH_ROWS));
         append_messages(py, messages, &fetched.info)?;
-        pyconv::append_rows(py, &fetched.rows, fetched.ncols, rows)?;
+        let errors = bulk_utf16_errors(fetched.has_lob);
+        pyconv::append_rows(py, &fetched.rows, fetched.ncols, rows, errors)?;
         match fetched.ret {
             SQL_NO_DATA => break,
             SQL_SUCCESS_WITH_INFO => ret = SQL_SUCCESS_WITH_INFO,
