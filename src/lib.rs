@@ -89,6 +89,8 @@ fn sql_get_data(
 
 #[pymodule]
 fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Resolve temporal classes before any fetch, so substitutions made before import apply.
+    decode::temporal::init(m.py())?;
     m.add("__doc__", "mssql-tds (Rust) bindings for mssql-python")?;
     m.add("__version__", "1.0.0")?;
     m.add("__architecture__", std::env::consts::ARCH)?;
