@@ -12,6 +12,7 @@ export (server-side file export; bcp only).
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,6 +58,9 @@ SPECS: dict[str, Spec] = {s.name: s for s in [
 
 
 def python_for(spec: Spec, main: Path) -> Path:
+    # RUST_PORT_VENV lets a worktree benchmark its own (release) build.
+    if spec.name == "rust_port" and os.environ.get("RUST_PORT_VENV"):
+        return Path(os.environ["RUST_PORT_VENV"]) / "bin" / "python"
     return main / (spec.venv or ".venv-upstream") / "bin" / "python"
 
 
