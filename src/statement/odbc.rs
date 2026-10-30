@@ -151,7 +151,8 @@ pub fn execute_many(
         rows.push(types);
         nulls.push(null_row);
     }
-    let all_null = crate::params::batch::normalize(&mut rows, &nulls);
+    let all_null = crate::params::batch::normalize(&mut rows, &nulls)
+        .map_err(|e| crate::params::conversion_error(&e))?;
     Ok(py.detach(|| execute_batch(&stmt, sql, rows, all_null)))
 }
 
