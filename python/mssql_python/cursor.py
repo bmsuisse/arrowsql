@@ -378,6 +378,13 @@ _SQL_TYPE_TO_PYTHON_TYPE = {
 }
 
 
+# RUST-PORT: plain ints for the status checks on every execute and fetch.
+# `ddbc_sql_const.X.value` goes through enum's Python-level descriptor on each access.
+_SQL_HANDLE_STMT = ddbc_sql_const.SQL_HANDLE_STMT.value
+_SQL_SUCCESS_WITH_INFO = ddbc_sql_const.SQL_SUCCESS_WITH_INFO.value
+_SQL_NO_DATA = ddbc_sql_const.SQL_NO_DATA.value
+
+
 class _ResultLayout:  # pylint: disable=too-few-public-methods
     """
     RUST-PORT: metadata derived from one result-set layout.
@@ -1159,7 +1166,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         if self.hstmt:
             ret = ddbc_bindings.DDBCSQLResetStmt(self.hstmt)
             try:
-                check_error(ddbc_sql_const.SQL_HANDLE_STMT.value, self.hstmt, ret)
+                check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
             except Exception:
                 logger.warning("_soft_reset_cursor failed; falling back to full reset")
                 self._reset_cursor()
@@ -1232,10 +1239,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         Composite native fetches capture intermediate diagnostics directly
         into self.messages before subsequent ODBC calls can replace them.
         """
-        if self.hstmt and ret in (
-            ddbc_sql_const.SQL_SUCCESS_WITH_INFO.value,
-            ddbc_sql_const.SQL_NO_DATA.value,
-        ):
+        if self.hstmt and ret in (_SQL_SUCCESS_WITH_INFO, _SQL_NO_DATA):
             self.messages.extend(ddbc_bindings.DDBCSQLGetAllDiagRecords(self.hstmt))
 
     def _ensure_pyarrow(self) -> Any:
@@ -1889,9 +1893,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             else:
                 parameters = []
 
-        # Getting encoding setting
-        encoding_settings = self._get_encoding_settings()
-
         # Validate that inputsizes matches parameter count if both are present
         if parameters and self._inputsizes:
             if len(self._inputsizes) != len(parameters):
@@ -1913,6 +1914,8 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
 
         with perf_phase("py::execute::cpp_call"):
             if parameters:
+                # Only the parameterized call takes encoding settings.
+                encoding_settings = self._get_encoding_settings()
                 ret = ddbc_bindings.DDBCSQLExecute(
                     self.hstmt,
                     operation,
@@ -1928,7 +1931,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         try:
 
             # Check for errors but don't raise exceptions for info/warning messages
-            check_error(ddbc_sql_const.SQL_HANDLE_STMT.value, self.hstmt, ret)
+            check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning("Execute failed, resetting cursor: %s", e)
             self._reset_cursor()
@@ -2913,9 +2916,9 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                     self.messages,
                 )
 
-            check_error(ddbc_sql_const.SQL_HANDLE_STMT.value, self.hstmt, ret)
+            check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
 
-            if ret == ddbc_sql_const.SQL_NO_DATA.value:
+            if ret == _SQL_NO_DATA:
                 # No more data available
                 if self._next_row_index == 0 and self.description is not None:
                     self.rowcount = 0
@@ -3064,7 +3067,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 )
 
             # Check for errors
-            check_error(ddbc_sql_const.SQL_HANDLE_STMT.value, self.hstmt, ret)
+            check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
 
             # Update rownumber for the number of rows actually fetched
             if rows_data and self._has_result_set:

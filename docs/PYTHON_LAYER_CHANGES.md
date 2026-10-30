@@ -88,6 +88,13 @@ every `execute()`. The port now caches that work per result layout.
 | `cursor.py` `_ResultLayout` (new) | Holds the metadata list, description, SQL type codes, column maps and the converter map for one result layout. |
 | `cursor.py` `_initialize_description` | Reuses the cached `_ResultLayout` when the column metadata and the `lowercase` setting match the previous result; otherwise builds one (`_build_result_layout`). |
 | `cursor.py` `execute` | Takes the column maps and converter map from the layout. The converter map is rebuilt only when `connection._converters_generation` changes. Drops the `SQLRowCount` call that was immediately overwritten for SELECTs. |
+| `cursor.py` `_SQL_HANDLE_STMT`, `_SQL_SUCCESS_WITH_INFO`, `_SQL_NO_DATA` (module level) | Plain ints for the status checks in `execute`, `fetchone`, `fetchall` and the reset and diagnostics helpers, instead of `ddbc_sql_const.X.value` (an enum descriptor call per access). |
+| `cursor.py` `execute` | `_get_encoding_settings()` runs only for a parameterized `DDBCSQLExecute`, not for `DDBCSQLExecDirect`, which takes no encoding argument. |
+
+The per-execute `DDBCSQLDescribeCol` call stays. A cache keyed on a native
+layout signature would skip it, but the upstream test
+`test_execute_describe_col_exception_resets_description_and_sql_types` requires
+that call on every execute.
 
 Behaviour is unchanged: each execute still returns a new `description` only when
 the layout differs, the description list is never mutated in place, and the
