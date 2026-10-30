@@ -26,7 +26,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mssql_tds::connection::bulk_copy::{BulkCopy, BulkCopyResult, BulkLoadRow, ColumnMapping};
-use mssql_tds::connection::tds_client::TdsClient;
 use mssql_tds::datatypes::bulk_copy_metadata::BulkCopyColumnMetadata;
 use mssql_tds::error::Error as TdsError;
 use mssql_tds::error::bulk_copy_errors::BulkCopyError;
@@ -35,7 +34,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::consts::*;
-use crate::runtime::block_on;
+use crate::runtime::SyncClient;
 use crate::statement::{self, StmtShared, with_exclusive_wire};
 use settings::{BulkSettings, Resolved, SourceShape};
 
@@ -120,9 +119,9 @@ impl Outcome {
 }
 
 /// Restore the client to a usable state after a failed bulk request.
-fn recover(client: &mut TdsClient) {
+fn recover(client: &mut SyncClient) {
     if client.has_open_batch() {
-        let _ = block_on(client.cancel_query(RECOVER_SETTLE_SECS));
+        let _ = client.block_on(|c| c.cancel_query(RECOVER_SETTLE_SECS));
     }
     let _ = client.take_info_messages();
 }
@@ -130,7 +129,7 @@ fn recover(client: &mut TdsClient) {
 /// Run `load` while holding the connection's wire. The GIL must not be held.
 fn with_wire(
     stmt: &Arc<StmtShared>,
-    load: impl FnOnce(&mut TdsClient) -> Result<Outcome, BulkFailure>,
+    load: impl FnOnce(&mut SyncClient) -> Result<Outcome, BulkFailure>,
 ) -> Result<Outcome, BulkFailure> {
     let mut outcome = None;
     let code = with_exclusive_wire(stmt, |ex| {
@@ -166,7 +165,7 @@ where
     R: BulkLoadRow,
 {
     with_wire(stmt, |client| {
-        block_on(async {
+        client.block_on(|client| async move {
             let mut bulk = BulkCopy::new(client, settings.table_name.clone())
                 .batch_size(settings.batch_size)
                 .timeout(Duration::from_secs(settings.timeout_secs))
