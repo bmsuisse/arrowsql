@@ -1,0 +1,21 @@
+[package]
+name = "tds_probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Speed-of-light experiments over mssql-tds (reads, partitioned reads, latency)"
+
+# Standalone: not part of the ddbc_bindings crate.
+[workspace]
+
+[dependencies]
+mssql-tds = { git = "https://github.com/microsoft/mssql-rs", rev = "6b6b48ecbbbdad297039d1641e2be4775eed998b", default-features = false, features = ["gssapi"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+uuid = "1"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+debug = 1
