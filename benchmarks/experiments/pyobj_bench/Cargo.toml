@@ -1,0 +1,19 @@
+[package]
+name = "pyobj_bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Per-cell cost of building Python objects from Rust (PyO3 / CPython C API)"
+
+[workspace]
+
+[lib]
+name = "pyobj_bench"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.29.0", features = ["extension-module"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
