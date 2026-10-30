@@ -75,3 +75,12 @@ attributes; pre-#581 pickles (4 reduce args) still load.
   reads integer-range partitions of a query over separate connections in
   parallel threads and returns one `ArrowTable` (`ArrowTable.concat`).
 - `bulk_parallel.py` (new) + `__init__.py` export: `mssql_python.write_arrow(connection_str, table, source, workers=4, batch_size=0, table_lock=True)` cuts an Arrow source into slices and bulk-loads them over `workers` connections, each with `cursor.bulkcopy_arrow(table_lock=True)`. Heap targets only; other targets fall back to one worker with a `RuntimeWarning`.
+
+## Packaging (docs/PACKAGING.md)
+
+- `cursor.py` `_bulkcopy_core_and_validate`: the `mssql_py_core` import failure
+  now names the `async-preview` extra (`RUST-PORT`). The import itself is
+  unchanged.
+- `pyproject.toml`: no required dependencies. `async-preview`, `arrow` and
+  `azure` are optional extras. No Python-layer code changed for them: the
+  imports were already lazy.

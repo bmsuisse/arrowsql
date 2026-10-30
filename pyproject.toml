@@ -8,10 +8,16 @@ version = "0.1.0"
 description = "mssql-python with its ODBC/C++ core replaced by Rust (PyO3 + mssql-tds)"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = [
-    # bulkcopy() and the async_query package still use Microsoft's mssql_py_core.
-    "mssql-python-rs==0.3.0",
-]
+# The core has no required runtime dependencies. Everything else is opt-in.
+dependencies = []
+
+[project.optional-dependencies]
+# Upstream async_query preview and bulkcopy() (still served by Microsoft's mssql_py_core).
+async-preview = ["mssql-python-rs==0.3.0"]
+# Arrow fetch (arrow(), arrow_batch(), read_arrow()) and Arrow bulk insert.
+arrow = ["pyarrow>=14"]
+# Azure AD credential helpers (auth= / token_provider= with azure-identity credentials).
+azure = ["azure-identity"]
 
 [tool.maturin]
 python-source = "python"
