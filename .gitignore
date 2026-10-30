@@ -9,3 +9,4 @@ __pycache__/
 *.log
 .worktrees/
 .codegraph/
+reviews/*.log
