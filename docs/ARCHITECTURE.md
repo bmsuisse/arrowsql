@@ -54,6 +54,12 @@ decode/buffer.rs RowBuffer (GIL-free) ──► decode/python.rs (GIL held) ─�
 | `arrow/sink.rs` | `ArrowSink`: `RowWriter` decoding TDS rows into Arrow buffers |
 | `arrow/export.rs` | PyCapsule export, `ArrowTable`, pipelined `ArrowStream` |
 | `arrow/mod.rs` | `DDBCSQLFetchArrowBatch`, `DDBCArrowFetchTable`, `DDBCArrowStream` |
+| `bulk/mod.rs` | `DDBCBulkCopyArrow` / `DDBCBulkCopyRows`: bulk load on the cursor's own connection (`with_exclusive_wire`), `BulkUnsupported`, result dict |
+| `bulk/settings.rs` | bulk options, `column_mappings` parsing, source -> destination column mapping |
+| `bulk/arrow_source.rs` | Arrow PyCapsule (`__arrow_c_stream__` / `__arrow_c_array__`) -> record batch stream |
+| `bulk/arrow_encode.rs` | (Arrow type, SQL type) column plans, `ColumnValues` fallback cells, windows of rows |
+| `bulk/arrow_wire.rs`, `bulk/wire.rs` | direct TDS encoding of cells into a per-row byte buffer (byte-for-byte what `TdsValueSerializer` writes) |
+| `bulk/rows.rs` | Python tuples -> TDS rows, read a window at a time under the GIL |
 | `logging.rs` | log-level bridge (stub) |
 
 ## Return codes and diagnostics
@@ -177,6 +183,43 @@ splits a query on an integer column and reads the ranges over separate
 connections from plain threads; decode is GIL-free so they run in
 parallel. `ArrowTable.concat` joins the parts. One TDS session is capped by
 SQL Server's serialization rate, so this is the only way past it.
+
+## Bulk copy
+
+`Cursor.bulkcopy` / `bulkcopy_arrow` call `DDBCBulkCopyRows` / `DDBCBulkCopyArrow`
+with the cursor's `SqlHandle`. The load takes the connection's wire like any
+statement (`with_exclusive_wire`, GIL released), so it runs on the cursor's own
+session: a `#temp` table is visible (upstream #492) and, in manual-commit mode,
+the load is part of the open transaction (upstream opened a second, autonomous
+connection). Because it holds the wire, a source that itself reads the same
+connection cannot be streamed: `Cursor` sources are read first
+(`Cursor._bulk_row_iterator`) and a `cursor.arrow_stream()` is drained before the
+load starts. Other generators that query the same connection from inside the
+load would deadlock.
+
+mssql-tds's `BulkCopy::write_to_server_zerocopy` drives the load from an
+iterator of `BulkLoadRow`s. Serializing a row cell by cell through its async
+serializer costs ~45 ns (int) to ~90 ns (decimal) per cell, many times the cost
+of the bytes. So both sources encode a *window* of rows (up to 8 MiB / 8192
+Arrow rows, 4 MiB / 4096 / 20 ms of Python rows) into one buffer in a tight
+synchronous loop and each `BulkLoadRow` writes its slice with one
+`write_raw_bytes`. `bulk/wire.rs` reproduces `TdsValueSerializer` byte for byte
+for ints, bit, real/float, decimal, money, date/time types, wide and narrow text
+(PLP included), binary and GUID, driven by the same `TdsTypeContext` facts
+(`Layout`: fixed type, fixed length, PLP, precision). Cells without an encoder
+(xml, json, vector, ...) stay on the `ColumnValues` path: window `Step`s alternate
+between encoded runs and single serialized cells. Every encoded type is tested
+against `mssql_py_core`'s stored result (`tests/common_issues/test_rs_bulk_native*.py`).
+
+A value that cannot be encoded does not end the stream quietly: the window
+becomes one row whose `write_to_packet` fails, which aborts the load as any bad
+value does (nothing commits for `batch_size=0`). A Python exception from a row
+iterator is re-raised unchanged.
+
+Planning (Arrow type x SQL type) happens after the destination metadata is read
+and before any row is sent; an unsupported pairing raises
+`ddbc_bindings.BulkUnsupported` (a `ValueError`). Python falls back to
+`mssql_py_core` only for cursors without a native handle.
 
 ## executemany
 

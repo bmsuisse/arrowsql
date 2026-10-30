@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 mod arrow;
+mod bulk;
 mod catalog;
 mod connection;
 mod connstr;
@@ -149,6 +150,7 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(statement::get_all_diag_records, m)?)?;
     m.add_function(wrap_pyfunction!(statement::check_error, m)?)?;
     arrow::register(m)?;
+    bulk::register(m)?;
     #[cfg(unix)]
     aio::register(m)?;
 

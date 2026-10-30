@@ -99,3 +99,20 @@ that call on every execute.
 Behaviour is unchanged: each execute still returns a new `description` only when
 the layout differs, the description list is never mutated in place, and the
 converter map is still keyed on the converter generation.
+
+## Native bulk copy (docs/ARCHITECTURE.md, "Bulk copy")
+
+- `cursor.py` `bulkcopy` / `bulkcopy_arrow`: when `self.hstmt` is a native
+  `ddbc_bindings.SqlHandle`, the load runs in-process on the cursor's own
+  connection through `DDBCBulkCopyRows` / `DDBCBulkCopyArrow` (`RUST-PORT`).
+  Consequences: a `#temp` target works (upstream #492); in manual-commit mode the
+  load joins the open transaction instead of committing on a second connection;
+  no token acquisition or `mssql_py_core` import. The preconditions of the old
+  path are kept (`_bulkcopy_connection_params`: connection string present, SERVER
+  given). `mssql_py_core` serves only cursors without a native handle (mocks) and
+  iterables of `RecordBatch`; `_bulkcopy_core_and_validate` is now
+  `_bulkcopy_validate` + `_bulkcopy_import_core`.
+- `Cursor._bulk_row_iterator` (the former nested `_prepare_row_iterator`) also
+  materializes a `Cursor` of the same connection used as a row source, which
+  would otherwise deadlock on the connection's wire.
+- Timeout errors read "Bulk copy timeout: the operation timed out after N seconds".

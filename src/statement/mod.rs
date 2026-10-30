@@ -32,6 +32,7 @@ use crate::diag::DiagRecord;
 use cancel::StmtCancel;
 use cursor::StmtState;
 use exec::{Command, execute_command};
+pub(crate) use exec::with_exclusive_wire;
 
 #[allow(unused_imports)] // the decode seam for new row sinks
 pub use cursor::read_rows_into;

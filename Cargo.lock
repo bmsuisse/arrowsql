@@ -282,6 +282,7 @@ dependencies = [
  "arrow-buffer",
  "arrow-data",
  "arrow-schema",
+ "async-trait",
  "bigdecimal",
  "chrono",
  "encoding_rs",

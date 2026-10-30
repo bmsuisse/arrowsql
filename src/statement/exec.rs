@@ -60,7 +60,7 @@ fn options(timeout: u32, cancel: &StmtCancel) -> ExecuteOptions<'_> {
 
 /// Take the connection for `stmt`, run `body` on it, and leave the statement
 /// registered as the wire's owner if results are still pending.
-pub(super) fn with_exclusive_wire(
+pub(crate) fn with_exclusive_wire(
     stmt: &Arc<StmtShared>,
     body: impl FnOnce(&mut Exclusive<'_>) -> SqlReturn,
 ) -> SqlReturn {
