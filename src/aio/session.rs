@@ -165,8 +165,9 @@ impl Session {
         self.client.as_ref().is_some_and(|c| !c.is_connection_dead())
     }
 
-    /// Hand the client back for pooling: no live batch, reset on next request.
-    pub async fn into_reusable(mut self) -> Option<Session> {
+    /// Hand the client back for pooling: no live batch, and (when `reset`)
+    /// session state reset on the next request.
+    pub async fn into_reusable(mut self, reset: bool) -> Option<Session> {
         self.release_wire(0).await;
         let client = self.client.as_mut()?;
         if client.is_connection_dead() || client.has_open_batch() {
@@ -175,9 +176,11 @@ impl Session {
         if client.has_active_transaction() {
             client.rollback_transaction(None, None).await.ok()?;
         }
-        // RESETCONNECTION rides on the next request: no extra round trip.
-        client.prepare_reset_connection(false);
-        self.implicit_txn = false;
+        if reset {
+            // RESETCONNECTION rides on the next request: no extra round trip.
+            client.prepare_reset_connection(false);
+            self.implicit_txn = false;
+        }
         self.cursors.clear();
         Some(self)
     }

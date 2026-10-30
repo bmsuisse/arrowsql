@@ -40,7 +40,16 @@ timeout in seconds.
 Defaults: `aio.connect` uses `autocommit=False` like the sync driver (DB-API);
 a pool uses `autocommit=True`, because the `pool.fetch()`-style shortcuts have
 no place to commit. Pooled sessions are reset (TDS RESETCONNECTION flag, no
-extra round trip) when they are reused.
+extra round trip) when they are reused; the server-side reset still costs
+roughly 50-80 µs per checkout, so `create_pool(..., reset=False)` skips it for
+pools whose queries leave no session state behind (open transactions are
+always rolled back). `tuple_rows=True` returns plain tuples instead of `Row`
+objects.
+
+Limits: untyped `None` parameters get their type from
+`sp_describe_undeclared_parameters`, which cannot see `#temp` tables (same as
+the sync driver); bind such values with a typed expression
+(`CAST(? AS varbinary(max))`) there.
 
 Unix only for now (the completion hub uses `loop.add_reader` on a socket
 pair); Windows' Proactor loop has no `add_reader`.
@@ -89,3 +98,105 @@ sink::ArrowSink, export::ArrowTable}`, `statement::BatchSink` (trait only),
 `runtime::runtime()`. The only edits outside `src/aio` are `mod aio` +
 `aio::register` in `lib.rs` and making `decode::python::cell_to_py`
 `pub(crate)`.
+
+## Benchmark
+
+`benchmarks/bench_async.py`: 2,000 point lookups
+(`SELECT trip_id, total_amount FROM dbo.yellow_trips WHERE trip_id = ?`) on
+the NYC taxi table, queries per second at 1/16/64/256 concurrent workers.
+Release build, SQL Server 2022 in podman on the same host, Python 3.13. The
+box was shared with other jobs (load average 8-9), so cells are the best of
+two full runs and differences under ~15 % are noise.
+
+| mode | 1 | 16 | 64 | 256 |
+|---|---:|---:|---:|---:|
+| `aio` connection per worker (`port_aio`) | **6,975** | **44,154** | 39,915 | **41,078** |
+| `aio` pool, `pool.fetchrow()` (`port_aio_pool`) | 5,656 | 39,021 | **42,473** | 35,664 |
+| FastMssql 0.7.7 (tiberius + tokio, bb8 pool) | 2,971 | 13,888 | 15,357 | failed¹ |
+| upstream `asyncio.to_thread` over sync mssql-python | 4,988 | 8,864 | 7,654 | 7,233 |
+| port `asyncio.to_thread` over sync driver | 4,628 | 8,898 | 5,346 | 7,544 |
+| upstream async preview (`mssql_py_core`) | 3,037 | 6,744 | 6,984 | 6,965 |
+
+¹ FastMssql could not open 256 pooled connections ("tls handshake eof").
+
+So `aio` is 2.6-3.2x FastMssql at 16-64 workers, about 5x upstream's
+threads and 6x upstream's async preview under concurrency, and 1.4x upstream
+`to_thread` with a single worker. Why: worker threads never touch the GIL;
+one wake-up of the loop completes every operation finished since the last
+one; the first rows come back with `execute`; and the shape (description,
+column maps) is built once per result shape, not per query.
+
+## Sync concurrency gap
+
+Port vs upstream with `asyncio.to_thread` over the sync driver (3 alternating
+rounds, qps at 1/16/64 threads): port 3,932-4,226 / 7,684-8,465 /
+5,074-5,881, upstream 4,416-4,636 / 8,915-9,366 / 7,278-8,372. A later run
+with the same build gave the port 7,000-7,800 at 64, so the gap moves with
+load: about 10 % single-threaded and up to ~30 % at 64 threads.
+
+Per point lookup on one thread (`syncgap.py`: every binding call wrapped in
+a timer, 3,000 lookups):
+
+| | port | upstream |
+|---|---:|---:|
+| total per query | 153 µs | 145 µs |
+| `DDBCSQLExecute` | 122.5 µs | 117.5 µs |
+| `DDBCSQLResetStmt` | 2.6 µs | 0.6 µs |
+| `DDBCSQLFetchOne` + `DDBCSQLDescribeCol` | 2.3 µs | 7.9 µs |
+| Python layer (cursor.py) | ~23 µs | ~22 µs |
+
+The Python layer costs the same in both, and the port's fetch/describe calls
+are faster. The difference sits in `DDBCSQLExecute` (+5 µs) and
+`DDBCSQLResetStmt` (+2 µs): every sync call does `runtime::block_on` from the
+Python thread on the shared multi-thread runtime, so socket readiness is seen
+by a tokio worker, which then unparks the calling thread (two thread hops per
+network wait, where ODBC's blocking `recv` has one). Under many threads those
+extra wake-ups add up. The tokio worker count makes no measurable
+difference (1, 2, 8, 24 workers within noise), which also rules out worker
+starvation.
+
+Fixes for the core (wave-C files, not applied here):
+
+1. Drive each sync connection's I/O on the calling thread: give every sync
+   `Connection` its own current-thread tokio runtime (no threads, a reactor
+   only) and `block_on` on it. The connection mutex already guarantees one
+   caller at a time, so any thread may drive it, and readiness wakes the
+   caller directly. Expected: the +5 µs per execute disappears and the
+   high-thread-count gap with it. Touches `runtime.rs`, `connection.rs`
+   (create the client inside that runtime), and every `block_on` in
+   `statement.rs` / `arrow` (use the connection's runtime). The Arrow stream
+   producer thread works unchanged (it takes the same locks).
+2. `DDBCSQLResetStmt`: skip the slot lock / state reset when the statement has
+   no results (the common case after a fully fetched point lookup).
+3. Keep the per-shape description cache idea (done in `aio`) for the sync
+   path: today `cursor.py` rebuilds `description` per execute; ~2-3 µs of the
+   22 µs Python layer, only worth it together with (1).
+
+## PyO3 performance guide (pyo3.rs/v0.30.1/performance), applied
+
+- **cast instead of extract** for native types: `src/aio` only uses `cast`
+  (`PySequence`, `AioRowBatch`); argument parsing is done by `#[pyo3]`
+  signatures.
+- **`intern!`** for every attribute / method name on hot paths
+  (`create_future`, `done`, `set_result`, `set_exception`, Row slot names,
+  shape attributes).
+- **Rust tuples for calls** (vectorcall): `set_result((value,))`,
+  `shape_factory((specs,))`.
+- **No `Python::attach` from worker threads at all**: tasks hand plain Rust
+  data to the hub; Python objects are created in `Hub.drain`, already on the
+  loop thread with the GIL held. So there is nothing to detach around either:
+  the loop thread never waits on I/O.
+- **`pyo3_disable_reference_pool`**: measured with a separate release build
+  (3 alternating rounds, qps at 1/16/64): aio 6,671/48,789/46,453 off vs
+  6,727/45,653/40,542 on (and similar spreads in other rounds); `to_thread`
+  unchanged. Within noise, maybe +10 % at 64 aio workers. Not enabled: one
+  code path drops a `Py` without the GIL by design
+  (`arrow::export::StreamCore::_owner`, released from a DuckDB thread when a
+  consumer releases an exported C stream), which would abort with the pool
+  disabled. `src/aio` itself never drops a `Py` off the GIL.
+- **pyo3 0.30**: nothing in `aio` needs it; all of the above works on 0.29.
+
+## Test results
+
+`tests/common_issues/test_rs_aio.py`: 25 passed on Python 3.13 (dev and
+release builds) and on Python 3.15.1; skipped on upstream (no `aio` module).

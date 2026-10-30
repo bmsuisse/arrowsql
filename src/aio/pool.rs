@@ -28,6 +28,8 @@ pub struct PoolInner {
     idle: Mutex<Vec<Session>>,
     slots: Arc<Semaphore>,
     max_size: usize,
+    /// Reset session state (temp tables, SET options, ...) between users.
+    reset: bool,
     closed: AtomicBool,
 }
 
@@ -60,7 +62,7 @@ impl PoolInner {
             session.close().await;
             return;
         }
-        if let Some(session) = session.into_reusable().await {
+        if let Some(session) = session.into_reusable(self.reset).await {
             self.idle.lock().push(session);
         }
     }
@@ -179,7 +181,7 @@ impl AioPool {
 }
 
 #[pyfunction]
-#[pyo3(name = "aio_create_pool", signature = (hub, conn_str, min_size=1, max_size=10, autocommit=true, timeout=0, tuple_rows=false))]
+#[pyo3(name = "aio_create_pool", signature = (hub, conn_str, min_size=1, max_size=10, autocommit=true, timeout=0, tuple_rows=false, reset=true))]
 #[allow(clippy::too_many_arguments)]
 pub fn create_pool<'py>(
     py: Python<'py>,
@@ -190,6 +192,7 @@ pub fn create_pool<'py>(
     autocommit: bool,
     timeout: u32,
     tuple_rows: bool,
+    reset: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     if max_size == 0 || min_size > max_size {
         return Err(pyo3::exceptions::PyValueError::new_err("need 0 <= min_size <= max_size and max_size > 0"));
@@ -204,6 +207,7 @@ pub fn create_pool<'py>(
         idle: Mutex::new(Vec::with_capacity(max_size)),
         slots: Arc::new(Semaphore::new(max_size)),
         max_size,
+        reset,
         closed: AtomicBool::new(false),
     });
     let (future, _) = spawn_op(py, hub, false, None, move |_| async move {

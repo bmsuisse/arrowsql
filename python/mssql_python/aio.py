@@ -399,10 +399,16 @@ async def create_pool(
     timeout: int = 0,
     *,
     tuple_rows: bool = False,
+    reset: bool = True,
 ) -> Pool:
-    """Open ``min_size`` sessions now; up to ``max_size`` on demand."""
+    """Open ``min_size`` sessions now; up to ``max_size`` on demand.
+
+    ``reset=True`` resets each session's state (temp tables, SET options,
+    open transactions are rolled back regardless) before it is reused, via the
+    TDS reset flag on the next request; ``reset=False`` skips the server-side
+    reset for pools whose queries leave no session state behind."""
     native = await _core.aio_create_pool(
-        _hub(), connection_str, min_size, max_size, autocommit, timeout, tuple_rows
+        _hub(), connection_str, min_size, max_size, autocommit, timeout, tuple_rows, reset
     )
     return Pool(native)
 
