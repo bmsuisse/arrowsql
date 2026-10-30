@@ -42,3 +42,8 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "unwind"
+
+# Microsoft's mssql-tds at the pinned rev, with one local patch (see
+# vendor/mssql-tds/VENDOR.md). Remove when the fix is upstream.
+[patch."https://github.com/microsoft/mssql-rs"]
+mssql-tds = { path = "vendor/mssql-tds" }

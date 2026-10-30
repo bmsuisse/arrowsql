@@ -1,0 +1,121 @@
+[package]
+name = "mssql-tds"
+version = "0.3.0"
+edition = "2024"
+description = "Rust implementation of the TDS (Tabular Data Stream) protocol for SQL Server"
+license = "MIT"
+license-file = "LICENSE"
+readme = "README.md"
+repository = "https://github.com/microsoft/mssql-rs"
+keywords = ["sql-server", "tds", "mssql", "database", "async"]
+categories = ["database", "network-programming"]
+
+[features]
+default = ["integrated-auth", "tls-schannel-direct-on-windows"]
+# Windows SSPI (Security Support Provider Interface) for integrated authentication
+sspi = []
+# Unix GSSAPI (Kerberos) for integrated authentication
+gssapi = []
+# Enable both SSPI and GSSAPI for cross-platform integrated authentication
+integrated-auth = ["sspi", "gssapi"]
+# Use the in-tree Schannel-direct TLS engine (Windows-only effect; on
+# non-Windows targets this feature is a no-op because the win_tls module
+# itself is cfg(windows) gated).
+tls-schannel-direct = []
+# Default-on bundle that routes the dispatcher to the Schannel-direct
+# engine on Windows. Kept as a separate feature so downstream crates can
+# disable it (`default-features = false`) to fall back to native-tls
+# unconditionally — useful as an escape hatch if the rewrite needs to
+# be temporarily disabled in production.
+tls-schannel-direct-on-windows = ["tls-schannel-direct"]
+# Exposes in-process test helpers used only by tests and tooling: key
+# provisioning (RSA generation / PKCS#8 export, `RsaKeyStoreProvider`) and
+# serializer wire-byte capture (`test_client_support`).
+# Not part of the shipped API surface. Enabled for this crate's own tests via the
+# self dev-dependency below.
+test-util = []
+
+[package.metadata.docs.rs]
+# docs.rs builds only the default target unless told otherwise. Add Windows so
+# the SSPI and LocalDB surface is documented too.
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+
+
+
+[dependencies]
+async-trait = "0.1.89"
+tokio = { version = "1.48.0", features = ["full"] }
+tokio-native-tls = "0.3.1"
+native-tls = { version = "0.2.18", features = ["alpn"] }
+futures = "0.3.31"
+byteorder = "1.5.0"
+tokio-util = { version = "0.7.17", features = ["full"] }
+bytes = "1.11.0"
+tracing = { version = "0.1.43", features = ["log"] }
+bitflags = "2.10.0"
+thiserror = "2.0.17"
+bigdecimal = "0.4"
+# Zeroizes plaintext Always Encrypted key material (derived AEAD sub-keys and
+# resolved column encryption keys) on drop.
+zeroize = { version = "1.8", features = ["alloc", "derive"] }
+# For pretty printing of the packets in the traces.
+pretty-hex = "0.4"
+# Added for setting the keep alives on the socket.
+socket2 = { version = "0.5", features = ["all"] }
+hostname = "0.4.2"
+# For LCID-based encoding conversion (TEXT/NTEXT reading)
+encoding_rs = "0.8"
+# For certificate expiry validation (ServerCertificate feature)
+# Note: native-tls handles PEM/DER parsing, x509-parser only for expiry check
+x509-parser = "0.18.0"
+# For DNS resolution (reverse DNS lookup for SPN canonicalization)
+dns-lookup = "2.0"
+# Required to deserialize Vector(Float16) values from the TDS stream (Vector feature v2)
+half = "2.7.1"
+
+
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["namedpipeapi", "winerror", "winbase"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
+# Low-level raw SSPI / Schannel / CryptoAPI bindings for the win_tls module.
+# Pulled in directly because the `windows` crate's safe wrappers don't expose
+# the SecBuffer / InitializeSecurityContextW shapes we need verbatim. Also the
+# thread-token calls that carry a caller's impersonation to a blocking thread.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+# For runtime GSSAPI library detection using dlopen/dlsym
+libc = "0.2"
+
+# OpenSSL backs the Always Encrypted crypto primitives on every target that is
+# neither Windows (which uses CNG) nor macOS (which uses Security.framework) — see
+# `security::crypto`. OpenSSL is already the TLS backend on these platforms (via
+# `native-tls`), so it adds no new system requirement.
+[target.'cfg(all(not(windows), not(target_os = "macos")))'.dependencies]
+openssl = { version = "0.10.66" }
+
+# Apple Security.framework (`SecKey`) backs RSA and key generation for Always
+# Encrypted on macOS; AES/HMAC/SHA/RNG go through CommonCrypto in `libSystem`.
+# Both crates are already present transitively (native-tls links Security.framework
+# on Apple targets), so they add no new system requirement.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3.7.0" }
+security-framework-sys = { version = "2.17.0" }
+core-foundation = { version = "0.10.1" }
+
+[dependencies.uuid]
+version = "1.19.0"
+features = [
+    "v4",                # Lets you generate random UUIDs
+    "fast-rng",          # Use a faster (but still sufficiently random) RNG
+    "macro-diagnostics", # Enable better diagnostics for compile-time UUIDs
+]
+

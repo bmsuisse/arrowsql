@@ -170,18 +170,23 @@ pub fn build_context(
 }
 
 /// Decode an `SQL_COPT_SS_ACCESS_TOKEN` struct: little-endian u32 byte length
-/// followed by the token as UTF-16LE (msodbcsql's ACCESSTOKEN layout).
-pub fn decode_access_token(raw: &[u8]) -> Option<String> {
-    if raw.len() < 4 {
-        return None;
+/// followed by exactly that many bytes of UTF-16LE token (msodbcsql's
+/// ACCESSTOKEN layout). Anything else is rejected rather than ignored, so a
+/// malformed token can never fall back to another login method.
+pub fn decode_access_token(raw: &[u8]) -> Result<String, String> {
+    let malformed = |why: &str| format!("Invalid access token: {why}");
+    let Some((prefix, body)) = raw.split_first_chunk::<4>() else {
+        return Err(malformed("shorter than its 4-byte length prefix"));
+    };
+    let len = u32::from_le_bytes(*prefix) as usize;
+    if len != body.len() {
+        return Err(malformed("length prefix does not match the token size"));
     }
-    let len = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize;
-    let body = raw.get(4..4 + len.min(raw.len() - 4))?;
-    let units: Vec<u16> = body
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    String::from_utf16(&units).ok()
+    if len == 0 || !len.is_multiple_of(2) {
+        return Err(malformed("token must be a non-empty UTF-16LE string"));
+    }
+    let units: Vec<u16> = body.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    String::from_utf16(&units).map_err(|_| malformed("token is not valid UTF-16"))
 }
 
 #[cfg(test)]
@@ -194,5 +199,15 @@ mod tests {
         assert_eq!(m["server"], "tcp:h,1433");
         assert_eq!(m["pwd"], "a;b}c");
         assert_eq!(m["database"], "db");
+    }
+
+    #[test]
+    fn access_token_must_match_its_length_prefix() {
+        let mut raw = 6u32.to_le_bytes().to_vec();
+        raw.extend("abc".encode_utf16().flat_map(u16::to_le_bytes));
+        assert_eq!(decode_access_token(&raw).as_deref(), Ok("abc"));
+        assert!(decode_access_token(b"x").is_err());
+        raw.push(0);
+        assert!(decode_access_token(&raw).is_err());
     }
 }

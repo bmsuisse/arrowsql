@@ -11,7 +11,7 @@ Microsoft's `mssql-tds` crate (microsoft/mssql-rs, MIT, pinned in
 Python (cursor.py / connection.py, upstream)
    │  DDBCSQLExecute(stmt, sql, params, ...)  -> return code + diag records
    ▼
-src/statement.rs  ── params/ (Python value -> SqlType, ? -> @Pn)
+src/statement/   ── params/ (Python value -> SqlType, ? -> @Pn)
    │  py.detach (GIL released) + runtime::block_on
    ▼
 mssql-tds TdsClient (one per Connection, behind ConnShared::slot)
@@ -29,7 +29,12 @@ decode/buffer.rs RowBuffer (GIL-free) ──► decode/python.rs (GIL held) ─�
 | `consts.rs` | ODBC constants shared with `constants.py` |
 | `connstr.rs` | ODBC connection string -> `ClientContext` |
 | `connection.rs` | `Connection` pyclass, `ConnShared` (TDS client slot, autocommit, session state) |
-| `statement.rs` | `SqlHandle` pyclass, execute / fetch / more-results state machine, MARS emulation, executemany |
+| `statement/mod.rs` | `StmtShared`, `SqlHandle` pyclass, the internal API used by `catalog.rs` |
+| `statement/wire.rs` | wire ownership: `Slot`, which statement owns the TDS stream, buffering (bounded) or discarding its batch |
+| `statement/cursor.rs` | a statement's current and queued results; fetch, next-result, the `read_rows_into` decode seam |
+| `statement/exec.rs` | `execute` / `executemany`, deferred session SQL, NULL parameter typing |
+| `statement/cancel.rs` | cancellation + timeout of one execution, forwarded to a batch being drained |
+| `statement/odbc.rs` | the `DDBCSQL*` Python functions (thin wrappers) |
 | `diag.rs` | diagnostic records, SQL Server error -> SQLSTATE table |
 | `params/mod.rs` | parameter list -> `ParamSet` (+ `conversion_error`) |
 | `params/py_types.rs` | per-value Python -> `SqlType` (vendored from mssql-py-core) |
@@ -42,7 +47,7 @@ decode/buffer.rs RowBuffer (GIL-free) ──► decode/python.rs (GIL held) ─�
 | `decode/describe.rs` | ODBC column metadata (SQLDescribeCol) |
 | `catalog.rs` | SQLTables/Columns/... via `sp_*` catalog procedures |
 | `getinfo.rs` | SQLGetInfo values (partial) |
-| `pooling.rs` | connection pool (RESETCONNECTION on reuse) |
+| `pooling.rs` | connection pool: per-key capacity leases, idle sessions, generations, token expiry |
 | `rowfactory.rs` | `construct_rows` (Row objects without `__init__`) |
 | `types.rs` | `ParamInfo`, `NumericData`, `ErrorInfo` |
 | `arrow/plan.rs` | SQL column -> Arrow type (mirrors upstream's C++ mapping) |
@@ -72,7 +77,9 @@ and return `SQL_ERROR` — never panic.
   `parking_lot::Mutex<Slot>`), shared by all its statements.
 - Lock order: `ConnShared::slot` -> `StmtShared::state`. Both are taken only
   with the GIL released (`py.detach`) and are never held while acquiring the
-  GIL, so Python threads can't deadlock against network I/O.
+  GIL, so Python threads can't deadlock against network I/O. This includes
+  the getters (`DDBCSQLRowCount`, `DDBCSQLNumResultCols`, diagnostics,
+  `get_info`): they wait for a running query without the GIL.
 - All network calls run through `runtime::block_on` on the shared runtime
   from the calling thread, with the GIL released.
 - `StmtShared::cancel` is a separate lock so `_cancel` from another thread
@@ -82,10 +89,23 @@ and return `SQL_ERROR` — never panic.
 
 TDS without MARS allows one active request per connection. `Slot::owner`
 records which statement's batch is on the wire. When a different statement
-(or a commit/rollback) needs the connection, `release_wire` drains the
+(or a commit/rollback) needs the connection, `wire::buffer_owner` reads the
 owner's remaining rows and subsequent results into the owner's own buffers
 (`StmtState::pending` / `queued`), so both cursors keep working exactly as
-with msodbcsql + MARS. A dropped owner's batch is simply discarded.
+with msodbcsql + MARS.
+
+* The buffering is bounded by `DRAIN_BUDGET_BYTES` (64 MiB per statement).
+  Past it the rest of the batch is abandoned and the owner's cursor raises
+  `HY000 "Result set discarded ..."` once it reaches the cut.
+* It runs under the *requester's* timeout and cancellation: the requester's
+  `StmtCancel` forwards `_cancel()` and its deadline to the owner's cancel
+  handle for the duration of the drain.
+* An owner that goes away (cursor closed or freed, re-executed, connection
+  closed) is *discarded*, not drained: the batch is closed if only trailing
+  tokens remain, otherwise the server is sent a TDS attention.
+* SQL batches run with `BatchErrorMode::Continue`, so a statement error
+  neither ends the batch nor hides later results; the error is delivered by
+  the call that met it (`fetch`, `execute`, `nextset`).
 
 ## Data flow: execute
 
@@ -161,15 +181,36 @@ SQL Server's serialization rate, so this is the only way past it.
 ## executemany
 
 `SQLExecuteMany` normalises each column to one SQL type
-(`params/batch.rs`), then sends all rows as `sp_execute` RPCs against one
-prepared handle, 2000 rows per TDS request (`execute_prepared_batch`).
+(`params/batch.rs`; DECIMAL/NUMERIC columns take their type from
+`paramInfos`), then sends all rows as `sp_execute` RPCs against one
+prepared handle, 2000 rows per TDS request
+(`begin_execute_prepared_batch`, which keeps `OUTPUT` result sets). The
+result sets of every chunk but the last are buffered; the last chunk's
+stream stays on the wire like an ordinary `execute`.
 
 ## Pooling
 
-`pooling.rs` keeps idle `TdsClient`s per (connection string, pool key).
+`pooling.rs` keeps idle `TdsClient`s per (connection string, pool key). A
+key's `size` counts idle and checked-out sessions, capped at `max_size`
+(an acquire past the cap raises instead of waiting). The capacity is a
+`Lease` owned by the `Connection`: it is released when a connect fails,
+when `close()` finds the session unusable, or when the connection is
+dropped. `disable_pooling` / `close_pooling` start a new generation, so a
+stale lease cannot touch the replacement pool.
+
 Checkout arms RESETCONNECTION (`prepare_reset_connection`), applied by the
-server with the next request — no extra round trip. `close()` rolls back an
-open transaction and returns the session to the pool.
+server with the next request — no extra round trip — and queues
+`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`, which the reset does not
+restore. `close()` rolls back an open transaction and returns the session
+to the pool; a dead session or a failed rollback discards it and raises.
+Idle sessions older than the idle timeout are closed by any later acquire.
+
+With a `token_factory`, the factory runs (GIL held) when a physical
+connection is opened, never on a plain pool hit. A pooled session whose
+token expires within 300 s (or whose expiry is unknown while it holds a
+token) is re-validated: if the factory returns the same token with a safe
+expiry the session is reused, otherwise it and its siblings with the same
+token are closed and a new connection is opened with the fresh token.
 
 ## How to...
 

@@ -17,13 +17,17 @@ pub fn translate_call_escape(sql: &str) -> Option<String> {
         }
         None => (false, inner),
     };
-    if rest.len() < 4 || !rest[..4].eq_ignore_ascii_case("call") {
-        return None;
-    }
-    let body = rest[4..].trim();
+    // `get` instead of slicing: byte 4 may fall inside a multi-byte character.
+    let body = match rest.get(..4) {
+        Some(keyword) if keyword.eq_ignore_ascii_case("call") => rest[4..].trim(),
+        _ => return None,
+    };
     let (name, args) = match body.find('(') {
         Some(open) => {
             let close = body.rfind(')')?;
+            if close <= open {
+                return None;
+            }
             (body[..open].trim(), body[open + 1..close].trim())
         }
         None => (body, ""),
@@ -114,7 +118,27 @@ fn rewrite_qmarks_plain(sql: &str) -> (String, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_qmarks;
+    use super::{rewrite_qmarks, translate_call_escape};
+
+    #[test]
+    fn call_escape_translates_procedure_calls() {
+        assert_eq!(
+            translate_call_escape("{call proc(?, 1)}").as_deref(),
+            Some("EXEC proc ?, 1")
+        );
+        assert_eq!(
+            translate_call_escape("{? = call proc(?)}").as_deref(),
+            Some("EXEC ? = proc ?")
+        );
+    }
+
+    #[test]
+    fn call_escape_ignores_non_ascii_and_malformed_input() {
+        // Byte 4 falls inside a multi-byte character: must not panic.
+        assert_eq!(translate_call_escape("{日本語}"), None);
+        assert_eq!(translate_call_escape("{call a) x (}"), None);
+        assert_eq!(translate_call_escape("{call é}").as_deref(), Some("EXEC é"));
+    }
 
     #[test]
     fn rewrites_only_live_markers() {

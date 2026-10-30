@@ -21,9 +21,22 @@ use mssql_tds::error::Error;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
-    PyBool, PyByteArray, PyBytes, PyDate, PyDateTime, PyFloat, PyInt, PyModule, PyString, PyTime,
-    PyType,
+    PyBool, PyByteArray, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyModule, PyString,
+    PyTime, PyType,
 };
+
+/// SQL Server's maximum precision for DECIMAL and NUMERIC.
+const MAX_NUMERIC_PRECISION: u32 = 38;
+
+/// WKT prefixes that bind as NVARCHAR regardless of the text's encoding.
+const GEOMETRY_WKT_PREFIXES: [&str; 3] = ["POINT", "LINESTRING", "POLYGON"];
+
+const NON_FINITE_DECIMAL_MESSAGE: &str =
+    "Cannot bind non-finite Decimal (NaN/Infinity) as SQL NUMERIC";
+
+const UNSUPPORTED_PARAMETER_TYPE_MESSAGE: &str =
+    "Unsupported parameter type: The driver cannot safely convert it to a SQL type.";
+use crate::params::udt;
 
 static DECIMAL_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static UUID_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -108,7 +121,7 @@ impl TryFrom<i32> for InputSqlType {
             -150 => Self::Variant,
             -151 => Self::Udt,
             _ => {
-                return Err(Error::UsageError(format!(
+                return Err(Error::TypeConversionError(format!(
                     "Invalid SQL type: {value}. Must be a supported SQL type constant"
                 )));
             }
@@ -132,14 +145,13 @@ impl ParameterHint {
     /// can treat any remaining arm as unreachable.
     pub(crate) fn new(sql_type: i32, size: u32, scale: u8) -> TdsResult<Self> {
         let sql_type = InputSqlType::try_from(sql_type)?;
-        if matches!(sql_type, InputSqlType::Numeric | InputSqlType::Decimal) {
-            let precision = Self::effective_numeric_precision(size);
-            if precision > 38 || u32::from(scale) > precision {
-                return Err(Error::UsageError(format!(
-                    "Invalid numeric precision/scale: precision={precision}, scale={scale}"
-                )));
-            }
-        }
+        // Oversized numeric metadata is clamped, as upstream does, rather than rejected.
+        let (size, scale) = if matches!(sql_type, InputSqlType::Numeric | InputSqlType::Decimal) {
+            let precision = Self::effective_numeric_precision(size).min(MAX_NUMERIC_PRECISION);
+            (precision, scale.min(precision as u8))
+        } else {
+            (size, scale)
+        };
         if matches!(
             sql_type,
             InputSqlType::Time | InputSqlType::DateTime | InputSqlType::DateTimeOffset
@@ -158,6 +170,20 @@ impl ParameterHint {
 
     fn effective_numeric_precision(size: u32) -> u32 {
         if size == 0 { 18 } else { size }
+    }
+
+    /// Whether a NULL under this hint cannot carry the hint's precision or scale
+    /// and must be typed by the server instead (`sp_describe_undeclared_parameters`).
+    pub(crate) fn null_needs_server_type(self) -> bool {
+        match self.sql_type {
+            InputSqlType::Numeric | InputSqlType::Decimal => {
+                Self::effective_numeric_precision(self.size) != 18 || self.scale != 10
+            }
+            InputSqlType::Time | InputSqlType::DateTime | InputSqlType::DateTimeOffset => {
+                self.scale != 7
+            }
+            _ => false,
+        }
     }
 
     /// Whether SQL Server permits this type in TVP column metadata.
@@ -260,11 +286,14 @@ pub(crate) fn py_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
     }
 
     if py_obj.is_instance_of::<PyInt>() {
-        let value = py_obj.extract::<i64>().map_err(|error| {
-            Error::UsageError(format!(
-                "Integer parameter is outside the BIGINT range: {error}"
-            ))
-        })?;
+        let Ok(value) = py_obj.extract::<i64>() else {
+            let digits = py_obj
+                .str()
+                .map_or_else(|_| "<int>".to_string(), |s| s.to_string());
+            return Err(Error::TypeConversionError(format!(
+                "integer {digits} is out of range for SQL BIGINT [-2^63, 2^63-1]"
+            )));
+        };
         return Ok(match value {
             0..=255 => SqlType::TinyInt(Some(value as u8)),
             -32_768..=32_767 => SqlType::SmallInt(Some(value as i16)),
@@ -273,7 +302,7 @@ pub(crate) fn py_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
         });
     }
 
-    if py_obj.is_exact_instance_of::<PyFloat>() {
+    if py_obj.is_instance_of::<PyFloat>() {
         return py_obj
             .extract::<f64>()
             .map(|value| SqlType::Float(Some(value)))
@@ -284,15 +313,19 @@ pub(crate) fn py_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
         let value = py_obj
             .extract::<String>()
             .map_err(|error| Error::UsageError(format!("Failed to extract string: {error}")))?;
-        let is_ascii = value.is_ascii();
-        let length = if is_ascii {
+        // Geometry WKT binds as NVARCHAR even when it is ASCII, as upstream does.
+        let is_geometry = GEOMETRY_WKT_PREFIXES
+            .iter()
+            .any(|prefix| value.starts_with(prefix));
+        let narrow = value.is_ascii() && !is_geometry;
+        let length = if narrow {
             value.len()
         } else {
             value.encode_utf16().count()
         }
         .max(1);
         let value = SqlString::from_utf8_string(value);
-        return Ok(if is_ascii {
+        return Ok(if narrow {
             match u16::try_from(length) {
                 Ok(length) if length <= 8_000 => SqlType::Varchar(Some(value), length),
                 _ => SqlType::VarcharMax(Some(value)),
@@ -310,7 +343,7 @@ pub(crate) fn py_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
     }
 
     if py_obj.is_instance_of::<PyTime>() {
-        let time = py_time(py_obj, 6)?;
+        let time = py_time_value(py_obj, 6)?;
         return Ok(SqlType::Time(Some(time)));
     }
 
@@ -318,7 +351,29 @@ pub(crate) fn py_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
         return py_decimal_to_sql_type(py_obj);
     }
 
+    if !is_fallback_bindable(py_obj)? {
+        return Err(Error::UsageError(
+            UNSUPPORTED_PARAMETER_TYPE_MESSAGE.to_string(),
+        ));
+    }
     Ok(column_value_to_sql_type(py_to_column_value(py_obj, None)?))
+}
+
+/// Whether a value that is neither a scalar nor a Decimal converts through the
+/// column-value path (bytes, bytearray, date, UUID). Any other type is refused
+/// here so its error names the parameter rather than the bulk-copy path.
+fn is_fallback_bindable(py_obj: &Bound<'_, PyAny>) -> TdsResult<bool> {
+    if py_obj.is_instance_of::<PyBytes>()
+        || py_obj.is_instance_of::<PyByteArray>()
+        || py_obj.is_instance_of::<PyDate>()
+    {
+        return Ok(true);
+    }
+    let uuid_class = uuid_type(py_obj.py())
+        .map_err(|error| Error::UsageError(format!("Failed to import UUID: {error}")))?;
+    py_obj
+        .is_instance(uuid_class)
+        .map_err(|error| Error::UsageError(format!("Failed to inspect UUID value: {error}")))
 }
 
 fn column_value_to_sql_type(value: ColumnValues) -> SqlType {
@@ -363,6 +418,15 @@ fn column_value_to_sql_type(value: ColumnValues) -> SqlType {
     }
 }
 
+/// A Python value that does not fit a numeric size hint. Out-of-range values
+/// (`OverflowError`) are a value problem (`ValueError`); a value of the wrong
+/// type is a usage problem (`TypeError`).
+fn numeric_hint_error(sql_type: &str, error: PyErr) -> Error {
+    let message = format!("Failed to convert parameter to {sql_type}: {error}");
+    let overflow = Python::attach(|py| error.is_instance_of::<pyo3::exceptions::PyOverflowError>(py));
+    if overflow { Error::TypeConversionError(message) } else { Error::UsageError(message) }
+}
+
 /// Converts a Python value according to its validated `setinputsizes()` hint.
 ///
 /// Hints select the SQL type, but size handling remains type-specific: decimal
@@ -378,25 +442,25 @@ pub(crate) fn py_to_sql_type_with_hint(
 
     match hint.sql_type {
         InputSqlType::Bit => Ok(SqlType::Bit(Some(py_obj.extract::<bool>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to BIT: {error}")),
+            |error| numeric_hint_error("BIT", error),
         )?))),
         InputSqlType::TinyInt => Ok(SqlType::TinyInt(Some(py_obj.extract::<u8>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to TINYINT: {error}")),
+            |error| numeric_hint_error("TINYINT", error),
         )?))),
         InputSqlType::SmallInt => Ok(SqlType::SmallInt(Some(py_obj.extract::<i16>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to SMALLINT: {error}")),
+            |error| numeric_hint_error("SMALLINT", error),
         )?))),
         InputSqlType::Integer => Ok(SqlType::Int(Some(py_obj.extract::<i32>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to INT: {error}")),
+            |error| numeric_hint_error("INT", error),
         )?))),
         InputSqlType::BigInt => Ok(SqlType::BigInt(Some(py_obj.extract::<i64>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to BIGINT: {error}")),
+            |error| numeric_hint_error("BIGINT", error),
         )?))),
         InputSqlType::Real => Ok(SqlType::Real(Some(py_obj.extract::<f32>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to REAL: {error}")),
+            |error| numeric_hint_error("REAL", error),
         )?))),
         InputSqlType::Float => Ok(SqlType::Float(Some(py_obj.extract::<f64>().map_err(
-            |error| Error::UsageError(format!("Failed to convert parameter to FLOAT: {error}")),
+            |error| numeric_hint_error("FLOAT", error),
         )?))),
         InputSqlType::Numeric | InputSqlType::Decimal => hinted_decimal(py_obj, hint),
         InputSqlType::Char
@@ -412,7 +476,7 @@ pub(crate) fn py_to_sql_type_with_hint(
             SqlType::Date(value) => Ok(SqlType::Date(value)),
             _ => Err(Error::UsageError("Expected a date parameter".to_string())),
         },
-        InputSqlType::Time => Ok(SqlType::Time(Some(py_time(py_obj, hint.scale)?))),
+        InputSqlType::Time => Ok(SqlType::Time(Some(py_time_value(py_obj, hint.scale)?))),
         InputSqlType::DateTime => Ok(SqlType::DateTime2(Some(SqlDateTime2 {
             days: datetime_days(py_obj)?,
             time: py_time(py_obj, hint.scale)?,
@@ -437,20 +501,9 @@ pub(crate) fn py_to_sql_type_with_hint(
         InputSqlType::Vector => hinted_vector(py_obj, hint),
         InputSqlType::Money | InputSqlType::SmallMoney => hinted_money(py_obj, hint),
         InputSqlType::Variant => Ok(SqlType::Variant(Box::new(py_to_sql_type(py_obj)?))),
-        // `mssql-tds` now has the contract this once waited on (`SqlType::Udt`,
-        // `UdtTypeName`, `write_udt_type_name`). What is still missing is on
-        // the Python side: `setinputsizes` has no way to carry the type name.
-        // Tracked in microsoft/mssql-python#816, fixed by #818 (AB#48445),
-        // which resolves the name via SQLDescribeParam instead.
-        InputSqlType::Udt => Err(unsupported_udt_parameter()),
+        // LOCAL: the type name is resolved at execute time (params::udt).
+        InputSqlType::Udt => udt::hinted_udt(py_obj),
     }
-}
-
-fn unsupported_udt_parameter() -> Error {
-    Error::UsageError(
-        "SQL_SS_UDT parameters require a server UDT type name, which setinputsizes does not provide"
-            .to_string(),
-    )
 }
 
 /// Constructs the typed NULL required when inference has no Python value.
@@ -471,11 +524,12 @@ pub(crate) fn null_sql_type(hint: ParameterHint) -> TdsResult<SqlType> {
         InputSqlType::Numeric | InputSqlType::Decimal => {
             // TODO(mssql-tds): Carry NULL precision and scale independently of
             // the optional value so py-core can preserve non-default metadata.
-            let precision = ParameterHint::effective_numeric_precision(hint.size);
-            if precision != 18 || hint.scale != 10 {
+            // Callers route those NULLs to the server (`null_needs_server_type`).
+            if hint.null_needs_server_type() {
                 return Err(Error::UsageError(format!(
                     "NULL numeric parameters currently require precision 18 and scale 10; requested precision {} and scale {}",
-                    precision, hint.scale
+                    ParameterHint::effective_numeric_precision(hint.size),
+                    hint.scale
                 )));
             }
             if hint.sql_type == InputSqlType::Numeric {
@@ -493,12 +547,12 @@ pub(crate) fn null_sql_type(hint: ParameterHint) -> TdsResult<SqlType> {
         InputSqlType::Binary => SqlType::Binary(None, checked_length(size, 8_000, "BINARY")?),
         InputSqlType::VarBinary => sized_varbinary(None, size),
         InputSqlType::LongVarBinary => SqlType::VarBinaryMax(None),
-        InputSqlType::Udt => return Err(unsupported_udt_parameter()),
+        InputSqlType::Udt => udt::null_udt(),
         InputSqlType::Date => SqlType::Date(None),
         InputSqlType::Time | InputSqlType::DateTime | InputSqlType::DateTimeOffset => {
             // TODO(mssql-tds): Carry NULL temporal scale independently of the
             // optional value so py-core can preserve non-default metadata.
-            if hint.scale != 7 {
+            if hint.null_needs_server_type() {
                 return Err(Error::UsageError(format!(
                     "NULL temporal parameters currently require scale 7; requested scale {}",
                     hint.scale
@@ -554,10 +608,7 @@ pub(crate) fn tvp_column_sql_type(hint: ParameterHint) -> TdsResult<SqlType> {
 /// them from the Python value.
 fn hinted_decimal(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<SqlType> {
     let precision = ParameterHint::effective_numeric_precision(hint.size) as u8;
-    let value = py_obj
-        .str()
-        .and_then(|value| value.extract::<String>())
-        .map_err(|error| Error::UsageError(format!("Failed to convert numeric value: {error}")))?;
+    let value = numeric_text(py_obj)?;
     let parts = DecimalParts::from_string(&value, precision, hint.scale)?;
     Ok(if hint.sql_type == InputSqlType::Numeric {
         SqlType::Numeric(Some(parts))
@@ -566,12 +617,38 @@ fn hinted_decimal(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<S
     })
 }
 
+/// Text of a value bound through a DECIMAL/NUMERIC hint. A Decimal is formatted
+/// with `__format__("f")` and anything else with `str()`, matching upstream.
+fn numeric_text(py_obj: &Bound<'_, PyAny>) -> TdsResult<String> {
+    if !is_decimal(py_obj)? {
+        return py_obj
+            .str()
+            .and_then(|value| value.extract::<String>())
+            .map_err(|error| {
+                Error::UsageError(format!("Failed to convert numeric value: {error}"))
+            });
+    }
+    let formatted = py_obj
+        .call_method1("__format__", ("f",))
+        .map_err(|error| Error::UsageError(format!("Failed to format Decimal: {error}")))?;
+    formatted
+        .cast::<PyString>()
+        .map_err(|_| Error::UsageError("Decimal.__format__() must return a str".to_string()))?
+        .extract::<String>()
+        .map_err(|error| Error::UsageError(format!("Failed to convert numeric value: {error}")))
+}
+
 /// Preserves the requested string allocation while widening it when needed to
-/// avoid declaring a type shorter than the encoded value.
+/// avoid declaring a type shorter than the encoded value. A time is bound as its
+/// `isoformat()` text, the form the text C types carry upstream.
 fn hinted_string(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<SqlType> {
-    let value = py_obj.extract::<String>().map_err(|error| {
-        Error::UsageError(format!("Failed to convert parameter to string: {error}"))
-    })?;
+    let value = if py_obj.is_instance_of::<PyTime>() {
+        time_isoformat(py_obj)?
+    } else {
+        py_obj.extract::<String>().map_err(|error| {
+            Error::UsageError(format!("Failed to convert parameter to string: {error}"))
+        })?
+    };
     let actual = if matches!(
         hint.sql_type,
         InputSqlType::WChar | InputSqlType::WVarChar | InputSqlType::WLongVarChar
@@ -790,6 +867,40 @@ fn datetimeoffset_minutes(offset_seconds: f64) -> TdsResult<i16> {
     Ok(offset_minutes as i16)
 }
 
+/// Calls `isoformat(timespec="microseconds")` as the legacy path does and
+/// requires a str result, so text and TIME binding share one contract.
+fn time_isoformat(py_obj: &Bound<'_, PyAny>) -> TdsResult<String> {
+    let kwargs = PyDict::new(py_obj.py());
+    kwargs
+        .set_item("timespec", "microseconds")
+        .map_err(|error| Error::UsageError(format!("Failed to build time format: {error}")))?;
+    let formatted = py_obj
+        .call_method("isoformat", (), Some(&kwargs))
+        .map_err(|error| Error::UsageError(format!("Failed to format time: {error}")))?;
+    formatted
+        .cast::<PyString>()
+        .map_err(|_| Error::UsageError("datetime.time.isoformat() must return a str".to_string()))?
+        .extract::<String>()
+        .map_err(|error| Error::UsageError(format!("Failed to format time: {error}")))
+}
+
+/// Converts a `datetime.time` for a TIME parameter. SQL Server TIME carries no
+/// UTC offset, so an aware time is refused rather than bound without it.
+fn py_time_value(py_obj: &Bound<'_, PyAny>, scale: u8) -> TdsResult<SqlTime> {
+    let tzinfo = py_obj
+        .getattr("tzinfo")
+        .map_err(|error| Error::UsageError(format!("Failed to get time tzinfo: {error}")))?;
+    if !tzinfo.is_none() {
+        return Err(Error::TypeConversionError(
+            "Cannot bind a timezone-aware time: SQL Server TIME has no UTC offset".to_string(),
+        ));
+    }
+    // The text is not bound here, but calling isoformat() keeps a broken override
+    // rejected on the TIME path just as on the text path.
+    time_isoformat(py_obj)?;
+    py_time(py_obj, scale)
+}
+
 /// Converts Python time components to the 100-nanosecond units used by TDS,
 /// retaining the scale selected by inference or the caller's hint.
 fn py_time(py_obj: &Bound<'_, PyAny>, scale: u8) -> TdsResult<SqlTime> {
@@ -818,25 +929,33 @@ fn is_decimal(py_obj: &Bound<'_, PyAny>) -> TdsResult<bool> {
         .map_err(|error| Error::UsageError(format!("Failed to inspect Decimal value: {error}")))
 }
 
+/// Upstream's precision error for a Decimal that cannot fit SQL Server NUMERIC.
+/// `None` means the exponent was too large to measure.
+fn decimal_precision_error(precision: Option<usize>) -> Error {
+    let detail = precision.map_or_else(String::new, |value| format!(", but got {value}"));
+    Error::TypeConversionError(format!(
+        "Precision of the numeric value is too high. The maximum precision supported by \
+         SQL Server is {MAX_NUMERIC_PRECISION}{detail}."
+    ))
+}
+
 fn inferred_decimal_shape(digit_count: usize, exponent: i64) -> TdsResult<(u8, u8)> {
     let precision = if exponent >= 0 {
         digit_count.saturating_add(exponent as usize)
     } else {
         digit_count.max(exponent.unsigned_abs() as usize)
     };
-    if precision == 0 || precision > 38 {
-        return Err(Error::UsageError(format!(
-            "Decimal precision {precision} is outside SQL Server's supported range of 1 to 38"
-        )));
+    if precision == 0 || precision > MAX_NUMERIC_PRECISION as usize {
+        return Err(decimal_precision_error(Some(precision)));
     }
     let scale = if exponent < 0 {
         exponent.unsigned_abs() as usize
     } else {
         0
     };
-    if scale > 38 {
-        return Err(Error::UsageError(format!(
-            "Decimal scale {scale} exceeds SQL Server's maximum scale of 38"
+    if scale > MAX_NUMERIC_PRECISION as usize {
+        return Err(Error::TypeConversionError(format!(
+            "Decimal scale {scale} exceeds SQL Server's maximum scale of {MAX_NUMERIC_PRECISION}"
         )));
     }
     Ok((precision as u8, scale as u8))
@@ -850,12 +969,19 @@ fn py_decimal_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
         .getattr("digits")
         .and_then(|digits| digits.len())
         .map_err(|error| Error::UsageError(format!("Failed to inspect Decimal digits: {error}")))?;
-    let exponent = decimal_tuple
-        .getattr("exponent")
-        .and_then(|value| value.extract::<i64>())
-        .map_err(|_| {
-            Error::UsageError("NaN and infinite Decimal values are unsupported".to_string())
-        })?;
+    let exponent_value = decimal_tuple.getattr("exponent").map_err(|error| {
+        Error::UsageError(format!("Failed to inspect Decimal exponent: {error}"))
+    })?;
+    // NaN, sNaN and Infinity report a string exponent and have no NUMERIC form.
+    if exponent_value.is_instance_of::<PyString>() {
+        return Err(Error::TypeConversionError(
+            NON_FINITE_DECIMAL_MESSAGE.to_string(),
+        ));
+    }
+    // An exponent beyond i64 cannot fit any supported precision.
+    let exponent = exponent_value
+        .extract::<i64>()
+        .map_err(|_| decimal_precision_error(None))?;
     let (precision, scale) = inferred_decimal_shape(digit_count, exponent)?;
     let value = py_obj
         .call_method0("__str__")

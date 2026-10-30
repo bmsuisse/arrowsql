@@ -21,7 +21,7 @@ Status: **impl** = implemented, **partial** = works for the common cases
 
 | Class | Constructor / members | Status | File |
 |---|---|---|---|
-| `Connection` | `Connection(conn_str, use_pool, attrs_before=None, pool_key="", token_factory=None)`; `close(transaction_already_rolled_back=False)`, `commit()`, `rollback()`, `set_autocommit(bool)`, `get_autocommit()`, `_get_connection_timeout()`, `set_attr(attribute, value)`, `alloc_statement_handle()`, `get_info(info_type)` | impl (`token_factory` / Entra auth: TODO; `get_info`: partial) | connection.rs |
+| `Connection` | `Connection(conn_str, use_pool, attrs_before=None, pool_key="", token_factory=None)`; `close(transaction_already_rolled_back=False)`, `commit()`, `rollback()`, `set_autocommit(bool)`, `get_autocommit()`, `_get_connection_timeout()`, `set_attr(attribute, value)`, `alloc_statement_handle()`, `get_info(info_type)` | impl (`token_factory` invoked on pool miss / non-pooled connect, expiry-aware on checkout; a malformed access token raises; `close()` of a non-pooled connection with an open transaction raises 25000 and leaves it open; `get_info`: partial) | connection.rs |
 | `SqlHandle` | `free()`, `_close_cursor()`, `_cancel()` | impl | statement.rs |
 | `ParamInfo` | `inputOutputType, paramCType, paramSQLType, columnSize, decimalDigits, strLenOrInd, dataPtr, isDAE` (read/write) | impl | types.rs |
 | `NumericData` | `NumericData()`, `NumericData(precision, scale, sign, val)`; same attributes | impl | types.rs |
@@ -35,7 +35,7 @@ Connection errors raise `RuntimeError("SQLSTATE:XXXXX:NATIVE:<n>:<message>")`.
 |---|---|---|---|
 | `DDBCSQLExecDirect` | `(StatementHandle, Query)` | impl | statement.rs |
 | `DDBCSQLExecute` | `(statementHandle, query, params, inputSizes, isStmtPrepared, usePrepare, encodingSettings)` | impl (sp_executesql; `inputSizes` hints applied, `encodingSettings` ignored) | statement.rs |
-| `SQLExecuteMany` | `(statementHandle, query, columnwise_params, paramInfos, paramSetSize, encodingSettings)` | impl (prepared RPC batches; result sets from `OUTPUT` not returned) | statement.rs |
+| `SQLExecuteMany` | `(statementHandle, query, columnwise_params, paramInfos, paramSetSize, encodingSettings)` | impl (prepared RPC batches; `OUTPUT` result sets are returned, one per parameter set via `nextset`; DECIMAL/NUMERIC `paramInfos` are applied) | statement.rs |
 | `DDBCSQLRowCount` | `(StatementHandle) -> int` | impl | statement.rs |
 | `DDBCSQLNumResultCols` | `(statementHandle, messages=None) -> int` | impl | statement.rs |
 | `DDBCSQLDescribeCol` | `(StatementHandle, ColumnMetadata, messages=None)`; appends `{"ColumnName","DataType","ColumnSize","DecimalDigits","Nullable"}` | impl | statement.rs, decode/describe.rs |
@@ -45,7 +45,7 @@ Connection errors raise `RuntimeError("SQLSTATE:XXXXX:NATIVE:<n>:<message>")`.
 | `DDBCSQLFetchScroll` | `(StatementHandle, FetchOrientation, FetchOffset, row_data)` | partial (`SQL_FETCH_NEXT` only, like a forward-only cursor) | statement.rs |
 | `DDBCSQLMoreResults` | `(StatementHandle)` | impl | statement.rs |
 | `DDBCSQLResetStmt` | `(StatementHandle)` | impl | statement.rs |
-| `DDBCSQLFreeHandle` | `(HandleType, Handle)` | impl | statement.rs |
+| `DDBCSQLFreeHandle` | `(HandleType, Handle)` | impl (a second free returns `SQL_INVALID_HANDLE`) | statement.rs |
 | `DDBCSQLSetStmtAttr` | `(stmt, attr, value)` | partial (`SQL_ATTR_QUERY_TIMEOUT`; others accepted) | statement.rs |
 | `DDBCSQLCheckError` | `(handleType, handle, retcode) -> ErrorInfo` | impl (first record, with `nativeError`) | statement.rs |
 | `DDBCSQLGetAllDiagRecords` | `(handle) -> list[("[SSSSS] (native)", message)]` | impl (C++ tuple shape; native number in the state label) | statement.rs |
