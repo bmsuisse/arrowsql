@@ -255,7 +255,7 @@ impl Window {
         let arrays = Arc::clone(&columns);
         let mut cells = Vec::with_capacity(plans.len());
         for (plan, column) in plans.iter().zip(arrays.iter()) {
-            cells.push(arrow_wire::cell(plan.kind, column.as_ref(), &plan.destination, rows.clone())?);
+            cells.push(arrow_wire::cell(plan.kind, column.as_ref(), &plan.destination)?);
         }
         let mut steps: Vec<Step> = Vec::new();
         for (index, cell) in cells.iter().enumerate() {
@@ -539,7 +539,10 @@ impl ColumnPlan {
             }
             Kind::SmallDateTime { unit } => {
                 let ticks = timestamp_ticks(array, row, unit)?;
-                Ok(ColumnValues::SmallDateTime(small_datetime(ticks)?))
+                {
+                    let (days, time) = small_datetime_parts(ticks).map_err(usage)?;
+                    Ok(ColumnValues::SmallDateTime(SqlSmallDateTime { days, time }))
+                }
             }
             Kind::FixedUuid => {
                 let bytes: [u8; 16] = downcast::<FixedSizeBinaryArray>(array)?
@@ -732,8 +735,9 @@ pub(super) fn legacy_datetime_parts(ticks_since_epoch: i64) -> Result<(i32, u32)
     Ok((days as i32, ticks as u32))
 }
 
-/// Legacy `smalldatetime`: minute precision, seconds >= 30 round up.
-fn small_datetime(ticks_since_epoch: i64) -> TdsResult<SqlSmallDateTime> {
+/// Legacy `smalldatetime`: (days since 1900-01-01, minutes of the day); minute
+/// precision, seconds >= 30 round up.
+pub(super) fn small_datetime_parts(ticks_since_epoch: i64) -> Result<(u16, u16), String> {
     let days = ticks_since_epoch.div_euclid(TICKS_PER_DAY) + DAYS_1900_TO_EPOCH;
     let seconds = ticks_since_epoch.rem_euclid(TICKS_PER_DAY) / TICKS_PER_SECOND as i64;
     let mut minutes = seconds / 60 + i64::from(seconds % 60 >= 30);
@@ -743,11 +747,11 @@ fn small_datetime(ticks_since_epoch: i64) -> TdsResult<SqlSmallDateTime> {
         days += 1;
     }
     if !(0..=65_535).contains(&days) {
-        return Err(usage(format!(
+        return Err(format!(
             "Timestamp out of SMALLDATETIME range (days since 1900 = {days}); valid 1900-01-01 to 2079-06-06"
-        )));
+        ));
     }
-    Ok(SqlSmallDateTime { days: days as u16, time: minutes as u16 })
+    Ok((days as u16, minutes as u16))
 }
 
 #[cfg(test)]
@@ -801,8 +805,8 @@ mod tests {
     #[test]
     fn smalldatetime_rounds_seconds_up_from_thirty() {
         let base = -DAYS_1900_TO_EPOCH * TICKS_PER_DAY;
-        assert_eq!(small_datetime(base + 29 * TICKS_PER_SECOND as i64).unwrap().time, 0);
-        assert_eq!(small_datetime(base + 30 * TICKS_PER_SECOND as i64).unwrap().time, 1);
+        assert_eq!(small_datetime_parts(base + 29 * TICKS_PER_SECOND as i64).unwrap().1, 0);
+        assert_eq!(small_datetime_parts(base + 30 * TICKS_PER_SECOND as i64).unwrap().1, 1);
     }
 
     #[test]

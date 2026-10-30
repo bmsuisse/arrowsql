@@ -18,6 +18,8 @@
 mod arrow_encode;
 mod arrow_source;
 mod arrow_wire;
+mod rows;
+mod wire;
 mod settings;
 
 use std::sync::Arc;
@@ -73,7 +75,7 @@ fn tds_error_to_py(err: TdsError) -> PyErr {
         TdsError::EncodedValueTooLong { .. } => PyValueError::new_err(err.to_string()),
         TdsError::ProtocolError(message) => PyRuntimeError::new_err(format!("Protocol Error: {message}")),
         TdsError::BulkCopyError(BulkCopyError::Timeout(timeout)) => PyTimeoutError::new_err(format!(
-            "Bulk copy operation timed out after {} seconds ({} rows copied){}",
+            "Bulk copy timeout: the operation timed out after {} seconds ({} rows copied){}",
             timeout.timeout_seconds,
             timeout.rows_copied,
             timeout.context.as_ref().map(|c| format!(". {c}")).unwrap_or_default()
@@ -99,6 +101,11 @@ pub struct Outcome {
 }
 
 impl Outcome {
+    /// The result of a source without any rows.
+    fn empty() -> Outcome {
+        Outcome { result: BulkCopyResult::new(0, Duration::ZERO), batch_size: 0 }
+    }
+
     fn into_dict(self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         let rows = self.result.rows_affected;
         let seconds = self.result.elapsed.as_secs_f64();
@@ -228,8 +235,52 @@ fn bulk_copy_arrow(
     outcome.into_dict(py)
 }
 
+/// `DDBCBulkCopyRows`: load an iterator of row tuples. Returns the result
+/// dictionary of `Cursor.bulkcopy`.
+#[pyfunction]
+#[pyo3(name = "DDBCBulkCopyRows", signature = (
+    handle, table_name, rows, batch_size=0, timeout=30, column_mappings=None, keep_identity=false,
+    check_constraints=false, table_lock=false, keep_nulls=false, fire_triggers=false,
+    use_internal_transaction=false,
+))]
+#[allow(clippy::too_many_arguments)]
+fn bulk_copy_rows(
+    py: Python<'_>,
+    handle: &Bound<'_, PyAny>,
+    table_name: String,
+    rows: &Bound<'_, PyAny>,
+    batch_size: usize,
+    timeout: u64,
+    column_mappings: Option<&Bound<'_, PyAny>>,
+    keep_identity: bool,
+    check_constraints: bool,
+    table_lock: bool,
+    keep_nulls: bool,
+    fire_triggers: bool,
+    use_internal_transaction: bool,
+) -> PyResult<Py<PyDict>> {
+    let stmt = statement::stmt_of(handle)?;
+    let settings = BulkSettings {
+        table_name,
+        batch_size,
+        timeout_secs: timeout,
+        mappings: settings::parse_mappings(column_mappings)?,
+        keep_identity,
+        check_constraints,
+        table_lock,
+        keep_nulls,
+        fire_triggers,
+        use_internal_transaction,
+    };
+    match rows::load(py, &stmt, &settings, rows)? {
+        Some(outcome) => outcome.into_dict(py),
+        None => Outcome::empty().into_dict(py),
+    }
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("BulkUnsupported", m.py().get_type::<BulkUnsupported>())?;
     m.add_function(wrap_pyfunction!(bulk_copy_arrow, m)?)?;
+    m.add_function(wrap_pyfunction!(bulk_copy_rows, m)?)?;
     Ok(())
 }

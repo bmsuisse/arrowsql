@@ -3359,6 +3359,28 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         return True
 
     # ── Mapping from ODBC connection-string keywords (lowercase, as _parse returns)
+    def _bulkcopy_connection_params(self) -> dict:
+        """Parse the connection string and check it names a server.
+
+        Raises:
+            RuntimeError: connection string unavailable.
+            ValueError: SERVER parameter missing.
+        """
+        if not hasattr(self.connection, "connection_str"):
+            logger.error("_build_pycore_context: Connection string not available")
+            raise RuntimeError("Connection string not available for bulk copy")
+
+        # Use the proper connection string parser that handles braced values
+        from mssql_python.connection_string_parser import _ConnectionStringParser
+
+        parser = _ConnectionStringParser(validate_keywords=False)
+        params = parser._parse(self.connection.connection_str)
+
+        # Check for server parameter (accepts synonyms: server, addr, address)
+        if not (params.get("server") or params.get("addr") or params.get("address")):
+            raise ValueError("SERVER parameter is required in connection string")
+        return params
+
     def _build_pycore_context(self) -> dict:
         """Build the connection context dict expected by mssql_py_core.
 
@@ -3373,20 +3395,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             RuntimeError: connection string unavailable or token acquisition failed.
             ValueError: SERVER parameter missing.
         """
-        # Get and parse connection string
-        if not hasattr(self.connection, "connection_str"):
-            logger.error("_build_pycore_context: Connection string not available")
-            raise RuntimeError("Connection string not available for bulk copy")
-
-        # Use the proper connection string parser that handles braced values
-        from mssql_python.connection_string_parser import _ConnectionStringParser
-
-        parser = _ConnectionStringParser(validate_keywords=False)
-        params = parser._parse(self.connection.connection_str)
-
-        # Check for server parameter (accepts synonyms: server, addr, address)
-        if not (params.get("server") or params.get("addr") or params.get("address")):
-            raise ValueError("SERVER parameter is required in connection string")
+        params = self._bulkcopy_connection_params()
 
         # Translate parsed connection string into the dict py-core expects.
         pycore_context = connstr_to_pycore_params(params)
@@ -3671,7 +3680,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 "cursor.bulkcopy_arrow() instead."
             )
 
-        mssql_py_core = self._bulkcopy_core_and_validate(table_name, batch_size, timeout)
+        self._bulkcopy_validate(table_name, batch_size, timeout)
 
         # Validate that data is iterable (but not a string or bytes, which are technically iterable)
         if data is None:
@@ -3686,6 +3695,36 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 f"data must be an iterable of tuples or lists, got non-iterable {type(data).__name__}"
             )
 
+        # RUST-PORT: load in-process on this connection (a #temp table is visible,
+        # a manual-commit transaction is joined); mssql_py_core only serves cursors
+        # that have no native handle.
+        native_handle = self._native_bulk_handle("DDBCBulkCopyRows")
+        if native_handle is not None:
+            self._check_closed()
+            self._bulkcopy_connection_params()  # same preconditions as the mssql_py_core path
+            result = ddbc_bindings.DDBCBulkCopyRows(
+                native_handle,
+                table_name,
+                self._bulk_row_iterator(data),
+                batch_size=batch_size,
+                timeout=timeout,
+                column_mappings=column_mappings,
+                keep_identity=keep_identity,
+                check_constraints=check_constraints,
+                table_lock=table_lock,
+                keep_nulls=keep_nulls,
+                fire_triggers=fire_triggers,
+                use_internal_transaction=use_internal_transaction,
+            )
+            logger.info(
+                "_bulkcopy: completed natively - rows_copied=%s, batch_count=%s, elapsed_time=%s",
+                result.get("rows_copied", "N/A"),
+                result.get("batch_count", "N/A"),
+                result.get("elapsed_time", "N/A"),
+            )
+            return result
+
+        mssql_py_core = self._bulkcopy_import_core()
         pycore_context = self._build_pycore_context()
 
         pycore_connection = None
@@ -3697,35 +3736,11 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             )
             pycore_cursor = pycore_connection.cursor()
 
-            # Enforce the bulkcopy type contract: only tuple and Row accepted.
-            # Created to support the fetchone/fetchmany/fetchall -> bulkcopy
-            # pipeline where Row objects need conversion to native tuples.
-            # Rust (mssql_py_core) requires PyTuple via cast::<PyTuple>() and
-            # rejects all other types including list. Row objects are converted
-            # using direct _values access (4x faster than __iter__ protocol).
-            # Uses itertools.chain for C-level iteration (avoids Python
-            # generator frame overhead on the tuple passthrough path).
-            def _prepare_row_iterator(iterable):
-                from itertools import chain
-
-                it = iter(iterable)
-                first = next(it, None)
-                if first is None:
-                    return iter(())
-                if isinstance(first, tuple):
-                    return chain((first,), it)
-                if isinstance(first, Row):
-                    return (tuple(item._values) for item in chain((first,), it))
-                raise TypeError(
-                    f"bulkcopy data rows must be tuples or Row objects, "
-                    f"got {type(first).__name__}"
-                )
-
             # Call bulkcopy with explicit keyword arguments
             # The API signature: bulkcopy(table_name, data_source, batch_size=0, timeout=30, ...)
             result = pycore_cursor.bulkcopy(
                 table_name,
-                _prepare_row_iterator(data),
+                self._bulk_row_iterator(data),
                 batch_size=batch_size,
                 timeout=timeout,
                 column_mappings=column_mappings,
@@ -3764,6 +3779,34 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             self._bulkcopy_teardown(pycore_context, pycore_cursor, pycore_connection)
 
     # RUST-PORT
+    def _bulk_row_iterator(self, rows):
+        """Rows for ``bulkcopy`` as an iterator of tuples.
+
+        Enforces the type contract: only tuple and Row are accepted (the native
+        engines reject everything else, lists included). Row objects from the
+        fetchone/fetchmany/fetchall -> bulkcopy pipeline are unwrapped through
+        ``_values``, which is 4x faster than the ``__iter__`` protocol; tuples
+        pass through ``itertools.chain`` at C speed.
+        """
+        from itertools import chain
+
+        if isinstance(rows, Cursor) and rows.connection is self.connection:
+            # Reading a cursor of this connection while the load owns the
+            # connection's wire would deadlock; read it first.
+            rows = rows.fetchall()
+        it = iter(rows)
+        first = next(it, None)
+        if first is None:
+            return iter(())
+        if isinstance(first, tuple):
+            return chain((first,), it)
+        if isinstance(first, Row):
+            return (tuple(item._values) for item in chain((first,), it))
+        raise TypeError(
+            f"bulkcopy data rows must be tuples or Row objects, got {type(first).__name__}"
+        )
+
+    # RUST-PORT
     def _bulkcopy_arrow_native(self, table_name, source, **options):
         """Run ``bulkcopy_arrow`` in-process. Returns None when this cursor or
         source is one only ``mssql_py_core`` can handle."""
@@ -3774,6 +3817,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         if not (hasattr(source, "__arrow_c_stream__") or hasattr(source, "__arrow_c_array__")):
             return None
         self._check_closed()
+        self._bulkcopy_connection_params()  # same preconditions as the mssql_py_core path
         # No fallback on BulkUnsupported: mssql_py_core accepts exactly the same
         # (Arrow type, SQL type) pairs, and a one-shot reader is gone by then.
         result = ddbc_bindings.DDBCBulkCopyArrow(handle, table_name, source, **options)
