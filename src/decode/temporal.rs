@@ -9,6 +9,8 @@
 //! class is called with the same positional arguments instead, so it sees every
 //! value.
 
+use std::sync::Mutex;
+
 use pyo3::PyTypeInfo;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -116,6 +118,29 @@ pub fn datetime(py: Python<'_>, days: u32, ticks: u64) -> PyResult<Bound<'_, PyA
     }
 }
 
+/// Upper bound on distinct offsets kept. Real offsets are a few dozen; the
+/// cap only guards against a pathological server.
+const FIXED_TZ_LIMIT: usize = 64;
+
+/// Fixed-offset tzinfo per offset in minutes. Building one is a Python call
+/// per cell, so a column of offsets shares a handful of objects instead.
+static FIXED_TZ: Mutex<Vec<(i16, Py<PyTzInfo>)>> = Mutex::new(Vec::new());
+
+fn fixed_tz(py: Python<'_>, offset_minutes: i16) -> PyResult<Bound<'_, PyTzInfo>> {
+    // Poisoning only means another fetch panicked mid-insert; the cache holds
+    // whole entries, so it is still usable.
+    let mut cache = FIXED_TZ.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, tz)) = cache.iter().find(|(offset, _)| *offset == offset_minutes) {
+        return Ok(tz.bind(py).clone());
+    }
+    let delta = PyDelta::new(py, 0, i32::from(offset_minutes) * 60, 0, true)?;
+    let tz = PyTzInfo::fixed_offset(py, delta)?;
+    if cache.len() < FIXED_TZ_LIMIT {
+        cache.push((offset_minutes, tz.clone().unbind()));
+    }
+    Ok(tz)
+}
+
 /// datetimeoffset is stored as UTC on the wire; return local time with a
 /// fixed-offset tzinfo.
 pub fn datetimeoffset(
@@ -131,8 +156,7 @@ pub fn datetimeoffset(
     let local_ticks = total.rem_euclid(864_000_000_000) as u64;
     let (y, m, d) = civil(local_days);
     let (h, mi, s, us) = clock(local_ticks);
-    let delta = PyDelta::new(py, 0, i32::from(offset_minutes) * 60, 0, true)?;
-    let tz = PyTzInfo::fixed_offset(py, delta)?;
+    let tz = fixed_tz(py, offset_minutes)?;
     match &makers(py)?.datetime {
         Maker::Native => Ok(PyDateTime::new(py, y, m, d, h, mi, s, us, Some(&tz))?.into_any()),
         Maker::Python(cls) => cls.bind(py).call1((y, m, d, h, mi, s, us, &tz)),
