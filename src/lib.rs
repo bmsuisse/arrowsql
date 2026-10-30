@@ -98,7 +98,9 @@ fn register_fork_hook(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-#[pymodule]
+// Free-threaded CPython: no GIL-dependent state lives in this module. Shared
+// caches are PyOnceLock or lock-protected; see docs/FREE_THREADED.md.
+#[pymodule(gil_used = false)]
 fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Resolve temporal classes before any fetch, so substitutions made before import apply.
     decode::temporal::init(m.py())?;
