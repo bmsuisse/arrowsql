@@ -15,6 +15,34 @@ from mssql_python.constants import ConstantsDDBC
 
 # normalize_architecture import removed as it's unused
 
+# Diagnostic records from DDBCSQLGetAllDiagRecords carry "[SQLSTATE] (native)".
+_DIAG_STATE_RE = re.compile(r"^\[([0-9A-Z]{5})\] \((-?\d+)\)$")
+
+
+def _native_error_from_diag_records(handle: Any, sqlstate: str) -> Optional[int]:
+    """Recover the SQL Server error number from the handle's diagnostic records.
+
+    Used when the binding's ErrorInfo has no nativeError field. Prefers the
+    record whose SQLSTATE matches the raised one. 0 means "no server error"
+    (driver-generated diagnostic) and is reported as None.
+    """
+    try:
+        records = ddbc_bindings.DDBCSQLGetAllDiagRecords(handle)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+    if not isinstance(records, list):
+        return None
+    first = None
+    for record in records:
+        match = _DIAG_STATE_RE.match(record[0]) if record and isinstance(record[0], str) else None
+        if not match:
+            continue
+        if match.group(1) == sqlstate:
+            return int(match.group(2)) or None
+        if first is None:
+            first = int(match.group(2)) or None
+    return first
+
 
 def check_error(handle_type: int, handle: Any, ret: int) -> None:
     """
@@ -35,7 +63,10 @@ def check_error(handle_type: int, handle: Any, ret: int) -> None:
         error_info = ddbc_bindings.DDBCSQLCheckError(handle_type, handle, ret)
         logger.error("Error: %s", error_info.ddbcErrorMsg)
         logger.debug("check_error: SQL state=%s", error_info.sqlState)
-        raise_exception(error_info.sqlState, error_info.ddbcErrorMsg)
+        native_error = getattr(error_info, "nativeError", None)
+        if native_error is None:
+            native_error = _native_error_from_diag_records(handle, error_info.sqlState)
+        raise_exception(error_info.sqlState, error_info.ddbcErrorMsg, native_error or None)
 
 
 def sanitize_connection_string(conn_str: str) -> str:
