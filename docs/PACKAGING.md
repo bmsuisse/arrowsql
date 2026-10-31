@@ -66,72 +66,104 @@ size, `Requires-Dist` entries without an extra marker, the installed footprint
 With no `DB_CONNECTION_STRING` in the environment it reads the main checkout's
 `.env.local`.
 
-### Where the size goes (release, stripped `.so` 5.21 MB)
+`maturin` needs `patchelf` on `PATH` for the auditwheel step. Install it into
+the worktree venv with `uv pip install -p .venv patchelf` if the build fails
+with "Failed to execute 'patchelf'".
 
-Measured with an unstripped build (`CARGO_PROFILE_RELEASE_STRIP=none`) and
-`nm -S -C`, summing symbol sizes by crate:
+### Current measurement (release, `scripts/wheel_size.sh`, cp313 manylinux_2_38)
+
+| measure | before tokio change | after (HEAD) |
+|---|---|---|
+| wheel file | 6,240,092 B (6096 KiB) | 6,227,827 B (6084 KiB) |
+| `ddbc_bindings*.so` in the wheel (uncompressed) | 6,512,553 B | about 20 KiB smaller |
+| bundled `.libs` (compressed) | 3.20 MB | 3.20 MB |
+| installed (package + `.libs`) | 15,536 KiB (`mssql_python/` 7,052) | 15,516 KiB (`mssql_python/` 7,032) |
+| required deps | none | none |
+| modules loaded by `import mssql_python` | none of pyarrow, azure, mssql_py_core, polars, pandas, numpy | same |
+| connect + `SELECT 1` from the wheel alone | not run in this lane | not run in this lane |
+
+Bundled libs, compressed inside the wheel: `libcrypto.so.3` 2.37 MB,
+`libssl.so.3` 0.48 MB, `libzstd.so.1` 0.35 MB. Nothing in `Cargo.lock` is a
+zstd crate, so `libzstd` comes in through the system OpenSSL, not through a
+Rust dependency.
+
+The wheel is 6.2 MB, so it is about 3.2 MB over the 3 MB target. The `.so`
+alone is about 2.8 MB compressed. Bundled libs are the other 3.2 MB.
+
+### Where the size goes (release `.so`, 6.3 MB stripped)
+
+The stripped `.so` grew from the 5.21 MB measured earlier (bulk copy, Decimal
+cache and the native Arrow stream added code). Measured with an unstripped
+build (`CARGO_PROFILE_RELEASE_STRIP=none`) and `nm -S -C`, summing symbol sizes
+by crate:
 
 | crate | symbol bytes | share | owner |
 |---|---|---|---|
-| `mssql_tds` (vendored) | 1.92 MB | 37% | vendor: connection transport, token stream, SSRP, Always Encrypted, TVP, bigdecimal, x509 |
-| `ddbc_bindings` (ours) | 0.61 MB | 12% | this repo |
-| `core` + `alloc` + `std` | 0.65 MB | 13% | Rust std/core (incl. std's own backtrace code) |
-| `encoding_rs` | 0.20 MB | 4% | mssql-tds needs the CJK encoder tables |
-| `tokio` | 0.18 MB | 4% | mssql-tds uses `tokio` `full` |
-| `x509_parser` + `der_parser` + `asn1_rs` + `nom` | ~0.25 MB | 5% | mssql-tds certificate expiry check |
-| `num_bigint` + `bigdecimal` | 0.11 MB | 2% | mssql-tds (`bigdecimal`) |
-| `arrow-*` (array, schema, buffer, data) | 0.12 MB | 2% | ours |
-| `pyo3` | 0.08 MB | 2% | ours |
+| `mssql_tds` (vendored) | 2.35 MB | 37% | vendor: connection transport, token stream, SSRP, Always Encrypted, TVP, bigdecimal, x509 |
+| `ddbc_bindings` (ours) | 0.77 MB | 12% | this repo |
+| `core` + `alloc` | 0.61 MB | 10% | Rust core/alloc |
+| `std` + `gimli` + `addr2line` + `miniz_oxide` + `rustc_demangle` | 0.23 MB | 4% | std, incl. its backtrace code for panic output |
+| `arrow_array` | 0.23 MB | 4% | ours (C Data / C Stream export) |
+| `tokio` (before the narrowing below) | 0.23 MB | 4% | mssql-tds |
+| `encoding_rs` | 0.20 MB | 3% | mssql-tds needs the CJK encoder tables (see below) |
+| `pyo3` | 0.08 MB | 1% | ours |
+| `x509_parser` + `der_parser` + `asn1_rs` + `nom` | 0.11 MB | 2% | mssql-tds certificate expiry check |
+| `num_bigint` + `bigdecimal` | 0.10 MB | 2% | mssql-tds |
+| `arrow_data` + `arrow_schema` + `arrow_buffer` | 0.14 MB | 2% | ours |
 
-Dynamic libraries: `libssl.so.3`, `libcrypto.so.3` and `libzstd.so.1` are
-linked, not static. The `openssl` crate that mssql-tds pulls in on Linux
-(Always Encrypted primitives, see `vendor/mssql-tds/Cargo.toml`) makes auditwheel
-bundle them into the wheel (`*.libs/`): about 3.2 MB compressed, 6.4 MB for
-`libcrypto` alone.
+ELF sections of the stripped `.so`: `.text` 4.99 MB, `.rodata` 0.42 MB,
+`.eh_frame` 0.37 MB (needed by `panic = "unwind"`), `.gcc_except_table` 0.24 MB
+(same reason), `.rela.dyn` 0.17 MB (absolute pointers in PIC data).
 
-Measured wheel (release, `scripts/wheel_size.sh`, cp313 manylinux_2_38):
+Dynamic libraries: `libssl.so.3` and `libcrypto.so.3` are linked, not static.
+`native-tls` (the TLS backend, `tokio-native-tls`) uses the `openssl` crate on
+Linux, so OpenSSL is needed for TLS whatever Always Encrypted does. auditwheel
+bundles it into `*.libs/`, which is the 3.2 MB above.
 
-| measure | value |
-|---|---|
-| wheel file | 5.70 MB (5572 KiB) |
-| of which bundled `.libs` (libssl, libcrypto, libzstd) | 3.20 MB compressed |
-| rest of the wheel (`ddbc_bindings*.so`, Python layer, metadata) | about 2.5 MB compressed (the `.so` is 5.21 MB stripped) |
-| installed (package + `.libs`) | 14.3 MB (`mssql_python/` 5.8 MB) |
-| required deps | none |
-| modules loaded by `import mssql_python` | none of pyarrow, azure, mssql_py_core, polars, pandas, numpy |
-| connect + `SELECT 1` from the wheel alone | works, same module list: none |
+### Tried
 
-### Tried, not adopted
-
-| change | release `.so` | verdict |
+| change | result | verdict |
 |---|---|---|
-| baseline | 5,210,736 B | |
-| `opt-level = "s"` for `mssql-tds` only | 5,858,968 B (+12%) | larger, rejected |
-| `opt-level = "s"` for everything | 5,380,208 B (+3%) | larger, rejected |
+| baseline (before this lane) | `.so` 6,512,553 B in the wheel | |
+| `tokio` `full` and `tokio-util` `full` narrowed to the features the crate uses (`mssql-tds` `Cargo.toml`) | `.so` about 20 KiB smaller, `signal-hook-registry` and a duplicate `hashbrown` dropped from the lock | adopted |
+| `opt-level = "s"` for `x509-parser`, `der-parser`, `asn1-rs`, `nom` (cold: connect-time cert parse) | a further 8 KiB smaller, below noise | rejected: not worth a per-package profile entry |
+| `opt-level = "s"` for `mssql-tds` only | `.so` +12% | rejected (earlier run) |
+| `opt-level = "s"` for everything | `.so` +3% | rejected (earlier run). Generic monomorphisations that LTO already merges dominate, so `s` only changes the code shape |
 | `encoding_rs/no-static-ideograph-encoder-tables` | not built | rejected by reading code: `mssql-tds` encodes GBK/Big5/EUC-KR for varchar parameters (`vendor/mssql-tds/src/datatypes/sql_string/encoding.rs`), so the feature would break those writes |
-| abi3-py310 | not built, not benchmarked | open, see below |
+| `abi3-py310` | not built, not benchmarked | open, see below |
 
-Opt-level `s` makes the binary larger here, because the code is dominated by
-generic monomorphisations that LTO already merges. Speed was not re-measured
-for those builds, since neither is adopted.
+Benchmark check for the adopted tokio change (`RUST_PORT_VENV=.venv benchmarks/run.py`,
+one `run.py` pass with `--repeats 5`, load average about 11, so indicative only; values as printed): `read.taxi_100k.fetchall`
+rust_port 0.128 s vs mssql_python 0.351 s; `latency.select1_x5000` rust_port
+0.731 s vs mssql_python 0.779 s. There is no before/after run for the same
+host state. The change touches no runtime code path (features only: signal
+handling is not used by the crate), so the expectation is no change in the
+hot paths.
 
-### Why the 3 MB target is out of reach from this repo
+### What would reach the 3 MB target
 
-Everything large in the `.so` that is not ours comes from the vendored
-`mssql-tds`. The Cargo features we control cannot remove it. The remaining
-levers are in `vendor/mssql-tds` (not owned by this lane):
+Cargo features and profiles in this repo are nearly exhausted: each option
+above is either in `vendor/mssql-tds` source or in the packaging decision.
+The levers, in order of size:
 
-1. Gate the `openssl` dependency (Always Encrypted, Linux). Without it, the wheel
-   would not bundle `libcrypto` (about 3 MB compressed) and would need only the
-   system `libssl`. Whether that is acceptable for a manylinux wheel is a
-   packaging decision, not made here.
-2. Gate `x509-parser` (certificate expiry check, about 0.25 MB).
-3. Gate `bigdecimal` / `num-bigint` (about 0.11 MB).
-4. Narrow the `tokio` `full` feature in `mssql-tds` (not measured).
-5. Gate SSRP, multi-subnet failover, and the TVP / Always Encrypted code paths
-   behind features (`ssrp::query_browser` alone is 18 KB).
+1. **Replace the TLS backend.** `native-tls` on Linux pulls in `openssl`, so
+   `libcrypto` (2.37 MB compressed) is bundled. Dropping the Always Encrypted
+   `openssl` use alone does not help, because TLS still needs it. A rustls
+   backend would remove both. That is a transport change in
+   `vendor/mssql-tds/src/connection/transport/` (not owned by this lane).
+2. **Packaging decision: stop bundling OpenSSL.** Build with
+   `--auditwheel skip` (or `repair` off), so the wheel depends on the system
+   `libssl.so.3` and `libcrypto.so.3`. That saves the 3.2 MB of `.libs` and
+   brings the wheel to about 3.0 MB. It is not manylinux-compliant (the tag
+   would be `linux_x86_64`), and it needs OpenSSL 3 on the target. Not done
+   here.
+3. **Gate the vendored extras**, all in `vendor/mssql-tds/src`: `x509-parser`
+   (about 0.07 MB symbols), `bigdecimal` / `num-bigint` (about 0.1 MB), SSRP and
+   multi-subnet failover, TVP and Always Encrypted paths. Each is a small share.
+4. **Tighter `.eh_frame` / `.gcc_except_table`** (about 0.6 MB together) needs
+   `panic = "abort"`, which PyO3 does not allow. Not an option.
 
-Until (1) lands the wheel stays above 5 MB, so the 3 MB target is not met.
+Until 1 or 2 is decided, the wheel stays above 6 MB and the 3 MB target is not met.
 
 ## abi3
 
