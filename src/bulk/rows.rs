@@ -137,7 +137,20 @@ struct Shared {
     generic_columns: usize,
     /// Number of values per source row; later rows must match the first.
     source_columns: usize,
+    /// Buffers of sent windows, reused for later windows.
+    spare: Mutex<Vec<Spare>>,
 }
+
+/// The allocations of a finished [`Window`].
+#[derive(Default)]
+struct Spare {
+    bytes: Vec<u8>,
+    starts: Vec<usize>,
+    values: Vec<ColumnValues>,
+}
+
+/// Windows alive at once are few (the one being sent plus the one being read).
+const SPARE_WINDOWS: usize = 4;
 
 /// Converted rows of one read from the iterator.
 struct Window {
@@ -153,18 +166,43 @@ struct Window {
 
 impl Window {
     fn new(shared: &Arc<Shared>) -> Window {
+        let spare = shared.spare.lock().ok().and_then(|mut spare| spare.pop()).unwrap_or_default();
         Window {
             shared: Arc::clone(shared),
             rows: 0,
-            bytes: Vec::new(),
-            starts: Vec::new(),
-            values: Vec::new(),
+            bytes: spare.bytes,
+            starts: spare.starts,
+            values: spare.values,
             error: None,
         }
     }
 
     fn failed(shared: &Arc<Shared>, message: String) -> Window {
-        Window { rows: 1, error: Some(message), ..Window::new(shared) }
+        let mut window = Window::new(shared);
+        window.rows = 1;
+        window.error = Some(message);
+        window
+    }
+}
+
+impl Drop for Window {
+    fn drop(&mut self) {
+        if self.bytes.capacity() == 0 {
+            return;
+        }
+        let mut spare = Spare {
+            bytes: std::mem::take(&mut self.bytes),
+            starts: std::mem::take(&mut self.starts),
+            values: std::mem::take(&mut self.values),
+        };
+        spare.bytes.clear();
+        spare.starts.clear();
+        spare.values.clear();
+        if let Ok(mut pool) = self.shared.spare.lock() {
+            if pool.len() < SPARE_WINDOWS {
+                pool.push(spare);
+            }
+        }
     }
 }
 
@@ -456,7 +494,7 @@ fn is_decimal(cell: &Bound<'_, PyAny>) -> bool {
     DECIMAL_TYPE
         .import(cell.py(), "decimal", "Decimal")
         .ok()
-        .is_some_and(|class| cell.is_instance(class).unwrap_or(false))
+        .is_some_and(|class| cell.get_type().is(class) || cell.is_instance(class).unwrap_or(false))
 }
 
 fn to_i64(cell: &Bound<'_, PyAny>) -> Result<i64, String> {
@@ -531,8 +569,16 @@ fn to_uuid(cell: &Bound<'_, PyAny>) -> Result<[u8; 16], String> {
     } else {
         return Err(unsupported(cell, "UNIQUEIDENTIFIER"));
     };
-    let bytes = uuid.getattr("bytes_le").map_err(|err| err.to_string())?;
-    bytes.cast::<PyBytes>().map_err(|err| err.to_string())?.as_bytes().try_into().map_err(|_| "Invalid UUID".to_string())
+    // `uuid.bytes_le` is a pure-Python property; reorder the int here instead.
+    let value: u128 = uuid
+        .getattr(pyo3::intern!(py, "int"))
+        .and_then(|int| int.extract())
+        .map_err(|err| err.to_string())?;
+    let mut bytes = value.to_be_bytes();
+    bytes[..4].reverse();
+    bytes[4..6].reverse();
+    bytes[6..8].reverse();
+    Ok(bytes)
 }
 
 /// `cell` as a datetime.date / time / datetime object: strings are parsed as ISO 8601.
@@ -605,7 +651,8 @@ fn utc_offset_minutes(value: &Bound<'_, PyAny>) -> Result<i16, String> {
 /// destination's scale. Extra scale is rejected, except for floats: they carry
 /// no exact scale, so they are rounded half to even like mssql_py_core does.
 fn to_decimal(cell: &Bound<'_, PyAny>, dest: &BulkCopyColumnMetadata) -> Result<(bool, u128), String> {
-    parse_decimal(&number_text(cell, "DECIMAL")?, dest, cell.is_instance_of::<PyFloat>())
+    let text = number_text(cell, "DECIMAL")?;
+    parse_decimal(text.to_str().map_err(|err| err.to_string())?, dest, cell.is_instance_of::<PyFloat>())
 }
 
 /// A decimal string as `(negative, digits, shift)`: the value is
@@ -674,7 +721,8 @@ fn parse_decimal(text: &str, dest: &BulkCopyColumnMetadata, round: bool) -> Resu
 /// A Python number as MONEY: scaled by 10^4, rounded half to even.
 fn to_money(cell: &Bound<'_, PyAny>, dest: &BulkCopyColumnMetadata) -> Result<i128, String> {
     let text = number_text(cell, "MONEY")?;
-    let (negative, digits, shift) = decimal_digits(&text, &dest.column_name)?;
+    let text = text.to_str().map_err(|err| err.to_string())?;
+    let (negative, digits, shift) = decimal_digits(text, &dest.column_name)?;
     let overflow = || format!("Value {text} out of range for column '{}'", dest.column_name);
     let to_scale = shift + 4;
     let scaled = if to_scale >= 0 {
@@ -695,15 +743,14 @@ fn to_money(cell: &Bound<'_, PyAny>, dest: &BulkCopyColumnMetadata) -> Result<i1
 }
 
 /// The text of a number (or numeric string) cell.
-fn number_text(cell: &Bound<'_, PyAny>, sql: &str) -> Result<String, String> {
-    let numeric = cell.is_instance_of::<PyString>()
-        || cell.is_instance_of::<PyInt>()
-        || cell.is_instance_of::<PyFloat>()
-        || is_decimal(cell);
-    if !numeric {
-        return Err(unsupported(cell, sql));
+fn number_text<'py>(cell: &Bound<'py, PyAny>, sql: &str) -> Result<Bound<'py, PyString>, String> {
+    if let Ok(text) = cell.cast::<PyString>() {
+        return Ok(text.clone());
     }
-    Ok(cell.str().map_err(|err| err.to_string())?.to_string())
+    if cell.is_instance_of::<PyInt>() || cell.is_instance_of::<PyFloat>() || is_decimal(cell) {
+        return cell.str().map_err(|err| err.to_string());
+    }
+    Err(unsupported(cell, sql))
 }
 
 /// Load the rows of the Python iterator `rows` into the destination of `settings`.
@@ -738,6 +785,7 @@ pub fn load(
                 source_columns: shape.column_count,
                 columns,
                 steps,
+                spare: Mutex::new(Vec::new()),
             });
             Ok(PyRows {
                 iter: source,
