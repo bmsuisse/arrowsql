@@ -114,6 +114,8 @@ NYC yellow taxi data, January 2024 (2,964,624 rows × 20 columns), SQL Server
 Driver 18). Release build of this project at commit `1182ec1`, median of 5,
 one measurement at a time (machine-wide lock), but on a shared dev box with
 other jobs running: treat absolute times as indicative and compare ratios.
+Rows marked * come from earlier dedicated runs (Arrow agent, aio agent,
+free-threaded agent) rather than the commit-`1182ec1` run.
 
 **Reads**
 
@@ -128,7 +130,7 @@ other jobs running: treat absolute times as indicative and compare ratios.
 | `cursor.arrow()`, 100k rows | 0.155 s | 0.061 s | 2.6x | connectorx 0.350 s |
 | decimal-heavy Arrow | 0.800 s | 0.238 s | 3.4x | connectorx 1.43 s |
 | DuckDB over the Arrow stream, 3M rows | 4.595 s | 1.987 s | 2.3x | connectorx 9.85 s |
-| `read_arrow(..., partitions=8)`, 3M rows | 4.253 s | 0.591 s | 7.2x | connectorx (8 partitions) 2.63 s |
+| `read_arrow(..., partitions=8)`, 3M rows * | 4.253 s | 0.591 s | 7.2x | connectorx (8 partitions) 2.63 s |
 
 On a single connection SQL Server's row serialization is the limit (draining
 3M rows into a sink that discards every value takes about 2 s); the
@@ -151,8 +153,8 @@ partitioned read is how to get past it.
 | 16 threads × point lookups | 2.395 s | 0.429 s | 5.6x | FastMssql 0.612 s |
 | `SELECT 1` × 5,000 | 0.829 s | 0.741 s | 1.1x | pyodbc 0.674 s |
 | connect + close × 50 | 0.199 s | 0.194 s | 1.0x | pyodbc 0.186 s |
-| async point lookups, 64 concurrent (`aio`) | ~7k q/s | ~40k q/s | ~5x | FastMssql ~15k q/s |
-| free-threaded 3.15t, 16 threads point lookups | 4.3k q/s | 18.7k q/s | 4.4x | – |
+| async point lookups, 64 concurrent (`aio`) * | ~7k q/s | ~40k q/s | ~5x | FastMssql ~15k q/s |
+| free-threaded 3.15t, 16 threads point lookups * | 4.3k q/s | 18.7k q/s | 4.4x | – |
 
 Still behind: `executemany` (pyodbc `fast_executemany` is about 2x faster) and
 the tiniest round trips (`SELECT 1`, single-row lookups), where pyodbc is
