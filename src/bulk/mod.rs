@@ -33,7 +33,9 @@ use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use crate::connection::error_text;
 use crate::consts::*;
+use crate::diag;
 use crate::runtime::SyncClient;
 use crate::statement::{self, StmtShared, with_exclusive_wire};
 use settings::{BulkSettings, Resolved, SourceShape};
@@ -67,8 +69,20 @@ impl From<BulkFailure> for PyErr {
     }
 }
 
+/// A SQL Server error in the `SQLSTATE:<state>:NATIVE:<n>:<message>` form, so the
+/// Python layer raises the same DB-API class `execute` does for it.
+fn server_error_to_py(err: &TdsError) -> PyErr {
+    match diag::records_for_error(err, "HY000").first() {
+        Some(record) => PyRuntimeError::new_err(error_text(record)),
+        None => PyRuntimeError::new_err(err.to_string()),
+    }
+}
+
 /// The exception classes `mssql_py_core` raised for the same failures.
 fn tds_error_to_py(err: TdsError) -> PyErr {
+    if matches!(err, TdsError::SqlServerError { .. }) {
+        return server_error_to_py(&err);
+    }
     match err {
         TdsError::UsageError(message) | TdsError::TypeConversionError(message) => PyValueError::new_err(message),
         TdsError::EncodedValueTooLong { .. } => PyValueError::new_err(err.to_string()),
