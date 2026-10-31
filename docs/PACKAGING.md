@@ -35,7 +35,8 @@ were loaded by `import mssql_python`. The expected result is `none`.
 
 `Cargo.toml` `[profile.release]`:
 
-* `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`: speed.
+* `opt-level = "s"`, `lto = "fat"`, `codegen-units = 1`. `s` is the size/speed
+  compromise, see "Lean profile" below.
 * `panic = "unwind"`: required by PyO3. Panics are converted to Python
   exceptions at the FFI boundary, so the abort strategy cannot be used.
 * `strip = true`: removes symbols from the `.so`. Runtime behavior does not
@@ -128,7 +129,7 @@ bundles it into `*.libs/`, which is the 3.2 MB above.
 | `tokio` `full` and `tokio-util` `full` narrowed to the features the crate uses (`mssql-tds` `Cargo.toml`) | `.so` about 20 KiB smaller, `signal-hook-registry` and a duplicate `hashbrown` dropped from the lock | adopted |
 | `opt-level = "s"` for `x509-parser`, `der-parser`, `asn1-rs`, `nom` (cold: connect-time cert parse) | a further 8 KiB smaller, below noise | rejected: not worth a per-package profile entry |
 | `opt-level = "s"` for `mssql-tds` only | `.so` +12% | rejected (earlier run) |
-| `opt-level = "s"` for everything | `.so` +3% | rejected (earlier run). Generic monomorphisations that LTO already merges dominate, so `s` only changes the code shape |
+| `opt-level = "s"` for everything | `.so` +3% | rejected (earlier run, before the TLS and Arrow work). Re-measured in the lean lane: adopted, see "Lean profile" |
 | `encoding_rs/no-static-ideograph-encoder-tables` | not built | rejected by reading code: `mssql-tds` encodes GBK/Big5/EUC-KR for varchar parameters (`vendor/mssql-tds/src/datatypes/sql_string/encoding.rs`), so the feature would break those writes |
 | `abi3-py310` | not built, not benchmarked | open, see below |
 
@@ -219,3 +220,64 @@ Targets (wheel <= 3 MB, installed <= 6 MB) are not met: rustls + ring + webpki
 add about 1 MB to the `.so`. `opt-level = "s"` for the cold TLS crates is set in
 `Cargo.toml`. Remaining levers: drop `x509-parser` (used for the v1 certificate
 fallback, expiry check) and gate TVP / SSRP in the vendored crate.
+
+## Lean profile (opt-level "s", RELR, ICF)
+
+Starting point: wheel 3,614,126 B, installed 8,008 KiB, `.so` 7,308 KiB.
+
+| change | wheel | installed | `.so` |
+|---|---|---|---|
+| `opt-level = "s"` for the whole graph (replaces the per-package `s` entries for rustls and x509-parser) | 2,975,495 B | 6,396 KiB | 5,696 KiB |
+| `.cargo/config.toml`: lld `--icf=all` and `-z pack-relative-relocs` | 2,942,855 B | 6,176 KiB | 5,476 KiB |
+
+Result: the wheel is 2.94 MB (target 3.0 MB, met). Installed is 6,176 KiB
+(target 6 MB, missed by about 3%, 176 KiB over 6,000 KiB). The `.so` is 5.6 MB
+and `mssql_python/*.py` is 0.7 MB (upstream-identical, not touched).
+
+Speed, `benchmarks/run.py` `--repeats 5 --no-prepare`, release builds
+alternated in one session (5 rounds, median of the printed times, noise about
++-3%):
+
+| workload | opt-level 3 | opt-level "s" | change |
+|---|---|---|---|
+| `read.taxi_100k.fetchall` | 0.1136 s | 0.1176 s | +3.5% |
+| `read.taxi_100k.arrow` | 0.0589 s | 0.0590 s | 0% |
+| `latency.select1_x5000` | 0.6390 s | 0.6394 s | 0% |
+
+`fetchall` is about 0.5 points above the 3% budget; the other two are inside
+it.
+
+Tried and not kept (same session, `.so` bytes, uncompressed):
+
+| change | result | verdict |
+|---|---|---|
+| `opt-level = "z"` for everything | `.so` 5.20 MB, `fetchall` +20% | rejected, too slow |
+| `z` for `mssql-tds`, rustls and the certificate crates | `.so` 100 KB smaller, `select1` +5.5% | rejected |
+| `z` for only the certificate crates (`x509-parser`, `der-parser`, `asn1-rs`, `nom`, `oid-registry`, webpki, native-certs) | `.so` 26 KB larger | rejected |
+| `ddbc_bindings` at 3 (rest `s`) | `.so` +1.05 MB (it holds the inlined mssql-tds generics), `fetchall` not faster | rejected |
+| `mssql-tds`, `pyo3` at 3 | `.so` +0.58 MB, `fetchall` not faster | rejected |
+| `encoding_rs`, `simdutf8`, `memchr`, `bytes` at 3 | `.so` +30 KB, `fetchall` not faster | rejected |
+| `tokio`, `tokio-util`, `bytes`, `futures-util`, `pyo3`, `parking_lot` at 3 | `.so` +74 KB, no gain | rejected |
+| `tracing` `release_max_level_off` | `.so` 7 KB smaller | rejected: too small to patch the vendored `Cargo.toml` |
+| `uuid` without `fast-rng` (drops `rand`, `chacha20`) | `.so` 4 KB smaller | rejected: same |
+| `-z noseparate-code` | no change with lld | not used |
+
+A package override on `ddbc_bindings` makes Cargo ignore
+`[profile.release] strip` for the final `.so` (the `.so` came out unstripped).
+Setting `[tool.maturin] strip = true` fixes that if a per-package override on
+`ddbc_bindings` is ever added.
+
+`.cargo/config.toml` only applies to `x86_64-unknown-linux-gnu`. Two
+requirements:
+
+* `--icf=all` needs lld. Rust 1.90 and later use it by default on this target.
+  With an older toolchain the link fails (GNU ld has no `--icf`).
+* `-z pack-relative-relocs` (DT_RELR) needs glibc 2.36 or later at load time.
+  The wheel built here is already tagged `manylinux_2_38`. A build in a
+  `manylinux_2_28` container must drop that flag, or auditwheel and the loader
+  reject the wheel.
+
+Remaining ways to cut the last 176 KiB, none taken: std's backtrace code
+(gimli, addr2line, miniz_oxide, rustc_demangle, about 180 KB) can only be
+removed with `-Zbuild-std` on nightly; `x509-parser` and its parsers
+(about 150 KB) could be replaced by a small DER reader in the vendored crate.

@@ -1,0 +1,4 @@
+# Size flags for the release cdylib (lld, the default linker since Rust 1.90):
+# identical-code folding and packed (RELR) relative relocations. DT_RELR needs glibc >= 2.36 at load time.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,--icf=all", "-C", "link-arg=-Wl,-z,pack-relative-relocs"]
