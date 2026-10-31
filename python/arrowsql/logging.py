@@ -12,7 +12,6 @@ import os
 import sys
 import threading
 import datetime
-import re
 import platform
 import atexit
 from typing import Optional
@@ -110,14 +109,11 @@ class MSSQLLogger:
 
         # Set up default stderr handler for WARNING and ERROR messages
         # This ensures warnings are always visible even when logging is not enabled
-        import sys
-
         default_handler = logging.StreamHandler(sys.stderr)
         default_handler.setLevel(logging.WARNING)
         # Simple format for warnings - no CSV formatting needed
         default_handler.setFormatter(logging.Formatter("[%(name)s] %(levelname)s: %(message)s"))
         self._logger.addHandler(default_handler)
-        self._default_handler = default_handler  # Keep reference for later removal
 
         # Don't setup full handlers yet - do it lazily when setLevel is called
         # This prevents creating log files when user changes output mode before enabling logging
@@ -228,18 +224,9 @@ class MSSQLLogger:
 
         # Setup stdout handler if needed
         if self._output_mode in (STDOUT, BOTH):
-            import sys
-
             self._stdout_handler = logging.StreamHandler(sys.stdout)
             self._stdout_handler.setFormatter(formatter)
             self._logger.addHandler(self._stdout_handler)
-
-    def _reconfigure_handlers(self):
-        """
-        Reconfigure handlers when output mode changes.
-        Closes existing handlers and creates new ones based on current output mode.
-        """
-        self._setup_handlers()
 
     def _cleanup_handlers(self):
         """
@@ -413,14 +400,13 @@ class MSSQLLogger:
             except:
                 pass
 
-    def _log(self, level: int, msg: str, add_prefix: bool = True, *args, **kwargs):
+    def _log(self, level: int, msg: str, *args, **kwargs):
         """
         Internal logging method with exception safety.
 
         Args:
             level: Log level (DEBUG, INFO, WARNING, ERROR)
             msg: Message format string
-            add_prefix: Whether to add [Python] prefix (default True)
             *args: Arguments for message formatting
             **kwargs: Additional keyword arguments
 
@@ -445,9 +431,7 @@ class MSSQLLogger:
             if level < self._cached_level and level < logging.WARNING:
                 return
 
-            # Add prefix if requested (only after level check)
-            if add_prefix:
-                msg = f"[Python] {msg}"
+            msg = f"[Python] {msg}"
 
             # Format message with args if provided
             if args:
@@ -460,8 +444,6 @@ class MSSQLLogger:
             # Last resort: Try stderr fallback for any logging failure
             # This helps diagnose critical issues (disk full, permission denied, etc.)
             try:
-                import sys
-
                 level_name = logging.getLevelName(level)
                 sys.stderr.write(
                     f"[MSSQL-Python Logging Failed - {level_name}] {msg if 'msg' in locals() else 'Unable to format message'}\n"
@@ -474,19 +456,19 @@ class MSSQLLogger:
 
     def debug(self, msg: str, *args, **kwargs):
         """Log at DEBUG level (all diagnostic messages)"""
-        self._log(logging.DEBUG, msg, True, *args, **kwargs)
+        self._log(logging.DEBUG, msg, *args, **kwargs)
 
     def info(self, msg: str, *args, **kwargs):
         """Log at INFO level"""
-        self._log(logging.INFO, msg, True, *args, **kwargs)
+        self._log(logging.INFO, msg, *args, **kwargs)
 
     def warning(self, msg: str, *args, **kwargs):
         """Log at WARNING level"""
-        self._log(logging.WARNING, msg, True, *args, **kwargs)
+        self._log(logging.WARNING, msg, *args, **kwargs)
 
     def error(self, msg: str, *args, **kwargs):
         """Log at ERROR level"""
-        self._log(logging.ERROR, msg, True, *args, **kwargs)
+        self._log(logging.ERROR, msg, *args, **kwargs)
 
     # Level control
 
@@ -634,7 +616,7 @@ class MSSQLLogger:
 
         # Only reconfigure if handlers were already initialized
         if self._handlers_initialized:
-            self._reconfigure_handlers()
+            self._setup_handlers()
 
     @property
     def log_file(self) -> Optional[str]:

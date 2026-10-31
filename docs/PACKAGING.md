@@ -67,7 +67,7 @@ stack. Every optional import is lazy:
 * `auth.py`, `db_connection.py`: `azure.identity` / `azure.core` are imported
   inside the functions that build those credentials.
 * `cursor.py` bulkcopy: `mssql_py_core` is imported in
-  `_bulkcopy_core_and_validate()`. A missing package raises an `ImportError`
+  `_bulkcopy_import_core()`. A missing package raises an `ImportError`
   that names the `async-preview` extra.
 * `odbc_provider.py`: the provider package (`mssql_python_odbc` / `mssql_py_core`)
   is imported only when the upstream ODBC provider is selected. The Rust

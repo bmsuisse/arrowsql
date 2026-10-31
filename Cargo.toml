@@ -38,6 +38,12 @@ async-trait = "0.1"
 [target.'cfg(windows)'.dependencies]
 mssql-tds = { git = "https://github.com/microsoft/mssql-rs", rev = "6b6b48ecbbbdad297039d1641e2be4775eed998b", default-features = false, features = ["gssapi", "rustls-tls", "tls-schannel-direct-on-windows"] }
 
+# musl cannot load a shared library that uses initial-exec TLS through dlopen
+# ("initial-exec TLS resolves to dynamic definition"): mimalloc's thread-local
+# heap pointer has to use the local-dynamic model there.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
+
 [profile.dev]
 opt-level = 1
 

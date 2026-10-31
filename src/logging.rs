@@ -13,12 +13,14 @@
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::PyModule;
 
 pub const DEBUG: i32 = 10;
 const WARNING: i32 = 30;
 
 static LEVEL: AtomicI32 = AtomicI32::new(WARNING);
+static LOGGER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 #[pyfunction]
 pub fn update_log_level(level: i32) {
@@ -50,8 +52,9 @@ pub fn debug(py: Python<'_>, msg: &str) {
 }
 
 fn emit(py: Python<'_>, level: i32, msg: &str) -> PyResult<()> {
-    let module = PyModule::import(py, "arrowsql.logging")?;
-    let logger = module.getattr("logger")?;
-    logger.call_method1("py_core_log", (level, format!("[DDBC] {msg}")))?;
+    let logger = LOGGER.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        Ok(PyModule::import(py, "arrowsql.logging")?.getattr("logger")?.unbind())
+    })?;
+    logger.bind(py).call_method1("py_core_log", (level, format!("[DDBC] {msg}")))?;
     Ok(())
 }

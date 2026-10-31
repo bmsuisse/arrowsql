@@ -4,10 +4,10 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from ..exceptions import OperationalError, ProgrammingError
+from ..exceptions import ProgrammingError
 from ..logging import logger
 from ..row import Row
-from .exception_translator import translate_py_core_exceptions
+from .exception_translator import is_connection_busy, translate_py_core_exceptions
 
 if TYPE_CHECKING:
     from .async_cursor import _AsyncCursor  # pyright: ignore[reportPrivateUsage]
@@ -19,9 +19,7 @@ def _get_py_core_async_cursor(cursor: "_AsyncCursor") -> Any:
 
 def _is_non_mutating_rejection(error: BaseException) -> bool:
     """Return whether py-core guarantees rejection before result-state mutation."""
-    if isinstance(error, OperationalError) and str(error.__cause__).startswith(
-        "Connection is busy"
-    ):
+    if is_connection_busy(error):
         return True
     return isinstance(error, (TypeError, KeyError)) or (
         isinstance(error, ProgrammingError) and isinstance(error.__cause__, TypeError)

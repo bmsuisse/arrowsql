@@ -88,6 +88,15 @@ def sanitize_connection_string(conn_str: str) -> str:
     return _sanitize(conn_str)
 
 
+def _sanitize_text(text: str, max_length: int) -> Tuple[str, bool]:
+    """Keep word characters, dash and dot; cap length. Returns (result, was_truncated)."""
+    sanitized = re.sub(r"[^\w\-\.]", "", text)
+    was_truncated = len(sanitized) > max_length
+    if was_truncated:
+        sanitized = sanitized[:max_length] + "..."
+    return (sanitized if sanitized else "<invalid>"), was_truncated
+
+
 def sanitize_user_input(user_input: str, max_length: int = 50) -> str:
     """
     Sanitize user input for safe logging by removing control characters,
@@ -109,18 +118,7 @@ def sanitize_user_input(user_input: str, max_length: int = 50) -> str:
         logger.debug("sanitize_user_input: Non-string input detected")
         return "<non-string>"
 
-    # Remove control characters and non-printable characters
-    # Allow alphanumeric, dash, underscore, and dot (common in encoding names)
-    sanitized = re.sub(r"[^\w\-\.]", "", user_input)
-
-    # Limit length to prevent log flooding
-    was_truncated = False
-    if len(sanitized) > max_length:
-        sanitized = sanitized[:max_length] + "..."
-        was_truncated = True
-
-    # Return placeholder if nothing remains after sanitization
-    result = sanitized if sanitized else "<invalid>"
+    result, was_truncated = _sanitize_text(user_input, max_length)
     logger.debug(
         "sanitize_user_input: Result length=%d, truncated=%s", len(result), str(was_truncated)
     )
@@ -156,22 +154,13 @@ def validate_attribute_value(
         str(is_connected),
     )
 
-    # Sanitize a value for logging
     def _sanitize_for_logging(input_val: Any, max_length: int = max_log_length) -> str:
         if not isinstance(input_val, str):
             try:
                 input_val = str(input_val)
             except (TypeError, ValueError):
                 return "<non-string>"
-
-        # Allow alphanumeric, dash, underscore, and dot
-        sanitized = re.sub(r"[^\w\-\.]", "", input_val)
-
-        # Limit length
-        if len(sanitized) > max_length:
-            sanitized = sanitized[:max_length] + "..."
-
-        return sanitized if sanitized else "<invalid>"
+        return _sanitize_text(input_val, max_length)[0]
 
     # Create sanitized versions for logging
     sanitized_attr = _sanitize_for_logging(attribute) if sanitize_logs else str(attribute)

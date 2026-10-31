@@ -168,9 +168,6 @@ class _ConnectionStringParser:
         # Dictionary to store parsed key=value pairs
         params = {}
 
-        # Track which keys we've seen to detect duplicates
-        seen_keys = {}  # Maps normalized key -> first occurrence position
-
         # Track current position in the string
         current_pos = 0
         str_len = len(connection_str)
@@ -199,9 +196,6 @@ class _ConnectionStringParser:
                     errors.append(
                         f"Incomplete specification: keyword '{incomplete_text}' has no value (missing '=')"
                     )
-                # Skip to next semicolon
-                while current_pos < str_len and connection_str[current_pos] != ";":
-                    current_pos += 1
                 continue
 
             # Extract and normalize the key
@@ -230,10 +224,9 @@ class _ConnectionStringParser:
                     )
 
                 # Check for duplicates
-                if key in seen_keys:
+                if key in params:
                     errors.append(f"Duplicate keyword '{key}' found")
                 else:
-                    seen_keys[key] = True
                     params[key] = value
 
             except ValueError as e:

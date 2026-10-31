@@ -137,8 +137,7 @@ The Rust side already reads a `None` entry as "no hint" (`params::parse_hint`).
   no token acquisition or `mssql_py_core` import. The preconditions of the old
   path are kept (`_bulkcopy_connection_params`: connection string present, SERVER
   given). `mssql_py_core` serves only cursors without a native handle (mocks) and
-  iterables of `RecordBatch`; `_bulkcopy_core_and_validate` is now
-  `_bulkcopy_validate` + `_bulkcopy_import_core`.
+  iterables of `RecordBatch`.
 - `Cursor._bulk_row_iterator` (the former nested `_prepare_row_iterator`) also
   materializes a `Cursor` of the same connection used as a row source, which
   would otherwise deadlock on the connection's wire.

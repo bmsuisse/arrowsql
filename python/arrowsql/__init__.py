@@ -77,7 +77,7 @@ from .row import Row, RowMapping
 from .logging import logger, setup_logging, driver_logger
 
 # Constants
-from .constants import ConstantsDDBC, GetInfoConstants, get_info_constants
+from .constants import ConstantsDDBC, GetInfoConstants
 
 # Pooling
 from .pooling import PoolingManager
@@ -582,23 +582,6 @@ def pooling(max_size: int = 100, idle_timeout: int = 600, enabled: bool = True) 
         PoolingManager.disable()
     else:
         PoolingManager.enable(max_size, idle_timeout)
-
-
-_original_module_setattr = sys.modules[__name__].__setattr__
-
-
-def _custom_setattr(name, value):
-    if name == "lowercase":
-        with _settings_lock:
-            _settings.lowercase = bool(value)
-            # Update the module's lowercase variable
-            _original_module_setattr(name, _settings.lowercase)
-    else:
-        _original_module_setattr(name, value)
-
-
-# Replace the module's __setattr__ with our custom version
-sys.modules[__name__].__setattr__ = _custom_setattr
 
 
 # Create a custom module class that uses properties instead of __setattr__
