@@ -1877,9 +1877,9 @@ impl TdsClient {
         };
         RpcParameter::reject_data_at_exec(named_params.iter())?;
 
-        let declaration_params = named_params.clone();
+        let declaration_params = &named_params;
         let mut params_list_as_string = String::new();
-        build_parameter_list_string(&declaration_params, &mut params_list_as_string)?;
+        build_parameter_list_string(declaration_params, &mut params_list_as_string)?;
 
         // Always Encrypted: when the connection enabled column encryption and the
         // server acknowledged the feature, ask the server which parameters need
