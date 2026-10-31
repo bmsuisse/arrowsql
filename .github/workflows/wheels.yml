@@ -34,10 +34,10 @@ env:
     print(mssql_python.__version__, d.__version__, d.__rust_port__);
     assert d.__rust_port__
 
-# Interpreters: CPython 3.10 to 3.15 plus free-threaded 3.14t and 3.15t where an
-# interpreter exists for the platform. maturin picks them up with
-# --find-interpreter (the manylinux/musllinux containers ship all of them; the
-# macOS and Windows jobs install them with setup-python).
+# Interpreters: CPython 3.10 to 3.15 plus free-threaded 3.14t and 3.15t. The Linux
+# jobs name them explicitly (the manylinux/musllinux images ship all of them, plus
+# PyPy, which is not supported); macOS and Windows install them with setup-python
+# and use --find-interpreter.
 
 jobs:
   linux:
@@ -62,10 +62,10 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           rust-toolchain: stable
-          # --find-interpreter would also pick up the images' PyPy builds, which this
-          # crate does not support (PyUnicode_1BYTE_DATA is missing from PyPy's C API).
-          before-script-linux: find /usr/local/bin /usr/bin /opt/python -maxdepth 1 \( -name 'pypy*' -o -name 'pp3*' \) -exec rm -rf {} + 2>/dev/null || true
-          args: --release --out dist --find-interpreter
+          # CPython only, named explicitly: --find-interpreter also picks up the
+          # images' PyPy builds, which this crate does not support
+          # (PyUnicode_1BYTE_DATA and PyTuple_SET_ITEM are missing from PyPy's C API).
+          args: --release --out dist --interpreter python3.10 python3.11 python3.12 python3.13 python3.14 python3.15 python3.14t python3.15t
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}-${{ matrix.manylinux }}
