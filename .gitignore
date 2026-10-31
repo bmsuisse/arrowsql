@@ -12,3 +12,4 @@ __pycache__/
 reviews/*.log
 .claude/worktrees/
 .overlay-upstream/
+.tls-test/
