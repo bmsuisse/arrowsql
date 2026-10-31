@@ -13,6 +13,7 @@ use mssql_tds::datatypes::row_writer::RowWriter;
 use mssql_tds::query::metadata::ColumnMetadata;
 
 use super::StmtShared;
+use super::wire::Slot;
 use crate::consts::*;
 use crate::decode::{RowBuffer, describe};
 use crate::diag::{self, DiagRecord};
@@ -375,15 +376,58 @@ pub fn next_result(stmt: &StmtShared) -> SqlReturn {
         state.diag = err;
         return SQL_ERROR;
     }
+    let leaving_rows = state.columns.is_some();
     state.clear_current();
+    if leaving_rows {
+        return skip_to_result_set(stmt, &mut slot, &mut state);
+    }
+    let ret = step_result(stmt, &mut slot, &mut state);
+    with_info(&state, ret)
+}
+
+/// Leaving a result set: the results without columns that follow it (a PRINT,
+/// an informational RAISERROR, a DML count) are passed over when a result set
+/// comes after them, their messages kept in `diag`. When none does, they are
+/// reported one at a time, as `nextset()` does for any other no-column result.
+fn skip_to_result_set(stmt: &StmtShared, slot: &mut Slot, state: &mut StmtState) -> SqlReturn {
+    let mut held: Vec<BufferedResult> = Vec::new();
+    loop {
+        let ret = step_result(stmt, slot, state);
+        let info = std::mem::take(&mut state.diag);
+        if matches!(ret, SQL_SUCCESS | SQL_SUCCESS_WITH_INFO) && state.columns.is_none() {
+            held.push(BufferedResult::without_rows(state.rowcount, info));
+            continue;
+        }
+        if ret == SQL_NO_DATA && !held.is_empty() {
+            let first = held.remove(0);
+            for rest in held.into_iter().rev() {
+                state.queued.push_front(rest);
+            }
+            state.install_buffered(first);
+            return with_info(state, SQL_SUCCESS);
+        }
+        // A result set, or an error, follows: the passed-over results are gone.
+        state.diag = held.into_iter().flat_map(|r| r.info).chain(info).collect();
+        return with_info(state, ret);
+    }
+}
+
+/// `SQL_SUCCESS` becomes `SQL_SUCCESS_WITH_INFO` when messages are pending.
+fn with_info(state: &StmtState, ret: SqlReturn) -> SqlReturn {
+    if ret == SQL_SUCCESS && !state.diag.is_empty() { SQL_SUCCESS_WITH_INFO } else { ret }
+}
+
+/// Install the result after the current one: a queued result, else the next
+/// one read off the wire.
+fn step_result(stmt: &StmtShared, slot: &mut Slot, state: &mut StmtState) -> SqlReturn {
     if let Some(next) = state.queued.pop_front() {
-        return install_queued(&mut state, next);
+        return install_queued(state, next);
     }
     if !state.on_wire {
         return SQL_NO_DATA;
     }
     let Some(client) = slot.client.as_mut() else { return SQL_NO_DATA };
-    let ret = advance_on_wire(client, &mut state);
+    let ret = advance_on_wire(client, state);
     if !state.on_wire && slot.owner.as_ref().is_some_and(|(id, _)| *id == stmt.id) {
         slot.owner = None;
     }
