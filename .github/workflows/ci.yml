@@ -117,7 +117,10 @@ jobs:
           import os, mssql_python
           master = os.environ["DB_CONNECTION_STRING"].replace("Database=rs_ci", "Database=master")
           conn = mssql_python.connect(master, autocommit=True)
-          conn.cursor().execute("IF DB_ID('rs_ci') IS NULL CREATE DATABASE [rs_ci]")
+          cur = conn.cursor()
+          cur.execute("IF DB_ID('rs_ci') IS NULL CREATE DATABASE [rs_ci]")
+          # A second user database: upstream's SQL_ATTR_CURRENT_CATALOG test switches to it.
+          cur.execute("IF DB_ID('rs_ci_other') IS NULL CREATE DATABASE [rs_ci_other]")
           EOF
       - name: common_issues and port suites
         run: |
