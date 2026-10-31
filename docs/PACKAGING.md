@@ -15,8 +15,8 @@ brings only the compiled `ddbc_bindings` extension and the vendored
 
 `.github/workflows/wheels.yml` builds, as workflow artifacts only (no PyPI step; a
 trusted-publishing job is left commented out): manylinux_2_28 and musllinux_1_2 for
-x86_64 and aarch64, macOS x86_64 and arm64, Windows x64, for CPython 3.10 to 3.14
-plus 3.14t, and an sdist. Untested outside Linux x86_64; see README "Support".
+x86_64 and aarch64, macOS x86_64 and arm64, Windows x64, for CPython 3.10 to
+3.15, plus 3.14t and 3.15t, and an sdist. Untested outside Linux x86_64; see README "Support".
 
 The sdist needs `vendor/mssql-tds` (a `[patch]` path dependency, which maturin does
 not collect on its own), so `[tool.maturin] include` adds it. `cargo metadata

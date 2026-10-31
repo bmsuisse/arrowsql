@@ -127,8 +127,9 @@ x86_64 has been run against a database.
 | macOS x86_64 / arm64 | yes | no | arm64 wheel gets an import smoke test in CI, x86_64 is never imported; `aio` should work (Unix) |
 | Windows x64 | yes | no | `aio` is not available (needs `loop.add_reader`); wheel gets an import smoke test in CI |
 
-Python: CPython 3.10 to 3.14 and free-threaded 3.14t are built; 3.13 is the version
-the suites run on. PyPy and 32-bit platforms are not supported.
+Python: CPython 3.10 to 3.15 and free-threaded 3.14t and 3.15t are built. CI runs
+the suites on 3.13 (plus the upstream baseline), 3.15 and 3.15t (3.15t is
+non-gating while optional test dependencies lack free-threaded wheels). PyPy and 32-bit platforms are not supported.
 
 ### Connection string
 

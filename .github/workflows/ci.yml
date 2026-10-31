@@ -62,8 +62,17 @@ jobs:
       - run: cargo check --lib
 
   tests:
-    name: pytest (SQL Server 2022, Python 3.13)
+    name: pytest (SQL Server 2022, Python ${{ matrix.python }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { python: "3.13", baseline: true, experimental: false }
+          - { python: "3.15", baseline: false, experimental: false }
+          # Free-threaded: optional test dependencies may lack 3.15t wheels.
+          - { python: "3.15t", baseline: false, experimental: true }
+    continue-on-error: ${{ matrix.experimental }}
     timeout-minutes: 90
     services:
       mssql:
@@ -88,7 +97,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python }}
       - name: Build the extension (maturin develop)
         run: |
           python -m venv .venv
@@ -109,6 +118,7 @@ jobs:
           . .venv/bin/activate
           python -m pytest -q --timeout 120 -p no:randomly tests/common_issues tests/port
       - name: Upstream suite against the passing baseline
+        if: ${{ matrix.baseline }}
         run: |
           . .venv/bin/activate
           python scripts/check_upstream_baseline.py -p no:randomly
