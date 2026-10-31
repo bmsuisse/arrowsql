@@ -36,7 +36,7 @@ const NON_FINITE_DECIMAL_MESSAGE: &str =
 
 const UNSUPPORTED_PARAMETER_TYPE_MESSAGE: &str =
     "Unsupported parameter type: The driver cannot safely convert it to a SQL type.";
-use crate::params::udt;
+use crate::params::{DATA_ERROR_PREFIX, DATA_VALUE_ERROR_PREFIX, udt};
 
 static DECIMAL_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static UUID_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -291,7 +291,7 @@ pub(crate) fn py_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
                 .str()
                 .map_or_else(|_| "<int>".to_string(), |s| s.to_string());
             return Err(Error::TypeConversionError(format!(
-                "integer {digits} is out of range for SQL BIGINT [-2^63, 2^63-1]"
+                "{DATA_VALUE_ERROR_PREFIX}integer {digits} is out of range for SQL BIGINT [-2^63, 2^63-1]"
             )));
         };
         return Ok(match value {
@@ -303,10 +303,10 @@ pub(crate) fn py_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
     }
 
     if py_obj.is_instance_of::<PyFloat>() {
-        return py_obj
+        let value = py_obj
             .extract::<f64>()
-            .map(|value| SqlType::Float(Some(value)))
-            .map_err(|error| Error::UsageError(format!("Failed to extract float: {error}")));
+            .map_err(|error| Error::UsageError(format!("Failed to extract float: {error}")))?;
+        return finite_float(value).map(|value| SqlType::Float(Some(value)));
     }
 
     if py_obj.is_instance_of::<PyString>() {
@@ -325,9 +325,11 @@ pub(crate) fn py_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
         }
         .max(1);
         let value = SqlString::from_utf8_string(value);
+        // Inferred strings use the 4000-unit boundary for both types, so
+        // anything longer is declared MAX rather than an 8000-byte varchar.
         return Ok(if narrow {
             match u16::try_from(length) {
-                Ok(length) if length <= 8_000 => SqlType::Varchar(Some(value), length),
+                Ok(length) if length <= 4_000 => SqlType::Varchar(Some(value), length),
                 _ => SqlType::VarcharMax(Some(value)),
             }
         } else {
@@ -459,8 +461,10 @@ pub(crate) fn py_to_sql_type_with_hint(
         InputSqlType::Real => Ok(SqlType::Real(Some(py_obj.extract::<f32>().map_err(
             |error| numeric_hint_error("REAL", error),
         )?))),
-        InputSqlType::Float => Ok(SqlType::Float(Some(py_obj.extract::<f64>().map_err(
-            |error| numeric_hint_error("FLOAT", error),
+        InputSqlType::Float => Ok(SqlType::Float(Some(finite_float(
+            py_obj
+                .extract::<f64>()
+                .map_err(|error| numeric_hint_error("FLOAT", error))?,
         )?))),
         InputSqlType::Numeric | InputSqlType::Decimal => hinted_decimal(py_obj, hint),
         InputSqlType::Char
@@ -608,12 +612,42 @@ pub(crate) fn tvp_column_sql_type(hint: ParameterHint) -> TdsResult<SqlType> {
 /// them from the Python value.
 fn hinted_decimal(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<SqlType> {
     let precision = ParameterHint::effective_numeric_precision(hint.size) as u8;
-    let value = numeric_text(py_obj)?;
+    let value = round_to_scale(&numeric_text(py_obj)?, hint.scale)?;
     let parts = DecimalParts::from_string(&value, precision, hint.scale)?;
     Ok(if hint.sql_type == InputSqlType::Numeric {
         SqlType::Numeric(Some(parts))
     } else {
         SqlType::Decimal(Some(parts))
+    })
+}
+
+/// Rounds a plain decimal text to the declared scale, half away from zero, as
+/// SQL Server does when it converts a value to a narrower DECIMAL. Text in
+/// exponent form or already within the scale is returned unchanged.
+fn round_to_scale(text: &str, scale: u8) -> TdsResult<String> {
+    let fraction_digits = text.split_once('.').map_or(0, |(_, fraction)| fraction.len());
+    if text.contains(['e', 'E']) || fraction_digits <= usize::from(scale) {
+        return Ok(text.to_string());
+    }
+    let round_error = |error: PyErr| Error::UsageError(format!("Failed to round numeric value: {error}"));
+    Python::attach(|py| {
+        let decimal = decimal_type(py).map_err(round_error)?.call1((text,)).map_err(round_error)?;
+        let exponent = decimal_type(py)
+            .map_err(round_error)?
+            .call1((format!("1E-{scale}"),))
+            .map_err(round_error)?;
+        // A context wide enough for any value SQL Server accepts, so quantize
+        // never signals InvalidOperation for a large coefficient.
+        let context_args = PyDict::new(py);
+        context_args.set_item("prec", 100).map_err(round_error)?;
+        let context = PyModule::import(py, "decimal")
+            .and_then(|module| module.getattr("Context"))
+            .and_then(|class| class.call((), Some(&context_args)))
+            .map_err(round_error)?;
+        let rounded = decimal
+            .call_method1("quantize", (exponent, "ROUND_HALF_UP", context))
+            .map_err(round_error)?;
+        numeric_text(&rounded)
     })
 }
 
@@ -638,9 +672,10 @@ fn numeric_text(py_obj: &Bound<'_, PyAny>) -> TdsResult<String> {
         .map_err(|error| Error::UsageError(format!("Failed to convert numeric value: {error}")))
 }
 
-/// Preserves the requested string allocation while widening it when needed to
-/// avoid declaring a type shorter than the encoded value. A time is bound as its
-/// `isoformat()` text, the form the text C types carry upstream.
+/// Preserves the requested string declaration. The declared size is
+/// authoritative: a longer value is a data error rather than a silent prefix
+/// match, and a size of 0 declares MAX. A time is bound as its `isoformat()`
+/// text, the form the text C types carry upstream.
 fn hinted_string(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<SqlType> {
     let value = if py_obj.is_instance_of::<PyTime>() {
         time_isoformat(py_obj)?
@@ -658,30 +693,36 @@ fn hinted_string(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<Sq
         value.len() as u32
     }
     .max(1);
-    let size = hint.size.max(actual);
+    let declared = declared_length(hint.size);
+    check_declared_length(actual, declared)?;
+    let fixed = if hint.size == 0 { actual.max(1) } else { hint.size };
     let value = Some(SqlString::from_utf8_string(value));
     Ok(match hint.sql_type {
-        InputSqlType::Char => SqlType::Char(value, checked_length(size, 8_000, "CHAR")?),
-        InputSqlType::VarChar => sized_varchar(value, size),
+        InputSqlType::Char => SqlType::Char(value, checked_length(fixed, 8_000, "CHAR")?),
+        InputSqlType::VarChar => sized_varchar(value, declared),
         InputSqlType::LongVarChar => SqlType::VarcharMax(value),
-        InputSqlType::WChar => SqlType::NChar(value, checked_length(size, 4_000, "NCHAR")?),
-        InputSqlType::WVarChar => sized_nvarchar(value, size),
+        InputSqlType::WChar => SqlType::NChar(value, checked_length(fixed, 4_000, "NCHAR")?),
+        InputSqlType::WVarChar => sized_nvarchar(value, declared),
         InputSqlType::WLongVarChar => SqlType::NText(value),
         _ => unreachable!("hinted_string receives only string constants"),
     })
 }
 
-/// Preserves the requested binary allocation while widening it to fit the value.
+/// Preserves the requested binary declaration; see [`hinted_string`] for the
+/// size rules.
 fn hinted_binary(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<SqlType> {
     let value = py_obj.extract::<Vec<u8>>().map_err(|error| {
         Error::UsageError(format!("Failed to convert parameter to binary: {error}"))
     })?;
-    let size = hint.size.max(value.len() as u32).max(1);
+    let actual = u32::try_from(value.len()).unwrap_or(u32::MAX);
+    let declared = declared_length(hint.size);
+    check_declared_length(actual, declared)?;
+    let fixed = if hint.size == 0 { actual.max(1) } else { hint.size };
     Ok(match hint.sql_type {
         InputSqlType::Binary => {
-            SqlType::Binary(Some(value), checked_length(size, 8_000, "BINARY")?)
+            SqlType::Binary(Some(value), checked_length(fixed, 8_000, "BINARY")?)
         }
-        InputSqlType::VarBinary => sized_varbinary(Some(value), size),
+        InputSqlType::VarBinary => sized_varbinary(Some(value), declared),
         InputSqlType::LongVarBinary => SqlType::VarBinaryMax(Some(value)),
         _ => unreachable!("hinted_binary receives only binary constants"),
     })
@@ -759,6 +800,35 @@ fn hinted_money(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<Sql
     }
 }
 
+/// The declared length of a string or binary hint. A declared size of 0 means
+/// MAX, represented as `u32::MAX` so the `sized_*` helpers select the MAX type.
+fn declared_length(hint_size: u32) -> u32 {
+    if hint_size == 0 { u32::MAX } else { hint_size }
+}
+
+/// Rejects a value longer than its declared length. SQL Server would otherwise
+/// match only the prefix that fits, which silently loses data.
+fn check_declared_length(actual: u32, declared: u32) -> TdsResult<()> {
+    if declared != u32::MAX && actual > declared {
+        return Err(Error::TypeConversionError(format!(
+            "{DATA_ERROR_PREFIX}String or binary data would be truncated: a value of \
+             {actual} units exceeds the declared size of {declared}"
+        )));
+    }
+    Ok(())
+}
+
+/// Rejects NaN and infinity: SQL Server cannot take them as FLOAT RPC values and
+/// fails the call with a syntax error instead of a data error.
+fn finite_float(value: f64) -> TdsResult<f64> {
+    if value.is_finite() {
+        return Ok(value);
+    }
+    Err(Error::TypeConversionError(format!(
+        "{DATA_ERROR_PREFIX}Cannot bind non-finite float {value} as SQL FLOAT"
+    )))
+}
+
 /// Enforces fixed-width SQL Server limits before narrowing a size to `u16`.
 fn checked_length(size: u32, maximum: u32, type_name: &str) -> TdsResult<u16> {
     if size > maximum {
@@ -806,7 +876,9 @@ fn py_datetime_to_sql_type(
         let days = datetime_days(py_obj)?;
         return Ok(SqlType::DateTime2(Some(SqlDateTime2 {
             days,
-            time: py_time(py_obj, hinted_scale.unwrap_or(6))?,
+            // Scale 7 matches what the upstream driver declares for a datetime, so
+            // the server formats the value with the same 100 ns digits.
+            time: py_time(py_obj, hinted_scale.unwrap_or(7))?,
         })));
     }
 

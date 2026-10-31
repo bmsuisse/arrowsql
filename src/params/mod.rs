@@ -17,7 +17,8 @@ use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::message::parameters::rpc_parameters::{RpcParameter, StatusFlags};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyInt, PyList, PySequence, PyTuple};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyInt, PyList, PyModule, PySequence, PyTuple, PyType};
 
 use py_types::{ParameterHint, py_to_sql_type, py_to_sql_type_with_hint};
 
@@ -123,16 +124,64 @@ pub fn build_rpc_params(
     Ok(ParamSet { types, untyped_nulls })
 }
 
+/// Prefix of a conversion message for a value SQL Server would reject with a
+/// data exception (SQLSTATE 22xxx). Raised as PEP 249 `DataError`.
+pub(crate) const DATA_ERROR_PREFIX: &str = "data exception: ";
+
+/// Prefix of a conversion message that is both a `DataError` and, for backward
+/// compatibility with earlier releases, a `ValueError`.
+pub(crate) const DATA_VALUE_ERROR_PREFIX: &str = "data value exception: ";
+
 /// Maps a conversion failure to the Python exception upstream raises for it.
 ///
 /// `TypeConversionError` marks a value the target type cannot represent
-/// (overflow, out of range, precision, non-finite) and raises `ValueError`.
-/// `UsageError` marks a value of a type the driver cannot bind and raises
-/// `TypeError`. The message is passed through unprefixed so it matches upstream.
+/// (overflow, out of range, precision, non-finite) and raises `ValueError`,
+/// unless its message carries a data-exception prefix. `UsageError` marks a
+/// value of a type the driver cannot bind and raises `TypeError`. Messages are
+/// passed through unprefixed so they match upstream.
 pub fn conversion_error(err: &mssql_tds::error::Error) -> PyErr {
     match err {
-        mssql_tds::error::Error::TypeConversionError(msg) => PyValueError::new_err(msg.clone()),
+        mssql_tds::error::Error::TypeConversionError(msg) => {
+            if let Some(text) = msg.strip_prefix(DATA_VALUE_ERROR_PREFIX) {
+                data_error(text, true)
+            } else if let Some(text) = msg.strip_prefix(DATA_ERROR_PREFIX) {
+                data_error(text, false)
+            } else {
+                PyValueError::new_err(msg.clone())
+            }
+        }
         mssql_tds::error::Error::UsageError(msg) => PyTypeError::new_err(msg.clone()),
         other => PyTypeError::new_err(other.to_string()),
     }
+}
+
+static DATA_VALUE_ERROR_CLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+/// Builds a `DataError` (or a `DataError` that is also a `ValueError`). Falls back
+/// to a plain `ValueError` when the exception module cannot be loaded.
+fn data_error(message: &str, also_value_error: bool) -> PyErr {
+    Python::attach(|py| {
+        let class = if also_value_error {
+            data_value_error_class(py)
+        } else {
+            PyModule::import(py, "mssql_python.exceptions")
+                .and_then(|module| module.getattr("DataError"))
+        };
+        // `Error` takes (driver_error, ddbc_error) like the errors raised for server diagnostics.
+        match class.and_then(|class| class.call1(("Data exception", message))) {
+            Ok(instance) => PyErr::from_value(instance),
+            Err(_) => PyValueError::new_err(message.to_string()),
+        }
+    })
+}
+
+/// The class `DataError` + `ValueError`, created once per interpreter.
+fn data_value_error_class(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    let class = DATA_VALUE_ERROR_CLASS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        let data_error = PyModule::import(py, "mssql_python.exceptions")?.getattr("DataError")?;
+        let bases = PyTuple::new(py, [data_error, py.get_type::<PyValueError>().into_any()])?;
+        let class = py.get_type::<PyType>().call1(("DataValueError", bases, PyDict::new(py)))?;
+        Ok(class.unbind())
+    })?;
+    Ok(class.bind(py).clone())
 }
