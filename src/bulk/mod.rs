@@ -126,16 +126,40 @@ fn recover(client: &mut SyncClient) {
     let _ = client.take_info_messages();
 }
 
+/// Run a session-level batch whose result the load does not depend on.
+fn run_session_sql(client: &mut SyncClient, sql: &str) {
+    let sql = sql.to_string();
+    let _ = client.block_on(|c| async move {
+        c.execute(sql, ()).await?;
+        c.close_query().await
+    });
+    let _ = client.take_info_messages();
+}
+
 /// Run `load` while holding the connection's wire. The GIL must not be held.
 fn with_wire(
     stmt: &Arc<StmtShared>,
+    internal_transaction: bool,
     load: impl FnOnce(&mut SyncClient) -> Result<Outcome, BulkFailure>,
 ) -> Result<Outcome, BulkFailure> {
     let mut outcome = None;
     let code = with_exclusive_wire(stmt, |ex| {
+        // Manual-commit mode runs with IMPLICIT_TRANSACTIONS ON, so the bulk
+        // load's own metadata query would open a transaction and make
+        // use_internal_transaction fail. Upstream loads over a separate
+        // connection and never sees this. With no user transaction open,
+        // suspend implicit transactions for the load; with one open, keep it
+        // and let mssql-tds report the conflict, as SqlBulkCopy does.
+        let suspend = internal_transaction && ex.conn.implicit_transactions();
+        if suspend {
+            run_session_sql(ex.client, "IF @@TRANCOUNT = 0 SET IMPLICIT_TRANSACTIONS OFF");
+        }
         let result = load(ex.client);
         if matches!(result, Err(BulkFailure::Tds(_))) {
             recover(ex.client);
+        }
+        if suspend {
+            run_session_sql(ex.client, "SET IMPLICIT_TRANSACTIONS ON");
         }
         let ok = result.is_ok();
         outcome = Some(result);
@@ -164,7 +188,7 @@ where
     I: Iterator<Item = R>,
     R: BulkLoadRow,
 {
-    with_wire(stmt, |client| {
+    with_wire(stmt, settings.use_internal_transaction, |client| {
         client.block_on(|client| async move {
             let mut bulk = BulkCopy::new(client, settings.table_name.clone())
                 .batch_size(settings.batch_size)
