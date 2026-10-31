@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use arrow_array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use arrow_array::ffi_stream::FFI_ArrowArrayStream;
@@ -176,6 +177,12 @@ impl StreamCore {
     fn shutdown(&self) {
         drop(self.rx.lock().unwrap().take()); // a blocked producer's send fails
         if let Some(handle) = self.producer.lock().unwrap().take() {
+            // A producer blocked inside a read (e.g. on a row lock) never sees
+            // the closed channel: interrupt its read until it is gone.
+            while !handle.is_finished() {
+                self.stmt.cancel_execution();
+                std::thread::sleep(Duration::from_millis(5));
+            }
             let _ = handle.join();
         }
         if !self.exhausted.load(Ordering::Acquire) {
@@ -186,7 +193,7 @@ impl StreamCore {
 
 impl Drop for StreamCore {
     fn drop(&mut self) {
-        self.shutdown();
+        Python::attach(|py| py.detach(|| self.shutdown()));
     }
 }
 
@@ -255,7 +262,7 @@ impl Drop for ExportReader {
     fn drop(&mut self) {
         self.core.exporting.store(false, Ordering::Release);
         if self.pulled {
-            self.core.shutdown();
+            Python::attach(|py| py.detach(|| self.core.shutdown()));
         }
     }
 }
