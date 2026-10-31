@@ -463,3 +463,31 @@ def test_dropped_pooled_connection_gives_its_slot_back(conn_str):
             del dropped
     finally:
         ddbc.disable_pooling()
+
+
+# ---------------------------------------------------------------------------
+# r2 review: XACT_ABORT guard covers executemany; decimals with no integer digits
+# ---------------------------------------------------------------------------
+
+
+def test_executemany_after_xact_abort_is_rejected_like_execute(conn, cursor, table_name):
+    # Upstream (msodbcsql) lets every statement after the server-side rollback run
+    # outside the transaction; the port rejects the first write of execute() and
+    # must treat executemany the same way. rollback() clears the state.
+    from mssql_python import DatabaseError
+
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (id INT PRIMARY KEY)")
+    conn.commit()
+    cursor.execute("SET XACT_ABORT ON")
+    cursor.execute(f"INSERT INTO dbo.{table_name} VALUES (1)")
+    with pytest.raises(DatabaseError):
+        cursor.execute(f"INSERT INTO dbo.{table_name} VALUES (1)")
+    with pytest.raises(DatabaseError):
+        cursor.executemany(f"INSERT INTO dbo.{table_name} VALUES (?)", [(5,), (6,)])
+    conn.commit()
+    cursor.execute(f"SELECT COUNT(*) FROM dbo.{table_name}")
+    assert cursor.fetchone()[0] == 0
+    cursor.executemany(f"INSERT INTO dbo.{table_name} VALUES (?)", [(5,), (6,)])
+    conn.commit()
+    cursor.execute(f"SELECT COUNT(*) FROM dbo.{table_name}")
+    assert cursor.fetchone()[0] == 2
