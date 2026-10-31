@@ -708,6 +708,21 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         numeric_data.val = bytes(byte_array)
         return numeric_data
 
+    @property
+    def arraysize(self) -> int:
+        """Number of rows fetchmany() returns when called without a size."""
+        return self._arraysize
+
+    @arraysize.setter
+    def arraysize(self, value: int) -> None:
+        # RUST-PORT: DB-API requires an int. A rejected value leaves the previous
+        # setting in place, so a later fetchmany() cannot fail on it.
+        if not isinstance(value, int):
+            raise TypeError(f"arraysize must be an int, not {type(value).__name__}")
+        if value < 0:
+            raise ValueError("arraysize must not be negative")
+        self._arraysize = value
+
     def _get_encoding_settings(self):
         """
         Get the encoding settings from the connection.

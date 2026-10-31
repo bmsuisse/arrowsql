@@ -97,7 +97,12 @@ every `execute()`. The port now caches that work per result layout.
 | `cursor.py` `_SQL_HANDLE_STMT`, `_SQL_SUCCESS_WITH_INFO`, `_SQL_NO_DATA` (module level) | Plain ints for the status checks in `execute`, `fetchone`, `fetchall` and the reset and diagnostics helpers, instead of `ddbc_sql_const.X.value` (an enum descriptor call per access). |
 | `cursor.py` `execute` | `_get_encoding_settings()` runs only for a parameterized `DDBCSQLExecute`, not for `DDBCSQLExecDirect`, which takes no encoding argument. |
 
-The per-execute `DDBCSQLDescribeCol` call stays. A cache keyed on a native
+`cursor.arraysize` is a validated property (`RUST-PORT`): a non-int raises
+`TypeError`, a negative value `ValueError`, and a rejected value keeps the
+previous setting (ported ctds tests).
+
+The per-execute `DDBCSQLDescribeCol` call stays (`decode/describe.rs`
+`append_columns` builds the dicts with interned keys). A cache keyed on a native
 layout signature would skip it, but the upstream test
 `test_execute_describe_col_exception_resets_description_and_sql_types` requires
 that call on every execute.
