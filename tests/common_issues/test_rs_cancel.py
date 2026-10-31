@@ -264,3 +264,16 @@ def test_ctrl_c_works_in_a_child_forked_from_a_worker_thread(conn_str):
     thread.join(60)
     assert not thread.is_alive()
     assert os.waitstatus_to_exitcode(outcome["status"]) == 0
+
+
+def test_rollback_after_closing_a_stream_early(conn):
+    """Closing an Arrow stream cancels the execution it reads; a commit or
+    rollback afterwards must not inherit that cancellation (it did, about one
+    time in a hundred, as "Operation canceled")."""
+    pytest.importorskip("pyarrow")
+    for _ in range(300):
+        cur = conn.cursor()
+        cur.execute("SELECT 7 AS a UNION ALL SELECT 8")
+        cur.arrow_stream().close()
+        conn.rollback()
+        conn.commit()

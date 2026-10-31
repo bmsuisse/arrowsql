@@ -97,3 +97,11 @@ Local patches (search for `VENDOR PATCH`):
 
 To drop the vendored copy, delete this directory and the `[patch]` section
 in ../../Cargo.toml once the fix is in the pinned upstream rev.
+
+11. Stale cancel handle on transaction requests (marked `RUST-PORT`):
+    `begin_transaction`, `save_transaction`, `commit_transaction` and
+    `rollback_transaction` take no cancel handle, but read their response
+    through `next_response_token`, which used the handle the previous request
+    left in `self.cancel_handle`. After a cancelled execution (e.g. an Arrow
+    stream closed early) a commit or rollback then failed as cancelled. They now
+    clear it first.
