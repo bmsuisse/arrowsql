@@ -118,8 +118,15 @@ with msodbcsql + MARS.
 1. Python values -> `ParamSet` (GIL held): `params::build_rpc_params`.
 2. GIL released: lock slot, free the wire, reset statement state.
 3. `prepare_session`: deferred session SQL (isolation, catalog) and, in
-   manual-commit mode, `SET IMPLICIT_TRANSACTIONS ON` once — the server then
-   opens a transaction with the next statement, with no BEGIN round trip.
+   manual-commit mode with no open transaction, a TDS transaction-manager
+   BEGIN (one round trip, like msodbcsql). `@@TRANCOUNT` is therefore 1
+   inside the first statement, and commit()/rollback() do not begin the next
+   transaction: system-versioned tables stamp rows with its start time.
+   `SET IMPLICIT_TRANSACTIONS` is not used (a bare SELECT would not open one).
+   If a statement fails and the transaction is gone, the next statement
+   probes `@@OPTIONS & 16384`; with XACT_ABORT on, the next write is rejected
+   (25000) until commit()/rollback(), like go-mssqldb. Other failures (a
+   conversion error also rolls back) start a new transaction silently.
 4. Untyped `None` params are typed via `sp_describe_undeclared_parameters`
    (cached per SQL text per connection).
 5. `client.execute` (no params) or `execute_sp_executesql` (params).

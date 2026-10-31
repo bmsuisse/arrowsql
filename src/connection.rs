@@ -308,6 +308,22 @@ impl Connection {
         })
     }
 
+    /// Commit or roll back. The next transaction begins with the next
+    /// statement, not here: system-versioned tables stamp rows with the
+    /// transaction's start time (upstream starts it at commit and gets that wrong).
+    fn end_transaction(&self, py: Python<'_>, commit: bool) -> PyResult<()> {
+        self.shared.take_failed();
+        self.shared.take_txn_aborted();
+        self.client_op(py, move |client| {
+            if !client.has_active_transaction() {
+                return Ok(());
+            }
+            client.block_on(|c| async move {
+                if commit { c.commit_transaction(None, None).await } else { c.rollback_transaction(None, None).await }
+            })
+        })
+    }
+
     fn run_session_sql(&self, py: Python<'_>, sql: String) -> PyResult<()> {
         self.client_op(py, move |client| {
             client.block_on(|c| async move {
@@ -491,33 +507,17 @@ impl Connection {
     }
 
     fn commit(&self, py: Python<'_>) -> PyResult<()> {
-        self.shared.take_failed();
-        self.shared.take_txn_aborted();
-        self.client_op(py, |client| {
-            if client.has_active_transaction() {
-                client.block_on(|c| c.commit_transaction(None, None))
-            } else {
-                Ok(())
-            }
-        })
+        self.end_transaction(py, true)
     }
 
     fn rollback(&self, py: Python<'_>) -> PyResult<()> {
-        self.shared.take_failed();
-        self.shared.take_txn_aborted();
-        self.client_op(py, |client| {
-            if client.has_active_transaction() {
-                client.block_on(|c| c.rollback_transaction(None, None))
-            } else {
-                Ok(())
-            }
-        })
+        self.end_transaction(py, false)
     }
 
     fn set_autocommit(&self, py: Python<'_>, enable: bool) -> PyResult<()> {
         if enable && !self.shared.autocommit() {
             // ODBC: switching to autocommit commits the open transaction.
-            self.commit(py)?;
+            self.end_transaction(py, true)?;
         }
         self.shared.autocommit.store(enable, Ordering::Release);
         Ok(())
