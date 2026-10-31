@@ -62,7 +62,8 @@ def _hub():
     loop = asyncio.get_running_loop()
     hub = _hubs.get(loop)
     if hub is None:
-        hub = _core.AioHub(loop, _Shape)
+        # The hub holds the loop weakly: the loop owns the hub through add_reader.
+        hub = _core.AioHub(weakref.ref(loop), _Shape)
         loop.add_reader(hub.fileno(), hub.drain)
         _hubs[loop] = hub
     return hub
@@ -182,7 +183,7 @@ class AsyncCursor:
 
     async def fetchall(self) -> list:
         out = self._local(2**62)
-        if not self._done:
+        while not self._done:  # a result that fails after some rows ends with the error
             out.extend(await self._more(2**62))
         return out
 
@@ -216,6 +217,15 @@ class AsyncCursor:
             self._closed = True
             self._batch = None
             self._c.close_cursor(self._id)
+
+    def __del__(self):
+        # Rust keeps a cursor's results until it is closed: retire it with the object.
+        try:
+            if not self._closed:
+                self._closed = True
+                self._c.close_cursor(self._id)
+        except Exception:
+            pass
 
     def __aiter__(self):
         return self

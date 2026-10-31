@@ -324,3 +324,176 @@ async def test_concurrency_is_real(pool):
     start = time.perf_counter()
     await asyncio.gather(*(pool.fetchval("WAITFOR DELAY '00:00:01'; SELECT 1") for _ in range(8)))
     assert time.perf_counter() - start < 2.5
+
+
+# --- review round 2 (r2_aio) -------------------------------------------------
+
+_NUMBERS = (
+    "(SELECT TOP ({n}) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n "
+    "FROM sys.all_objects a CROSS JOIN sys.all_objects b CROSS JOIN sys.all_objects c) t"
+)
+
+
+@pytest.mark.asyncio
+async def test_pool_session_gets_pool_autocommit_back(conn_str):
+    """A borrower that switched autocommit off must not leak that to the next user."""
+    p = await aio.create_pool(conn_str, min_size=1, max_size=1, autocommit=True)
+    try:
+        await p.execute("IF OBJECT_ID('dbo.r2_aio_a1') IS NOT NULL DROP TABLE dbo.r2_aio_a1")
+        await p.execute("CREATE TABLE dbo.r2_aio_a1 (i int)")
+        async with p.acquire() as c:
+            await c.set_autocommit(False)
+            await c.fetchval("SELECT 1")
+        async with p.acquire() as c:
+            assert c.autocommit is True
+        async with p.acquire() as c:
+            await c.set_autocommit(False)
+            await c.fetchval("SELECT 1")
+        await p.execute("INSERT INTO dbo.r2_aio_a1 VALUES (1)")
+        assert await p.fetchval("SELECT COUNT(*) FROM dbo.r2_aio_a1") == 1
+    finally:
+        await p.execute("DROP TABLE IF EXISTS dbo.r2_aio_a1")
+        await p.close()
+
+
+@pytest.mark.asyncio
+async def test_partial_rows_then_error_raises(conn, pool):
+    # error after the rows were prefetched by execute
+    sql = f"SELECT 1/(n-5) AS x FROM {_NUMBERS.format(n=20)}"
+    cur = conn.cursor()
+    try:
+        await cur.execute(sql)
+    except mssql_python.Error:
+        pass  # the server may fail before the first row; also fine
+    else:
+        with pytest.raises(mssql_python.Error):
+            await cur.fetchall()
+    with pytest.raises(mssql_python.Error):
+        await conn.fetch(sql)
+    with pytest.raises(mssql_python.Error):
+        await pool.fetch(sql)
+
+
+@pytest.mark.asyncio
+async def test_error_after_prefetch_raises_from_fetch(conn):
+    sql = f"SELECT 1 / (CAST(n AS int) - 5000) AS x FROM {_NUMBERS.format(n=20000)}"
+    cur = conn.cursor()
+    await cur.execute(sql)
+    with pytest.raises(mssql_python.Error):
+        await cur.fetchall()
+    cur = conn.cursor()
+    await cur.execute(sql)
+    with pytest.raises(mssql_python.Error):
+        while await cur.fetchone() is not None:
+            pass
+    cur = conn.cursor()
+    await cur.execute(sql)
+    with pytest.raises(mssql_python.Error):
+        while await cur.fetchmany(1000):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_close_discards_unread_results_fast(conn_str):
+    c = await aio.connect(conn_str, autocommit=True)
+    cur = c.cursor()
+    await cur.execute(f"SELECT n, REPLICATE('x', 100) AS s FROM {_NUMBERS.format(n=20000000)}")
+    start = time.perf_counter()
+    await c.close()
+    assert time.perf_counter() - start < 5
+
+
+@pytest.mark.asyncio
+async def test_pool_checkin_discards_unread_results_fast(conn_str):
+    p = await aio.create_pool(conn_str, min_size=1, max_size=1)
+    try:
+        start = time.perf_counter()
+        assert await p.fetchrow(f"SELECT n FROM {_NUMBERS.format(n=20000000)}") is not None
+        assert time.perf_counter() - start < 5
+        assert await p.fetchval("SELECT 7") == 7
+    finally:
+        await p.close()
+
+
+@pytest.mark.asyncio
+async def test_second_cursor_handover_is_cancellable(conn):
+    first = conn.cursor()
+    await first.execute(f"SELECT n, REPLICATE('x', 100) AS s FROM {_NUMBERS.format(n=20000000)}")
+    second = conn.cursor()
+    task = asyncio.ensure_future(second.execute("SELECT 1"))
+    await asyncio.sleep(0.2)
+    start = time.perf_counter()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await asyncio.wait_for(conn.fetchval("SELECT 5"), 10) == 5
+    assert time.perf_counter() - start < 10
+
+
+@pytest.mark.asyncio
+async def test_pool_cancel_running_query(conn_str):
+    p = await aio.create_pool(conn_str, min_size=1, max_size=1)
+    try:
+        start = time.perf_counter()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(p.fetch("WAITFOR DELAY '00:00:20'; SELECT 1"), 0.3)
+        assert await asyncio.wait_for(p.fetchval("SELECT 3"), 10) == 3
+        assert time.perf_counter() - start < 10
+        assert p.in_use == 0
+    finally:
+        await p.close()
+
+
+@pytest.mark.asyncio
+async def test_pool_cancel_queued_acquire(conn_str):
+    p = await aio.create_pool(conn_str, min_size=1, max_size=1)
+    try:
+        held = await p.acquire()
+        waiter = asyncio.ensure_future(p.acquire())
+        await asyncio.sleep(0.2)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        await held.close()
+        c = await asyncio.wait_for(p.acquire(), 5)
+        await c.close()
+        await asyncio.sleep(0.2)
+        assert p.in_use == 0
+    finally:
+        await p.close()
+
+
+async def _open_cursors(conn):
+    for _ in range(50):
+        n = conn._c.open_cursors
+        if n == 0:
+            break
+        await asyncio.sleep(0.1)
+    return conn._c.open_cursors
+
+
+@pytest.mark.asyncio
+async def test_connection_execute_cursors_are_retired(conn):
+    import gc
+
+    for i in range(30):
+        await conn.execute("SELECT ?", i)
+    gc.collect()
+    assert await _open_cursors(conn) == 0
+
+
+def test_closed_event_loop_is_collected():
+    import gc
+    import weakref
+
+    loop = asyncio.new_event_loop()
+
+    async def touch():
+        aio._hub()
+
+    loop.run_until_complete(touch())
+    ref = weakref.ref(loop)
+    loop.close()
+    del loop
+    gc.collect()
+    assert ref() is None

@@ -251,3 +251,10 @@ and now uses about 1.3 us (measured with the native calls stubbed).
   slot rename above).
 - `cursor.py` `executemany`: a first row that is a `str` or `bytes` raises
   `TypeError`. A set of strings used to insert each string as a row.
+
+## aio review fixes (r2_aio)
+
+- `aio.py` (port-only module): `AsyncCursor.__del__` retires the native cursor;
+  the per-loop hub is given a `weakref.ref` of its loop so closed loops are
+  collected; `fetchall()` keeps fetching until the result is done, so an error
+  after some rows is raised instead of returning a truncated list.

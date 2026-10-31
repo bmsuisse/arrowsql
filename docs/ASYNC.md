@@ -84,6 +84,16 @@ hub.drain() <-- socket readable  <---------   hub queue; write 1 byte only if
 - Several cursors on one connection work like the sync driver: when a cursor
   needs the wire while another still has rows on it, those rows are drained
   into that cursor's buffer first.
+  That handover is cancellable (cancelling the awaiting task abandons the
+  rest of the previous cursor's results). `close()`, pool check-in and the
+  `fetch*` shortcuts do not buffer unread results: they end the response with
+  a TDS attention.
+- A result that fails after producing rows hands the rows out first; the error
+  is raised by the next fetch (`done` stays false until then). `nextset()`
+  raises a pending error too.
+- A pooled session gets the pool's `autocommit` and `timeout` back when it is
+  checked out. Pool operations (`fetch`, `execute`, a queued `acquire`) are
+  cancellable like connection operations.
 
 Source: `src/aio/` (`hub.rs` completion hub and conversion, `session.rs`
 async session state machine, `connection.rs` / `pool.rs` pyclasses),

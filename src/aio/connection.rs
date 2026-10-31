@@ -28,9 +28,13 @@ use super::session::{Command, Diag, OpCancel, Session};
 /// Rows `execute` reads ahead by default.
 pub const DEFAULT_PREFETCH: usize = 512;
 
+/// In-flight requests of one connection or pool, by request id.
+pub type CancelMap = Mutex<HashMap<u64, Arc<OpCancel>>>;
+
 pub struct ConnCore {
     session: tokio::sync::Mutex<Option<Session>>,
-    cancels: Mutex<HashMap<u64, Arc<OpCancel>>>,
+    cancels: Arc<CancelMap>,
+    open_cursors: AtomicU64,
     next_cursor: AtomicU64,
     autocommit: AtomicBool,
     timeout: AtomicU32,
@@ -45,7 +49,8 @@ impl ConnCore {
         let timeout = session.timeout;
         Arc::new(Self {
             session: tokio::sync::Mutex::new(Some(session)),
-            cancels: Mutex::new(HashMap::new()),
+            cancels: Arc::new(Mutex::new(HashMap::new())),
+            open_cursors: AtomicU64::new(0),
             next_cursor: AtomicU64::new(1),
             autocommit: AtomicBool::new(autocommit),
             timeout: AtomicU32::new(timeout),
@@ -86,7 +91,7 @@ pub fn spawn_op<'py, Fut>(
     py: Python<'py>,
     hub: &Bound<'py, Hub>,
     as_tuple: bool,
-    cancels: Option<&Arc<ConnCore>>,
+    cancels: Option<&Arc<CancelMap>>,
     task: impl FnOnce(Arc<OpCancel>) -> Fut,
 ) -> PyResult<(Bound<'py, PyAny>, u64)>
 where
@@ -95,16 +100,16 @@ where
     let hub = hub.get();
     let (id, future) = hub.register(py, as_tuple)?;
     let cancel = Arc::new(OpCancel::new());
-    if let Some(core) = cancels {
-        core.cancels.lock().insert(id, cancel.clone());
+    if let Some(map) = cancels {
+        map.lock().insert(id, cancel.clone());
     }
     let inner = hub.inner.clone();
     let tracker = cancels.cloned();
     let fut = task(cancel);
     crate::runtime::runtime().spawn(async move {
         let outcome = fut.await;
-        if let Some(core) = tracker {
-            core.cancels.lock().remove(&id);
+        if let Some(map) = tracker {
+            map.lock().remove(&id);
         }
         inner.complete(id, outcome);
     });
@@ -169,6 +174,7 @@ type Op<'py> = PyResult<(Bound<'py, PyAny>, u64)>;
 impl AioConnection {
     /// A new cursor id on this connection.
     fn cursor(&self) -> u64 {
+        self.core.open_cursors.fetch_add(1, Ordering::Relaxed);
         self.core.next_cursor.fetch_add(1, Ordering::Relaxed)
     }
 
@@ -184,7 +190,7 @@ impl AioConnection {
     ) -> Op<'py> {
         let command = build_command(py, sql, params)?;
         let core = self.core.clone();
-        spawn_op(py, hub, core.as_tuple, Some(&self.core), move |cancel| async move {
+        spawn_op(py, hub, core.as_tuple, Some(&self.core.cancels), move |cancel| async move {
             let result = core
                 .with_session(async |s| {
                     s.execute(cursor, command, prefetch, super::session::PREFETCH_BYTES, &cancel).await
@@ -222,7 +228,7 @@ impl AioConnection {
         let all_null = crate::params::batch::normalize(&mut rows, &nulls)
             .map_err(|e| crate::params::conversion_error(&e))?;
         let core = self.core.clone();
-        spawn_op(py, hub, false, Some(&self.core), move |cancel| async move {
+        spawn_op(py, hub, false, Some(&self.core.cancels), move |cancel| async move {
             let result = core
                 .with_session(async |s| s.execute_many(cursor, sql, rows, all_null, &cancel).await)
                 .await;
@@ -232,7 +238,7 @@ impl AioConnection {
 
     fn fetch<'py>(&self, py: Python<'py>, hub: &Bound<'py, Hub>, cursor: u64, n: usize) -> Op<'py> {
         let core = self.core.clone();
-        spawn_op(py, hub, core.as_tuple, Some(&self.core), move |cancel| async move {
+        spawn_op(py, hub, core.as_tuple, Some(&self.core.cancels), move |cancel| async move {
             let result = core.with_session(async |s| s.fetch(cursor, n, &cancel).await).await;
             outcome(result, Outcome::Rows)
         })
@@ -241,7 +247,7 @@ impl AioConnection {
     #[pyo3(signature = (hub, cursor, prefetch=DEFAULT_PREFETCH))]
     fn nextset<'py>(&self, py: Python<'py>, hub: &Bound<'py, Hub>, cursor: u64, prefetch: usize) -> Op<'py> {
         let core = self.core.clone();
-        spawn_op(py, hub, core.as_tuple, Some(&self.core), move |cancel| async move {
+        spawn_op(py, hub, core.as_tuple, Some(&self.core.cancels), move |cancel| async move {
             let result = core.with_session(async |s| s.nextset(cursor, prefetch, &cancel).await).await;
             outcome(result, |next| next.map_or(Outcome::NoMoreResults, Outcome::Exec))
         })
@@ -261,7 +267,7 @@ impl AioConnection {
             None => None,
         };
         let core = self.core.clone();
-        spawn_op(py, hub, false, Some(&self.core), move |cancel| async move {
+        spawn_op(py, hub, false, Some(&self.core.cancels), move |cancel| async move {
             let result = core
                 .with_session(async |s| s.fetch_arrow(cursor, head, batch_rows, &cancel).await)
                 .await;
@@ -284,7 +290,7 @@ impl AioConnection {
         let mode = query_mode(mode);
         let max_rows = if matches!(mode, QueryMode::All) { usize::MAX } else { 1 };
         let core = self.core.clone();
-        spawn_op(py, hub, core.as_tuple, Some(&self.core), move |cancel| async move {
+        spawn_op(py, hub, core.as_tuple, Some(&self.core.cancels), move |cancel| async move {
             let result = core.with_session(async |s| s.query(command, max_rows, &cancel).await).await;
             outcome(result, |(out, ncols)| Outcome::Query { out, ncols, mode })
         })
@@ -292,14 +298,14 @@ impl AioConnection {
 
     fn commit<'py>(&self, py: Python<'py>, hub: &Bound<'py, Hub>) -> Op<'py> {
         let core = self.core.clone();
-        spawn_op(py, hub, false, Some(&self.core), move |_| async move {
+        spawn_op(py, hub, false, Some(&self.core.cancels), move |_| async move {
             outcome(core.with_session(async |s| s.commit().await).await, |_| Outcome::None)
         })
     }
 
     fn rollback<'py>(&self, py: Python<'py>, hub: &Bound<'py, Hub>) -> Op<'py> {
         let core = self.core.clone();
-        spawn_op(py, hub, false, Some(&self.core), move |_| async move {
+        spawn_op(py, hub, false, Some(&self.core.cancels), move |_| async move {
             outcome(core.with_session(async |s| s.rollback().await).await, |_| Outcome::None)
         })
     }
@@ -307,7 +313,7 @@ impl AioConnection {
     /// Switching to autocommit commits the open transaction (ODBC semantics).
     fn set_autocommit<'py>(&self, py: Python<'py>, hub: &Bound<'py, Hub>, enable: bool) -> Op<'py> {
         let core = self.core.clone();
-        spawn_op(py, hub, false, Some(&self.core), move |_| async move {
+        spawn_op(py, hub, false, Some(&self.core.cancels), move |_| async move {
             let result = core
                 .with_session(async |s| {
                     if enable && !s.autocommit {
@@ -333,6 +339,7 @@ impl AioConnection {
 
     /// Forget a cursor's results (fire and forget).
     fn close_cursor(&self, cursor: u64) {
+        self.core.open_cursors.fetch_sub(1, Ordering::Relaxed);
         let core = self.core.clone();
         crate::runtime::runtime().spawn(async move {
             if let Some(session) = core.session.lock().await.as_mut() {
@@ -347,6 +354,12 @@ impl AioConnection {
         if let Some(cancel) = self.core.cancels.lock().get(&id) {
             cancel.cancel();
         }
+    }
+
+    /// Cursors created and not yet closed.
+    #[getter]
+    fn open_cursors(&self) -> u64 {
+        self.core.open_cursors.load(Ordering::Relaxed)
     }
 
     #[getter]
