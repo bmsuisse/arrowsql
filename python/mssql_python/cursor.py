@@ -32,7 +32,8 @@ from mssql_python.exceptions import (
     raise_exception,
 )
 from mssql_python.row import Row
-from mssql_python.perf_timer import perf_phase
+from mssql_python import perf_timer as _perf_timer
+from mssql_python.perf_timer import perf_phase, perf_start, perf_stop
 from mssql_python import get_settings
 from mssql_python.parameter_helper import (
     detect_and_convert_parameters,
@@ -383,6 +384,7 @@ _SQL_TYPE_TO_PYTHON_TYPE = {
 # RUST-PORT: plain ints for the status checks on every execute and fetch.
 # `ddbc_sql_const.X.value` goes through enum's Python-level descriptor on each access.
 _SQL_HANDLE_STMT = ddbc_sql_const.SQL_HANDLE_STMT.value
+_SQL_SUCCESS = ddbc_sql_const.SQL_SUCCESS.value
 _SQL_SUCCESS_WITH_INFO = ddbc_sql_const.SQL_SUCCESS_WITH_INFO.value
 _SQL_NO_DATA = ddbc_sql_const.SQL_NO_DATA.value
 # RUST-PORT: Connection's initial encoding settings (see Connection.__init__).
@@ -426,6 +428,8 @@ class _ResultLayout:  # pylint: disable=too-few-public-methods
         "column_map_lower",
         "converter_generation",
         "converter_map",
+        "uuid_native",
+        "uuid_indices",
     )
 
     def __init__(self, lowercase, metadata, description, sql_types, column_map, column_map_lower):
@@ -437,6 +441,10 @@ class _ResultLayout:  # pylint: disable=too-few-public-methods
         self.column_map_lower = column_map_lower
         self.converter_generation = None
         self.converter_map = None
+        # RUST-PORT: UUID stringification indices for the native_uuid value in
+        # uuid_native (None = not computed yet).
+        self.uuid_native = None
+        self.uuid_indices = None
 
 
 class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-methods
@@ -1844,23 +1852,37 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             use_prepare: Whether to use SQLPrepareW (default) or SQLExecDirectW.
             reset_cursor: Whether to reset the cursor before execution.
         """
-        logger.debug(
-            "execute: Starting - operation_length=%d, param_count=%d, use_prepare=%s",
-            len(operation),
-            len(parameters),
-            str(use_prepare),
-        )
+        # RUST-PORT: formatting the debug messages is not free; skip it unless
+        # DEBUG is on (_cached_level is the logger's own fast-path level).
+        try:
+            debug_on = logger._cached_level <= logging.DEBUG
+        except TypeError:  # a replaced logger (tests) has no numeric level
+            debug_on = True
+        if debug_on:
+            logger.debug(
+                "execute: Starting - operation_length=%d, param_count=%d, use_prepare=%s",
+                len(operation),
+                len(parameters),
+                str(use_prepare),
+            )
 
-        # Log the actual query being executed
-        logger.debug("Executing query: %s", operation)
+            # Log the actual query being executed
+            logger.debug("Executing query: %s", operation)
 
-        self._check_closed()  # Check if the cursor is closed
+        if self.closed:
+            self._check_closed()  # Check if the cursor is closed
         # RUST-PORT: a failing execute must not leave the previous statement's
         # description visible (PEP 249); success repopulates it below.
         self.description = None
         if reset_cursor:
             if self.hstmt:
-                self._soft_reset_cursor()
+                # RUST-PORT: _soft_reset_cursor inlined (hot path).
+                if ddbc_bindings.DDBCSQLResetStmt(self.hstmt) != _SQL_SUCCESS:
+                    self._soft_reset_cursor()
+                else:
+                    self._rownumber = -1
+                    self._has_result_set = False
+                    self._skip_increment_for_next_fetch = False
             else:
                 self._reset_cursor()
         else:
@@ -1903,37 +1925,35 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         # it will be unwrapped for parameter binding. This means you cannot
         # pass a tuple as a single parameter value (but SQL Server doesn't
         # support tuple types as parameter values anyway).
-        with perf_phase("py::execute::param_prep"):
-            if parameters:
-                # Check if single parameter is a nested container that should be unwrapped
-                # e.g., execute("SELECT ?", (value,)) vs execute("SELECT ?, ?", ((1, 2),))
-                if isinstance(parameters, tuple) and len(parameters) == 1:
-                    if isinstance(parameters[0], (tuple, list, dict)):
-                        actual_params = parameters[0]
-                    elif isinstance(parameters[0], Row):
-                        # A Row (e.g. from fetchone()) is a sequence of column values.
-                        # Normalize it to a tuple so the downstream binding logic, which
-                        # only handles tuple/list/dict, can unwrap it into individual
-                        # parameters instead of treating the whole Row as one value.
-                        actual_params = tuple(parameters[0])
-                    else:
-                        actual_params = parameters
+        if parameters:
+            # Check if single parameter is a nested container that should be unwrapped
+            # e.g., execute("SELECT ?", (value,)) vs execute("SELECT ?, ?", ((1, 2),))
+            if len(parameters) == 1:
+                first = parameters[0]
+                if isinstance(first, (tuple, list, dict)):
+                    actual_params = first
+                elif isinstance(first, Row):
+                    # A Row (e.g. from fetchone()) is a sequence of column values.
+                    # Normalize it to a tuple so the downstream binding logic, which
+                    # only handles tuple/list/dict, can unwrap it into individual
+                    # parameters instead of treating the whole Row as one value.
+                    actual_params = tuple(first)
                 else:
                     actual_params = parameters
-
-                # Skip detect_and_convert_parameters when re-executing the same SQL —
-                # the parameter style (qmark vs pyformat) won't change between calls.
-                if operation == self.last_executed_stmt and isinstance(
-                    actual_params, (tuple, list)
-                ):
-                    parameters = list(actual_params)
-                else:
-                    operation, converted_params = detect_and_convert_parameters(
-                        operation, actual_params
-                    )
-                    parameters = list(converted_params)
             else:
-                parameters = []
+                actual_params = parameters
+
+            # Skip detect_and_convert_parameters when re-executing the same SQL —
+            # the parameter style (qmark vs pyformat) won't change between calls.
+            if operation == self.last_executed_stmt and isinstance(actual_params, (tuple, list)):
+                parameters = list(actual_params)
+            else:
+                operation, converted_params = detect_and_convert_parameters(
+                    operation, actual_params
+                )
+                parameters = list(converted_params)
+        else:
+            parameters = []
 
         # Validate that inputsizes matches parameter count if both are present
         if parameters and self._inputsizes:
@@ -1950,57 +1970,65 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         # with parameters. The HSTMT is reused via _soft_reset_cursor, so the
         # server-side plan from the previous SQLPrepare is still valid.
         same_sql = parameters and operation == self.last_executed_stmt and self.is_stmt_prepared[0]
-        if not same_sql:
+        if not same_sql and self.is_stmt_prepared[0]:
             self.is_stmt_prepared = [False]
         effective_use_prepare = use_prepare and not same_sql
 
-        with perf_phase("py::execute::cpp_call"):
-            if parameters:
-                # Only the parameterized call takes encoding settings.
-                encoding_settings = self._get_encoding_settings()
-                ret = ddbc_bindings.DDBCSQLExecute(
-                    self.hstmt,
-                    operation,
-                    parameters,
-                    self._inputsizes,
-                    self.is_stmt_prepared,
-                    effective_use_prepare,
-                    encoding_settings,
-                )
-            else:
-                ret = ddbc_bindings.DDBCSQLExecDirect(self.hstmt, operation)
+        profiling = _perf_timer._enabled
+        if profiling:
+            t_native = perf_start()
+        if parameters:
+            # Only the parameterized call takes encoding settings.
+            encoding_settings = self._get_encoding_settings()
+            ret = ddbc_bindings.DDBCSQLExecute(
+                self.hstmt,
+                operation,
+                parameters,
+                self._inputsizes,
+                self.is_stmt_prepared,
+                effective_use_prepare,
+                encoding_settings,
+            )
+        else:
+            ret = ddbc_bindings.DDBCSQLExecDirect(self.hstmt, operation)
+        if profiling:
+            perf_stop("py::execute::cpp_call", t_native)
         # Check return code
-        try:
+        if ret != _SQL_SUCCESS:
+            try:
+                # Check for errors but don't raise exceptions for info/warning messages
+                check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.warning("Execute failed, resetting cursor: %s", e)
+                self._reset_cursor()
+                raise
 
-            # Check for errors but don't raise exceptions for info/warning messages
-            check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.warning("Execute failed, resetting cursor: %s", e)
-            self._reset_cursor()
-            raise
-
-        # Capture any diagnostic messages (SQL_SUCCESS_WITH_INFO, etc.)
-        with perf_phase("py::execute::diag_records"):
+            # Capture any diagnostic messages (SQL_SUCCESS_WITH_INFO, etc.)
             self._capture_diagnostics(ret)
 
         self.last_executed_stmt = operation
 
-        with perf_phase("py::execute::post_execute"):
-            # Initialize description after execution
-            # After successful execution, initialize description if there are results
+        # Initialize description after execution
+        # After successful execution, initialize description if there are results
+        try:
+            # RUST-PORT: the native layer fills the list with the same dicts while
+            # the columns stay the same, which makes the layout comparison in
+            # _initialize_description a cheap identity check per column.
             column_metadata = []
-            try:
-                ddbc_bindings.DDBCSQLDescribeCol(self.hstmt, column_metadata)
-                self._initialize_description(column_metadata)
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                # If describe fails, it's likely there are no results (e.g., for INSERT)
-                self.description = None
-                self._column_sql_types = None
+            ddbc_bindings.DDBCSQLDescribeCol(self.hstmt, column_metadata)
+            self._initialize_description(column_metadata)
+        except Exception:  # pylint: disable=broad-exception-caught
+            # If describe fails, it's likely there are no results (e.g., for INSERT)
+            self.description = None
+            self._column_sql_types = None
 
         # Reset rownumber for new result set (only for SELECT statements)
         if self.description:  # If we have column descriptions, it's likely a SELECT
             self.rowcount = -1
-            self._reset_rownumber()
+            self._rownumber = -1
+            self._next_row_index = 0
+            self._has_result_set = True
+            self._skip_increment_for_next_fetch = False
             # RUST-PORT: column maps come from the layout cache, which
             # _initialize_description just set for this result. The converter map
             # is rebuilt only when the connection's converter generation changes.
@@ -2013,17 +2041,26 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 layout.converter_generation = generation
             self._cached_converter_map = layout.converter_map
             self._cached_converters_generation = generation
-            self._uuid_str_indices = self._compute_uuid_str_indices()
+            # The UUID indices only depend on the effective native_uuid setting.
+            native_uuid = self._conn_native_uuid
+            if native_uuid is None:
+                native_uuid = get_settings().native_uuid
+            if layout.uuid_native is not native_uuid:
+                layout.uuid_indices = self._compute_uuid_str_indices()
+                layout.uuid_native = native_uuid
+            self._uuid_str_indices = layout.uuid_indices
         else:
             # TODO: rowcount return code from SQL needs to be handled
             self.rowcount = ddbc_bindings.DDBCSQLRowCount(self.hstmt)
-            self._clear_rownumber()
+            self._rownumber = -1
+            self._has_result_set = False
+            self._skip_increment_for_next_fetch = False
             self._cached_column_map = None
             self._cached_column_map_lower = None
             self._cached_converter_map = None
             self._uuid_str_indices = None
 
-        self._reset_inputsizes()  # Reset input sizes after execution
+        self._inputsizes = None  # Reset input sizes after execution
         # Return self for method chaining
         return self
 
@@ -2974,26 +3011,30 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         Returns:
             Single Row object or None if no more data is available.
         """
-        self._check_closed()  # Check if the cursor is closed
+        if self.closed:
+            self._check_closed()  # Check if the cursor is closed
 
-        if self._cached_decoding_generation != self._connection._decoding_generation:
+        connection = self._connection
+        if self._cached_decoding_generation != connection._decoding_generation:
             self._refresh_decoding_cache()
-        char_enc = self._cached_char_encoding
-        wchar_enc = self._cached_wchar_encoding
 
         # Fetch raw data
         row_data = []
-        try:
-            with perf_phase("py::fetchone::cpp_call"):
-                ret = ddbc_bindings.DDBCSQLFetchOne(
-                    self.hstmt,
-                    row_data,
-                    char_enc,
-                    wchar_enc,
-                    self._cached_char_ctype,
-                    self.messages,
-                )
+        profiling = _perf_timer._enabled
+        if profiling:
+            t_native = perf_start()
+        ret = ddbc_bindings.DDBCSQLFetchOne(
+            self.hstmt,
+            row_data,
+            self._cached_char_encoding,
+            self._cached_wchar_encoding,
+            self._cached_char_ctype,
+            self.messages,
+        )
+        if profiling:
+            perf_stop("py::fetchone::cpp_call", t_native)
 
+        if ret != _SQL_SUCCESS:
             check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
 
             if ret == _SQL_NO_DATA:
@@ -3002,34 +3043,48 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                     self.rowcount = 0
                 return None
 
-            # Update internal position after successful fetch
-            if self._skip_increment_for_next_fetch:
-                self._skip_increment_for_next_fetch = False
-                self._next_row_index += 1
-            else:
-                self._increment_rownumber()
+        # Update internal position after successful fetch
+        if self._skip_increment_for_next_fetch:
+            self._skip_increment_for_next_fetch = False
+            self._next_row_index += 1
+        elif self._has_result_set:
+            # RUST-PORT: _increment_rownumber inlined (hot path).
+            self._next_row_index += 1
+            self._rownumber = self._next_row_index - 1
+        else:
+            self._increment_rownumber()  # raises: no active result set
 
-            self.rowcount = self._next_row_index
+        self.rowcount = self._next_row_index
 
-            # Get column and converter maps
+        # Get column and converter maps (RUST-PORT: cached maps are valid while the
+        # converter generation and the description are unchanged)
+        column_map = self._cached_column_map
+        if (
+            column_map is not None
+            and self._cached_converters_generation == connection._converters_generation
+            and self._result_columns_src is self.description
+        ):
+            converter_map = self._cached_converter_map
+            column_map_lower = self._cached_column_map_lower
+        else:
             column_map, converter_map, column_map_lower = self._get_column_and_converter_maps()
-            with perf_phase("py::fetchone::row_wrap"):
-                if not converter_map and not self._uuid_str_indices:
-                    return Row._fast_create(
-                        row_data, column_map, self, column_map_lower, self._cached_result_columns
-                    )
-                return Row(
-                    row_data,
-                    column_map,
-                    cursor=self,
-                    converter_map=converter_map,
-                    uuid_str_indices=self._uuid_str_indices,
-                    column_map_lower=column_map_lower,
-                    column_names=self._cached_result_columns,
-                )
-        except Exception:
-            # On error, don't increment rownumber - rethrow the error
-            raise
+        if not converter_map and not self._uuid_str_indices:
+            row = Row.__new__(Row)
+            row._values = row_data
+            row._column_map = column_map
+            row._cursor = self
+            row._column_map_lower = column_map_lower
+            row._column_names = self._cached_result_columns
+            return row
+        return Row(
+            row_data,
+            column_map,
+            cursor=self,
+            converter_map=converter_map,
+            uuid_str_indices=self._uuid_str_indices,
+            column_map_lower=column_map_lower,
+            column_names=self._cached_result_columns,
+        )
 
     def fetchmany(self, size: Optional[int] = None) -> List[Row]:
         """
@@ -3122,72 +3177,82 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         Returns:
             List of Row objects.
         """
-        self._check_closed()  # Check if the cursor is closed
+        if self.closed:
+            self._check_closed()  # Check if the cursor is closed
         if not self._has_result_set and self.description:
             self._reset_rownumber()
 
-        if self._cached_decoding_generation != self._connection._decoding_generation:
+        connection = self._connection
+        if self._cached_decoding_generation != connection._decoding_generation:
             self._refresh_decoding_cache()
-        char_enc = self._cached_char_encoding
-        wchar_enc = self._cached_wchar_encoding
 
         # Fetch raw data
         rows_data = []
-        try:
-            with perf_phase("py::fetchall::cpp_call"):
-                ret = ddbc_bindings.DDBCSQLFetchAll(
-                    self.hstmt,
-                    rows_data,
-                    char_enc,
-                    wchar_enc,
-                    self._cached_char_ctype,
-                    self.messages,
-                )
+        profiling = _perf_timer._enabled
+        if profiling:
+            t_native = perf_start()
+        ret = ddbc_bindings.DDBCSQLFetchAll(
+            self.hstmt,
+            rows_data,
+            self._cached_char_encoding,
+            self._cached_wchar_encoding,
+            self._cached_char_ctype,
+            self.messages,
+        )
+        if profiling:
+            perf_stop("py::fetchall::cpp_call", t_native)
 
-            # Check for errors
+        # Check for errors
+        if ret != _SQL_SUCCESS:
             check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
 
-            # Update rownumber for the number of rows actually fetched
-            if rows_data and self._has_result_set:
-                self._next_row_index += len(rows_data)
-                self._rownumber = self._next_row_index - 1
+        # Update rownumber for the number of rows actually fetched
+        if rows_data and self._has_result_set:
+            self._next_row_index += len(rows_data)
+            self._rownumber = self._next_row_index - 1
 
-            # Centralize rowcount assignment after fetch
-            if len(rows_data) == 0 and self._next_row_index == 0:
-                self.rowcount = 0
-            else:
-                self.rowcount = self._next_row_index
+        # Centralize rowcount assignment after fetch
+        if len(rows_data) == 0 and self._next_row_index == 0:
+            self.rowcount = 0
+        else:
+            self.rowcount = self._next_row_index
 
-            # Get column and converter maps
+        # Get column and converter maps (RUST-PORT: cached maps are valid while the
+        # converter generation and the description are unchanged)
+        column_map = self._cached_column_map
+        if (
+            column_map is not None
+            and self._cached_converters_generation == connection._converters_generation
+            and self._result_columns_src is self.description
+        ):
+            converter_map = self._cached_converter_map
+            column_map_lower = self._cached_column_map_lower
+        else:
             column_map, converter_map, column_map_lower = self._get_column_and_converter_maps()
 
-            # Convert raw data to Row objects
-            uuid_idx = self._uuid_str_indices
-            with perf_phase("py::fetchall::row_wrap"):
-                if not converter_map and not uuid_idx:
-                    return ddbc_bindings.construct_rows(
-                        rows_data,
-                        Row,
-                        column_map,
-                        self,
-                        column_map_lower,
-                        self._cached_result_columns,
-                    )
-                return [
-                    Row(
-                        row_data,
-                        column_map,
-                        cursor=self,
-                        converter_map=converter_map,
-                        uuid_str_indices=uuid_idx,
-                        column_map_lower=column_map_lower,
-                        column_names=self._cached_result_columns,
-                    )
-                    for row_data in rows_data
-                ]
-        except Exception:
-            # On error, don't increment rownumber - rethrow the error
-            raise
+        # Convert raw data to Row objects
+        uuid_idx = self._uuid_str_indices
+        if not converter_map and not uuid_idx:
+            return ddbc_bindings.construct_rows(
+                rows_data,
+                Row,
+                column_map,
+                self,
+                column_map_lower,
+                self._cached_result_columns,
+            )
+        return [
+            Row(
+                row_data,
+                column_map,
+                cursor=self,
+                converter_map=converter_map,
+                uuid_str_indices=uuid_idx,
+                column_map_lower=column_map_lower,
+                column_names=self._cached_result_columns,
+            )
+            for row_data in rows_data
+        ]
 
     def arrow_batch(self, batch_size: int = 8192) -> "pyarrow.RecordBatch":
         """
