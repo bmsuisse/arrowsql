@@ -652,7 +652,8 @@ mod tests {
     fn clipping_never_splits_a_character() {
         let (out, clipped) = escaped("é🦀é🦀", 100, 5, true);
         assert!(clipped);
-        assert_eq!(out, "é🦀");
+        assert_eq!(out, "é");
+        assert_eq!(escaped("é🦀é🦀", 100, 6, true).0, "é🦀");
         let (out, clipped) = escaped("é🦀é🦀", 3, 100, true);
         assert!(clipped);
         assert_eq!(out, "é🦀é");
