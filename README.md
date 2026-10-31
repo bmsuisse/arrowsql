@@ -111,25 +111,26 @@ except mssql_python.IntegrityError as exc:
 
 NYC yellow taxi data, January 2024 (2,964,624 rows × 20 columns), SQL Server
 2022 in podman on the same host. Upstream is mssql-python 1.16.0 (C++ + ODBC
-Driver 18). Release build of this project at commit `1182ec1`, median of 5,
-one measurement at a time (machine-wide lock), but on a shared dev box with
-other jobs running: treat absolute times as indicative and compare ratios.
-Rows marked * come from earlier dedicated runs (Arrow agent, aio agent,
-free-threaded agent) rather than the commit-`1182ec1` run.
+Driver 18); pyodbc runs with `fast_executemany=True` against the same ODBC
+driver. Release build of this project, median of 5, one measurement at a time
+(machine-wide lock), on a shared dev box with other jobs running (load average
+3.6-5.5): treat absolute times as indicative and compare ratios. Unmarked rows
+are from commit `d5476b1`; rows marked † are from commit `1182ec1`, rows marked
+* from earlier dedicated runs (Arrow agent, aio agent, free-threaded agent).
 
 **Reads**
 
-| workload | upstream | this project | speedup | best other driver |
+| workload | upstream | this project | speedup | pyodbc / best other |
 |---|---:|---:|---:|---|
-| `fetchall()`, 100k rows × 20 cols | 0.392 s | 0.142 s | 2.8x | FastMssql 0.660 s |
-| `fetchmany(10_000)`, 100k rows | 0.367 s | 0.113 s | 3.2x | FastMssql 0.538 s |
-| `fetchone()` loop, 100k rows | 0.450 s | 0.240 s | 1.9x | FastMssql 0.680 s |
-| `fetchmany`, 3M rows × 20 cols | 12.93 s | 3.09 s | 4.2x | pyodbc 32.0 s |
-| decimal-heavy `fetchmany` | 1.844 s | 0.430 s | 4.3x | pyodbc 5.0 s |
-| string-heavy `fetchmany` | 1.476 s | 0.819 s | 1.8x | pyodbc 1.10 s |
-| `cursor.arrow()`, 100k rows | 0.155 s | 0.061 s | 2.6x | connectorx 0.350 s |
-| decimal-heavy Arrow | 0.800 s | 0.238 s | 3.4x | connectorx 1.43 s |
-| DuckDB over the Arrow stream, 3M rows | 4.595 s | 1.987 s | 2.3x | connectorx 9.85 s |
+| `fetchall()`, 100k rows × 20 cols | 0.351 s | 0.117 s | 3.0x | pyodbc 0.865 s |
+| `fetchmany(10_000)`, 100k rows | 0.314 s | 0.098 s | 3.2x | pyodbc 0.851 s |
+| `fetchone()` loop, 100k rows | 0.436 s | 0.197 s | 2.2x | pyodbc 0.720 s |
+| `fetchmany`, 3M rows × 20 cols | 9.74 s | 2.75 s | 3.5x | pyodbc 27.0 s |
+| decimal-heavy `fetchmany` † | 1.844 s | 0.430 s | 4.3x | pyodbc 5.0 s |
+| string-heavy `fetchmany` † | 1.476 s | 0.819 s | 1.8x | pyodbc 1.10 s |
+| `cursor.arrow()`, 100k rows | 0.146 s | 0.060 s | 2.4x | connectorx 0.350 s † |
+| decimal-heavy Arrow † | 0.800 s | 0.238 s | 3.4x | connectorx 1.43 s |
+| DuckDB over the Arrow stream, 3M rows † | 4.595 s | 1.987 s | 2.3x | connectorx 9.85 s |
 | `read_arrow(..., partitions=8)`, 3M rows * | 4.253 s | 0.591 s | 7.2x | connectorx (8 partitions) 2.63 s |
 
 On a single connection SQL Server's row serialization is the limit (draining
@@ -138,27 +139,30 @@ partitioned read is how to get past it.
 
 **Writes**
 
-| workload | upstream | this project | speedup | best other |
+| workload | upstream | this project | speedup | pyodbc / best other |
 |---|---:|---:|---:|---|
-| `bulkcopy_arrow`, 3M rows, heap + TABLOCK | 12.35 s | 6.07 s | 2.0x | `bcp` 6.67 s |
-| `write_arrow(..., workers=8)`, 3M rows | 12.35 s | 1.82 s | 6.8x | `bcp` 6.67 s |
-| `bulkcopy` (row tuples), 100k rows | 1.561 s | 0.716 s | 2.2x | `bcp` 0.382 s |
-| `executemany`, 100k rows | 1.301 s | 1.533 s | 0.85x | pyodbc `fast_executemany` 0.801 s |
+| `bulkcopy_arrow`, 3M rows, heap + TABLOCK † | 12.35 s | 6.07 s | 2.0x | `bcp` 6.67 s |
+| `write_arrow(..., workers=8)`, 3M rows † | 12.35 s | 1.82 s | 6.8x | `bcp` 6.67 s |
+| `bulkcopy` (row tuples), 100k rows † | 1.561 s | 0.716 s | 2.2x | `bcp` 0.382 s |
+| `executemany`, 100k rows | 1.257 s | 0.653 s | 1.9x | pyodbc 0.762 s |
+| `INSERT ... VALUES`, 200 rows × 5 params per statement, 10k rows | 0.120 s | 0.094 s | 1.3x | pyodbc 0.096 s |
+| single-row `INSERT` × 1,000, one commit | 0.143 s | 0.125 s | 1.1x | pyodbc 0.132 s |
 
 **Latency and concurrency**
 
-| workload | upstream | this project | speedup | best other driver |
+| workload | upstream | this project | speedup | pyodbc / best other |
 |---|---:|---:|---:|---|
-| 1,000 point lookups | 0.328 s | 0.158 s | 2.1x | pyodbc 0.132 s |
-| 16 threads × point lookups | 2.395 s | 0.429 s | 5.6x | FastMssql 0.612 s |
-| `SELECT 1` × 5,000 | 0.829 s | 0.741 s | 1.1x | pyodbc 0.674 s |
-| connect + close × 50 | 0.199 s | 0.194 s | 1.0x | pyodbc 0.186 s |
+| 1,000 point lookups | 0.347 s | 0.136 s | 2.6x | pyodbc 0.133 s |
+| 16 threads × point lookups † | 2.395 s | 0.429 s | 5.6x | FastMssql 0.612 s |
+| `SELECT 1` × 5,000 | 0.816 s | 0.698 s | 1.2x | pyodbc 0.670 s |
+| connect + close × 50 | 0.122 s | 0.109 s | 1.1x | pyodbc 0.133 s |
 | async point lookups, 64 concurrent (`aio`) * | ~7k q/s | ~40k q/s | ~5x | FastMssql ~15k q/s |
 | free-threaded 3.15t, 16 threads point lookups * | 4.3k q/s | 18.7k q/s | 4.4x | – |
 
-Still behind: `executemany` (pyodbc `fast_executemany` is about 2x faster) and
-the tiniest round trips (`SELECT 1`, single-row lookups), where pyodbc is
-10-20 % faster. Both are being worked on.
+Against pyodbc the tiniest round trips are even: `SELECT 1` and single point
+lookups are within 2-4 %, run-to-run noise on this box. Both drivers make one
+send and one receive per query; what is left is a few microseconds of CPU per
+call.
 
 Full multi-driver matrix (pyodbc, connectorx, arrow-odbc, pymssql, FastMssql,
 `bcp`): [benchmarks/RESULTS.md](benchmarks/RESULTS.md).
