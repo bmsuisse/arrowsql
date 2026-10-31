@@ -182,6 +182,8 @@ _BY_NUMBER: dict[int, _Category] = {
     245: _CONVERSION,
     8114: _CONVERSION,
     8115: _CONVERSION,
+    232: _CONVERSION,
+    248: _CONVERSION,
     220: _CONVERSION,
     8134: _DIVIDE,
     8152: _TRUNCATION,
@@ -335,7 +337,10 @@ def _render_all(cursor: Any, render: Any) -> None:
             render.rows_affected(cursor.rowcount)
         # Past a truncated result set (or the budget) later ones stay unread:
         # skipping to them would read the rest of this one.
-        if not exhausted or not render.has_room() or not cursor.nextset():
+        if not exhausted or not cursor.nextset():
+            break
+        if not render.has_room():
+            render.omit(1)
             break
         seen = 0
 

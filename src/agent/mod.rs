@@ -20,7 +20,7 @@ use pyo3::prelude::*;
 use crate::arrow::plan::Plan;
 use crate::arrow::sink::ArrowSink;
 use crate::consts::*;
-use crate::statement::{self, BatchSink};
+use crate::statement;
 use render::{ColumnInfo, Format, Limits, Table};
 
 /// Rows decoded per fetch while the head is being filled.

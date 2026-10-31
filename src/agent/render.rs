@@ -326,10 +326,6 @@ impl Table {
         }
     }
 
-    pub fn rows(&self) -> usize {
-        self.rows
-    }
-
     /// How many rows to fetch next; 0 when the head is full and no tail is sampled.
     pub fn want(&mut self, chunk: usize) -> usize {
         if self.tail_mode() && (self.full || self.rows >= self.head_rows) {

@@ -31,7 +31,6 @@ use mssql_tds::datatypes::row_writer::RowWriter;
 use mssql_tds::datatypes::sql_json::SqlJson;
 use mssql_tds::datatypes::sql_string::EncodingType;
 use mssql_tds::datatypes::sql_vector::SqlVector;
-use mssql_tds::datatypes::sqldatatypes::TdsDataType;
 use uuid::Uuid;
 
 use super::plan::{Kind, Plan};
@@ -121,8 +120,8 @@ struct Column {
     kind: Kind,
     values: Values,
     valid: Bits,
-    /// Base type of the current `sql_variant` value (text columns only).
-    variant_base: Option<TdsDataType>,
+    /// A `sql_variant` column (text storage): binary values show as hex.
+    variant: bool,
 }
 
 impl Column {
@@ -145,7 +144,7 @@ impl Column {
                 Values::Var { offsets, data: Vec::with_capacity(rows.saturating_mul(width)) }
             }
         };
-        Column { kind, values, valid: Bits::with_capacity(rows), variant_base: None }
+        Column { kind, values, valid: Bits::with_capacity(rows), variant: false }
     }
 
     fn len(&self) -> usize {
@@ -294,12 +293,7 @@ impl Column {
     /// Raw bytes: kept as-is in a binary column, made valid UTF-8 in a text one.
     #[inline]
     fn bytes(&mut self, bytes: &[u8]) {
-        if self.kind == Kind::Text
-            && matches!(
-                self.variant_base,
-                Some(TdsDataType::VarBinary | TdsDataType::BigVarBinary | TdsDataType::Binary | TdsDataType::BigBinary)
-            )
-        {
+        if self.variant {
             let mut text = String::new();
             fmt::write_hex(&mut text, bytes);
             return self.text(text.as_bytes());
@@ -470,7 +464,12 @@ impl ArrowSink {
             .kinds
             .iter()
             .zip(&plan.widths)
-            .map(|(kind, width)| Column::new(*kind, rows, *width))
+            .zip(&plan.variants)
+            .map(|((kind, width), variant)| {
+                let mut column = Column::new(*kind, rows, *width);
+                column.variant = *variant;
+                column
+            })
             .collect();
         ArrowSink { plan: plan.clone(), columns, rows: 0 }
     }
@@ -535,9 +534,6 @@ impl BatchSink for ArrowSink {
 impl RowWriter for ArrowSink {
     fn write_null(&mut self, col: usize) {
         self.columns[col].null();
-    }
-    fn write_variant_base_type(&mut self, col: usize, base: TdsDataType) {
-        self.columns[col].variant_base = Some(base);
     }
     fn write_bool(&mut self, col: usize, val: bool) {
         self.columns[col].int(i64::from(val));

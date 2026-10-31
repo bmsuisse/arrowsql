@@ -59,6 +59,8 @@ pub struct Plan {
     pub kinds: Vec<Kind>,
     /// Typical value width in bytes, for pre-sizing variable-length buffers.
     pub widths: Vec<usize>,
+    /// `sql_variant` columns (stored as text; see `for_display`).
+    pub variants: Vec<bool>,
     pub schema: SchemaRef,
 }
 
@@ -77,6 +79,7 @@ impl Plan {
 
     fn build(columns: &[ColumnMetadata], variant_as_text: bool) -> Result<Plan, String> {
         let mut kinds = Vec::with_capacity(columns.len());
+        let mut variants = Vec::with_capacity(columns.len());
         let mut widths = Vec::with_capacity(columns.len());
         let mut fields = Vec::with_capacity(columns.len());
         for (i, meta) in columns.iter().enumerate() {
@@ -100,9 +103,10 @@ impl Plan {
             });
             let nullable = describe::nullable(meta) != SQL_NO_NULLS;
             fields.push(Field::new(meta.column_name.clone(), kind.data_type(), nullable));
+            variants.push(sql_type == SQL_SS_VARIANT);
             kinds.push(kind);
         }
-        Ok(Plan { kinds, widths, schema: Arc::new(Schema::new(fields)) })
+        Ok(Plan { kinds, widths, variants, schema: Arc::new(Schema::new(fields)) })
     }
 }
 
