@@ -16,7 +16,7 @@ if [ "${1:-}" ]; then
   wheel="$(realpath "$1")"
 else
   cd "$root"
-  "$root/.venv/bin/maturin" build -q --release -o "$scratch/dist" >&2
+  "$root/.venv/bin/maturin" build -q --release -i "$root/.venv/bin/python" -o "$scratch/dist" >&2
   wheel="$(ls "$scratch"/dist/*.whl)"
 fi
 

@@ -51,3 +51,16 @@ strip = true
 # vendor/mssql-tds/VENDOR.md). Remove when the fix is upstream.
 [patch."https://github.com/microsoft/mssql-rs"]
 mssql-tds = { path = "vendor/mssql-tds" }
+
+# TLS + certificate parsing run once per connection (cold): optimise for size.
+# The record-layer AEAD/hash primitives (ring) stay at opt-level 3.
+[profile.release.package.rustls]
+opt-level = "s"
+[profile.release.package.rustls-webpki]
+opt-level = "s"
+[profile.release.package.tokio-rustls]
+opt-level = "s"
+[profile.release.package.rustls-native-certs]
+opt-level = "s"
+[profile.release.package.x509-parser]
+opt-level = "s"

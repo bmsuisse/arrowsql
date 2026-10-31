@@ -174,3 +174,48 @@ Decision rule: adopt `abi3-py310` only if `read.taxi_100k.fetchall`,
 `read.taxi_100k.fetchone` and `latency.select1` are within noise (15%, median of
 5 runs) of the version-specific build. Free-threaded (3.13t/3.14t) builds cannot
 use abi3, so version-specific wheels stay in any case.
+
+## TLS backend (lean_tls)
+
+`vendor/mssql-tds` now has two TLS backends. Default: rustls (`tokio-rustls`
+0.26 + `rustls` 0.23 with the `ring` provider, system roots through
+`rustls-native-certs`). `ring` was chosen over `aws-lc-rs` (needs cmake/C++ and
+is larger). Legacy: cargo feature `native-tls` (`maturin build --features native-tls`)
+brings back native-tls plus OpenSSL for Always Encrypted.
+
+- `libssl`, `libcrypto` and `libzstd` are no longer bundled. `libzstd` was never
+  a Rust dependency: it was a dependency of the system `libcrypto.so.3` that
+  auditwheel copied. Nothing links it now.
+- Always Encrypted crypto (`security/crypto/openssl.rs`) is only compiled with
+  `native-tls`; the default build uses `unsupported.rs`, which returns a clean
+  `ColumnEncryptionError`. The port does not expose Always Encrypted.
+- Semantics kept: TrustServerCertificate / LoginOnly / ServerCertificate pinning
+  skip chain checks (handshake signatures are still verified; SQL Server's
+  X.509 v1 self-signed certificates are accepted via an x509-parser fallback),
+  HostNameInCertificate is the name checked, Encrypt=strict negotiates ALPN
+  `tds/8.0`, TDS 7.4 prelogin-wrapped TLS uses the same one-packet-per-flight
+  buffering as macOS. TLS 1.2/1.3 only.
+- Pitfall: SQL Server drops the connection if a TDS packet is split across TLS
+  records at odd offsets. tokio-rustls accepts partial writes when its queue is
+  non-empty, so `RustlsStream` flushes queued output before every write/read.
+  Without it, writes above about 2 MB failed.
+- Cert verification failure with TrustServerCertificate=no fails cleanly:
+  "invalid peer certificate: ... UnsupportedCertVersion" for the local
+  X.509 v1 container certificate (webpki rejects v1), instead of OpenSSL's
+  "self-signed certificate".
+- Encrypt=strict (TDS 8) does not work against the local container
+  (SQL Server 2022 without strict support); same as before (OpenSSL also failed).
+
+### Measurement (release, cp313)
+
+| measure | before | after |
+|---|---|---|
+| wheel | 6,227,827 B | 3,607,378 B |
+| bundled .libs | 3.2 MB compressed | none |
+| installed | 15,516 KiB | 7,996 KiB |
+| `.so` | 6.5 MB | 7.3 MB (7,471,920 B uncompressed) |
+
+Targets (wheel <= 3 MB, installed <= 6 MB) are not met: rustls + ring + webpki
+add about 1 MB to the `.so`. `opt-level = "s"` for the cold TLS crates is set in
+`Cargo.toml`. Remaining levers: drop `x509-parser` (used for the v1 certificate
+fallback, expiry check) and gate TVP / SSRP in the vendored crate.
