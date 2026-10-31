@@ -245,10 +245,10 @@ fn typed_cell<'a>(
             let values = downcast::<Date32Array>(array)?.values();
             Some(Box::new(move |row, out| {
                 let days = values[row];
-                let sql_days = days
-                    .checked_add(EPOCH_DAYS_FROM_YEAR_ONE)
-                    .filter(|d| *d >= 0)
-                    .ok_or_else(|| format!("Date {days} is before 0001-01-01"))?;
+                let sql_days = i64::from(days) + i64::from(EPOCH_DAYS_FROM_YEAR_ONE);
+                if !(0..=MAX_SQL_DAYS).contains(&sql_days) {
+                    return Err(format!("Date32 value {days} days out of SQL DATE range (0001-01-01..9999-12-31)"));
+                }
                 wire::put_date(out, layout, sql_days as u32);
                 Ok(())
             }))
@@ -415,6 +415,9 @@ fn time_cell<'a>(
     };
     Ok(Some(Box::new(move |row, out| {
         let ticks = u64::try_from(ticks_of(row)).map_err(|_| "Time value is negative".to_string())?;
+        if ticks >= TICKS_PER_DAY as u64 {
+            return Err("Time value is 24 hours or more".to_string());
+        }
         wire::put_time_of_day(out, layout, ticks, scale);
         Ok(())
     })))

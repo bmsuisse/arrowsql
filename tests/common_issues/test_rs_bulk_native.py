@@ -384,3 +384,45 @@ def test_result_dictionary_shape(cursor, table_name):
 
     assert set(result) == {"rows_copied", "batch_count", "elapsed_time", "rows_per_second"}
     assert result["rows_copied"] == 2
+
+
+@pytest.mark.parametrize(
+    "days",
+    [16_058_054, 16_777_216, 2_932_897 + 1, -719_163 - 1, -(2**31)],
+)
+def test_out_of_range_date32_is_rejected(cursor, table_name, days):
+    """Date32 values outside 0001-01-01..9999-12-31 must not wrap into 3 bytes."""
+    table = f"dbo.{table_name}"
+    cursor.execute(f"CREATE TABLE {table} (v date NULL)")
+    cursor.connection.commit()
+    source = pa.table({"v": pa.array([days], pa.int32()).cast(pa.date32())})
+
+    with pytest.raises(Exception, match="(?i)out of SQL DATE range|before 0001"):
+        cursor.bulkcopy_arrow(table, source)
+
+    cursor.connection.rollback()
+    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+    assert cursor.fetchone()[0] == 0
+
+
+def test_date32_bounds_are_accepted(cursor, table_name):
+    table = f"dbo.{table_name}"
+    cursor.execute(f"CREATE TABLE {table} (k int NOT NULL, v date NULL)")
+    source = pa.table(
+        {
+            "k": pa.array([0, 1], pa.int32()),
+            "v": pa.array([-719_162, 2_932_896], pa.int32()).cast(pa.date32()),
+        }
+    )
+    cursor.bulkcopy_arrow(table, source)
+    assert [r[1] for r in _fetch(cursor, table)] == [dt.date(1, 1, 1), dt.date(9999, 12, 31)]
+
+
+def test_time_of_24_hours_or_more_is_rejected(cursor, table_name):
+    table = f"dbo.{table_name}"
+    cursor.execute(f"CREATE TABLE {table} (v time NULL)")
+    cursor.connection.commit()
+    source = pa.table({"v": pa.array([86_400], pa.int32()).cast(pa.time32("s"))})
+
+    with pytest.raises(Exception, match="(?i)24 hours"):
+        cursor.bulkcopy_arrow(table, source)
