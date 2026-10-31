@@ -7,6 +7,8 @@ them when present and falls back to the upstream-compatible cursor.arrow() API.
 
 from __future__ import annotations
 
+import os
+
 from drivers.base import DbApiDriver, duckdb_aggregate
 from drivers.registry import SPECS
 
@@ -31,7 +33,9 @@ class UpstreamDriver(DbApiDriver):
     def _connect(self, autocommit):
         import mssql_python
 
-        return mssql_python.connect(self.info.odbc(), autocommit=autocommit)
+        # BENCH_CONN_EXTRA (e.g. "Packet Size=32767;") lets A/B runs vary connection options.
+        return mssql_python.connect(self.info.odbc() + os.environ.get("BENCH_CONN_EXTRA", ""),
+                                    autocommit=autocommit)
 
     # -- arrow ---------------------------------------------------------------
     def _arrow_table(self, cur, batch_size):

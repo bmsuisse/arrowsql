@@ -1,9 +1,11 @@
 """Bulk-write payloads: the NYC taxi month as rows or Arrow, plus small synthetic row sets.
 
-The 20-column layout matches dbo.yellow_trips (trip_id first). `rows()` boxes
-Arrow cells into Python tuples in 10k-row chunks so a 1M-row payload never
-materializes as Python objects at once; that boxing cost is part of every
-rows-based bulk workload (and is the point of comparing with the Arrow path).
+The 20-column layout matches dbo.yellow_trips (trip_id first). `rows()` and
+`row_chunks()` iterate a cached list of Python tuples once `materialize_rows()` has run
+(workloads.py prepare() does that, untimed, for the plain write.bulk_rows_* workloads, so
+the timed region measures the driver and not Arrow -> tuple boxing, which bcp also gets
+for free). Without the cache they box Arrow cells lazily in 10k-row chunks inside the
+timed call: that is the old behaviour, kept as the write.bulk_rows_*.stream workloads.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ class TaxiPayload:
     def __init__(self, n: int):
         self.n = n
         self._table = None
+        self._rows: list | None = None
 
     @property
     def source_sql(self) -> str:
@@ -65,15 +68,33 @@ class TaxiPayload:
             assert self._table.column_names == self.columns, self._table.column_names
         return self._table
 
+    def materialize_rows(self) -> list:
+        """Build (once) the full list of row tuples; ~1 GB at 1M rows."""
+        if self._rows is None:
+            self._rows = list(self._boxed_rows())
+        return self._rows
+
+    def _boxed_rows(self, size: int = 10_000):
+        t = self.arrow()
+        for start in range(0, t.num_rows, size):
+            part = t.slice(start, size)
+            yield from zip(*[col.to_pylist() for col in part.columns])
+
     def row_chunks(self, size: int = 10_000):
+        if self._rows is not None:
+            for start in range(0, len(self._rows), size):
+                yield self._rows[start:start + size]
+            return
         t = self.arrow()
         for start in range(0, t.num_rows, size):
             part = t.slice(start, size)
             yield list(zip(*[col.to_pylist() for col in part.columns]))
 
     def rows(self):
-        for chunk in self.row_chunks():
-            yield from chunk
+        """A ready list when materialized, else a lazy generator that boxes inside the timed call."""
+        if self._rows is not None:
+            return self._rows
+        return self._boxed_rows()
 
 
 def small_rows(n: int) -> list[tuple]:
