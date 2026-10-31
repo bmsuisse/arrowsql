@@ -1,3 +1,4 @@
 # Upstream target tests excluded from the Rust port's goal. Format: <file or node id>\t<reason>
 test_000_dependencies.py	checks bundled msodbcsql/unixODBC shared libraries and the C++ extension's per-platform file naming; the Rust port ships no ODBC driver and is installed by maturin as one module
 test_026_odbc_provider.py	selects between msodbcsql18 and Microsoft's Rust mssql-odbc ODBC driver at load time; the port speaks TDS directly and loads no ODBC driver (ProviderManager stays importable, see python/mssql_python/odbc_provider.py RUST-PORT)
+test_fetch_settings_cache.py::test_native_mixed_fetch_diagnostics	loads the compiled extension with ctypes and overwrites its exported ODBC function pointers SQLGetDiagRec_ptr / SQLGetDiagField_ptr to inject fake diagnostics; the Rust core has no ODBC layer and no such symbols. The behaviour it guards (fetch diagnostics surface in cursor.messages) is covered by test_messages_errors.py and test_rs_message_flood.py
