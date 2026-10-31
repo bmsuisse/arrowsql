@@ -162,7 +162,7 @@ fn resolve_one(
     };
     if source >= shape.column_count {
         return Err(format!(
-            "Source column index {source} is out of range (the source has {} columns)",
+            "Source column index {source} is out of bounds (the source has {} columns)",
             shape.column_count
         ));
     }

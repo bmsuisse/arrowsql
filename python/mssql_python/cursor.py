@@ -3613,8 +3613,8 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             # RUST-PORT: only cursors without a native handle and plain iterables of
             # RecordBatch reach this fallback; mssql_py_core is an optional extra.
             raise ImportError(
-                "This bulk copy source needs the optional 'async-preview' extra, which "
-                "provides mssql_py_core. Install it with: "
+                "Bulk copy requires the mssql_py_core library for this source, which is "
+                "not installed. Install the optional extra: "
                 "pip install 'mssql-python-rs-port[async-preview]'"
             ) from exc
 
