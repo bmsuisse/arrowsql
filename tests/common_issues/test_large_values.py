@@ -169,18 +169,12 @@ def test_null_parameter_into_varbinary_max_with_explicit_cast(cursor):
     assert cursor.fetchone()[0] is None
 
 
-@pytest.mark.upstream_bug(
-    reason=(
-        "Untyped None parameter is bound as varchar, so INSERT of NULL into a "
-        "varbinary column fails with 'Implicit conversion from data type varchar "
-        "to varbinary(max) is not allowed' (also varbinary(10))."
-    )
-)
-@pytest.mark.xfail(strict=True, reason="upstream bug")
-def test_null_parameter_into_varbinary_max_plain_insert(cursor):
-    cursor.execute("CREATE TABLE #vb_null2 (id int NOT NULL, b varbinary(max) NULL)")
-    cursor.execute("INSERT INTO #vb_null2 (id, b) VALUES (?, ?)", [1, None])
-    cursor.execute("SELECT b FROM #vb_null2 WHERE id = 1")
+def test_null_parameter_into_varbinary_max_plain_insert(cursor, table_name):
+    # Permanent table: the server can only describe the parameter there; upstream pins a
+    # ProgrammingError for #temp tables (test_gh627_temp_table_null_varbinary_raises).
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (id int NOT NULL, b varbinary(max) NULL)")
+    cursor.execute(f"INSERT INTO dbo.{table_name} (id, b) VALUES (?, ?)", [1, None])
+    cursor.execute(f"SELECT b FROM dbo.{table_name} WHERE id = 1")
     assert cursor.fetchone()[0] is None
 
 

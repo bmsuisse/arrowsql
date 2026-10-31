@@ -166,17 +166,12 @@ def test_literal_null_in_binary_columns_reads_back_none(cursor, bin_table):
     assert got == (None, None, None)
 
 
-@pytest.mark.upstream_bug(
-    reason=(
-        "Python None bound as a parameter is sent as a varchar NULL, so inserting it into "
-        "a varbinary/binary column fails with 'Implicit conversion from data type varchar "
-        "to varbinary(max) is not allowed'; it should bind as a typed SQL NULL"
-    )
-)
-@pytest.mark.xfail(strict=True, reason="upstream bug")
-def test_none_param_into_varbinary_max_stores_null(cursor, bin_table):
-    cursor.execute(f"INSERT INTO {bin_table} (id, v) VALUES (1, ?)", (None,))
-    got = _one(cursor, f"SELECT v FROM {bin_table} WHERE id = 1")[0]
+def test_none_param_into_varbinary_max_stores_null(cursor, table_name):
+    # Permanent table: the server can only describe the parameter there; upstream pins a
+    # ProgrammingError for #temp tables (test_gh627_temp_table_null_varbinary_raises).
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (id int NOT NULL PRIMARY KEY, v varbinary(max) NULL)")
+    cursor.execute(f"INSERT INTO dbo.{table_name} (id, v) VALUES (1, ?)", (None,))
+    got = _one(cursor, f"SELECT v FROM dbo.{table_name} WHERE id = 1")[0]
     assert got is None
 
 

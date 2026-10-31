@@ -44,6 +44,14 @@ def legacy_table(cursor):
     return "#legacy"
 
 
+@pytest.fixture
+def perm_legacy_table(cursor, table_name):
+    # Permanent table: untyped None into IMAGE needs sp_describe_undeclared_parameters, which cannot
+    # see #temp tables (upstream pins a ProgrammingError there, test_gh627_temp_table_null_varbinary_raises).
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (id int NOT NULL PRIMARY KEY, t text NULL, nt ntext NULL, im image NULL)")
+    return f"dbo.{table_name}"
+
+
 # --- Round trips and Python types -----------------------------------------------------
 
 
@@ -122,9 +130,9 @@ def test_null_in_all_legacy_columns_fetches_none(cursor, legacy_table):
     assert tuple(cursor.fetchone()) == (None, None, None)
 
 
-def test_null_parameters_bound_as_none(cursor, legacy_table):
-    cursor.execute("INSERT INTO #legacy (id, t, nt, im) VALUES (1, ?, ?, ?)", [None, None, None])
-    cursor.execute("SELECT t, nt, im FROM #legacy WHERE id = 1")
+def test_null_parameters_bound_as_none(cursor, perm_legacy_table):
+    cursor.execute(f"INSERT INTO {perm_legacy_table} (id, t, nt, im) VALUES (1, ?, ?, ?)", [None, None, None])
+    cursor.execute(f"SELECT t, nt, im FROM {perm_legacy_table} WHERE id = 1")
     assert tuple(cursor.fetchone()) == (None, None, None)
 
 
@@ -207,14 +215,14 @@ def test_cast_ntext_to_nvarchar_max_returns_full_value(cursor, legacy_table):
     assert fetched == value
 
 
-def test_executemany_mixed_nulls_and_large_values(cursor, legacy_table):
+def test_executemany_mixed_nulls_and_large_values(cursor, perm_legacy_table):
     rows = [
         (1, "a", b"\x01", "u" * 9000),
         (2, None, None, None),
         (3, "", b"", ""),
     ]
-    cursor.executemany("INSERT INTO #legacy (id, t, im, nt) VALUES (?, ?, ?, ?)", rows)
-    cursor.execute("SELECT id, t, im, nt FROM #legacy ORDER BY id")
+    cursor.executemany(f"INSERT INTO {perm_legacy_table} (id, t, im, nt) VALUES (?, ?, ?, ?)", rows)
+    cursor.execute(f"SELECT id, t, im, nt FROM {perm_legacy_table} ORDER BY id")
     fetched = [tuple(r) for r in cursor.fetchall()]
     assert fetched == [
         (1, "a", b"\x01", "u" * 9000),
