@@ -745,6 +745,15 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             that indicate a broken connection state. These should not be silently ignored
             as they can lead to data corruption or inconsistent behavior.
         """
+        connection = self._connection
+        # RUST-PORT: an open Connection replaces its settings dict instead of
+        # mutating it and the native layer only reads it, so hand it over
+        # without getencoding()'s lock and defensive copy.
+        try:
+            if connection._closed is False:
+                return connection._encoding_settings
+        except AttributeError:
+            pass
         if hasattr(self._connection, "getencoding"):
             try:
                 return self._connection.getencoding()

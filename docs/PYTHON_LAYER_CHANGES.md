@@ -194,3 +194,31 @@ The Rust side already reads a `None` entry as "no hint" (`params::parse_hint`).
   settings from the default. Both cases keep upstream's general path through
   `SQLExecuteMany`, which upstream tests pin (test_025_profiler,
   test_013_encoding_decoding). Binding behaviour is the same either way.
+
+## Round-trip hot path (roundtrip package)
+
+`Cursor.execute`, `fetchone` and `fetchall` (`RUST-PORT`) do less per call; the
+behaviour is unchanged. A `SELECT 1` + `fetchone()` used about 4.5 us of Python
+and now uses about 1.3 us (measured with the native calls stubbed).
+
+- Debug messages in `execute` are only formatted when the logger's cached level
+  is DEBUG (a replaced logger without a numeric level still gets them).
+- `perf_phase` contexts in the three methods became `if profiling:` guards
+  around the native call (`py::execute::cpp_call`, `py::fetchone::cpp_call`,
+  `py::fetchall::cpp_call`). The `param_prep`, `diag_records`, `post_execute`
+  and `row_wrap` phases are gone; nothing pins them.
+- `_soft_reset_cursor`, `_reset_rownumber`, `_clear_rownumber`,
+  `_increment_rownumber` and `_reset_inputsizes` are inlined where `execute` and
+  `fetchone` call them. `check_error` / `_capture_diagnostics` run only for a
+  return code other than `SQL_SUCCESS`.
+- `_ResultLayout` caches the UUID stringification indices per `native_uuid`
+  value (`uuid_native`, `uuid_indices`).
+- `fetchone` / `fetchall` use the cached column and converter maps directly when
+  the converter generation and the description are unchanged, and `fetchone`
+  builds the `Row` inline.
+- `_get_encoding_settings` returns an open `Connection`'s settings dict without
+  `getencoding()`'s lock and copy (the dict is replaced, never mutated, and the
+  native layer only reads it). Other connection objects keep the old path.
+- Native: `DDBCSQLDescribeCol` fills the list with the same per-column dicts
+  while the statement's columns stay the same (`src/decode/describe.rs`
+  `shared_columns`), so `_initialize_description` compares layouts by identity.
