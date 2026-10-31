@@ -15,7 +15,7 @@ pub mod udt;
 
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::message::parameters::rpc_parameters::{RpcParameter, StatusFlags};
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyInt, PyList, PyModule, PySequence, PyTuple, PyType};
@@ -139,6 +139,10 @@ pub(crate) const DATA_ERROR_PREFIX: &str = "data exception: ";
 /// compatibility with earlier releases, a `ValueError`.
 pub(crate) const DATA_VALUE_ERROR_PREFIX: &str = "data value exception: ";
 
+/// Prefix of a conversion message that upstream raises as a bare `RuntimeError`
+/// (a tz offset outside SQL Server's range).
+pub(crate) const RUNTIME_ERROR_PREFIX: &str = "runtime error: ";
+
 /// Maps a conversion failure to the Python exception upstream raises for it.
 ///
 /// `TypeConversionError` marks a value the target type cannot represent
@@ -153,6 +157,8 @@ pub fn conversion_error(err: &mssql_tds::error::Error) -> PyErr {
                 data_error(text, true)
             } else if let Some(text) = msg.strip_prefix(DATA_ERROR_PREFIX) {
                 data_error(text, false)
+            } else if let Some(text) = msg.strip_prefix(RUNTIME_ERROR_PREFIX) {
+                PyRuntimeError::new_err(text.to_string())
             } else {
                 PyValueError::new_err(msg.clone())
             }
