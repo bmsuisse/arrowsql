@@ -81,6 +81,11 @@ jobs:
           python -m venv .venv
           . "$(ls .venv/Scripts/activate .venv/bin/activate 2>/dev/null | head -1)"
           pip install "maturin>=1.9,<2.0" pytest pytest-timeout pytest-asyncio psutil
+          # Optional test dependencies from wheels only; tests needing a missing one skip.
+          grep -vE '^(#|$|maturin|pytest|psutil)' requirements-dev.txt | while read -r req; do
+            pip install --only-binary=:all: "$req" \
+              || echo "::warning::no wheel for $req on ${{ matrix.os }} / Python ${{ matrix.python }}"
+          done
           maturin develop
       - name: DB-free tests (DB tests skip without DB_CONNECTION_STRING)
         shell: bash

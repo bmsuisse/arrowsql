@@ -5,6 +5,7 @@ Port-only: upstream mssql-python has no ``aio`` module.
 """
 
 import asyncio
+import sys
 import time
 import uuid
 
@@ -114,6 +115,7 @@ def _silent_conn_str(port):
     return f"Server=tcp:127.0.0.1,{port};UID=sa;PWD=x;Encrypt=no;TrustServerCertificate=yes;Connection Timeout=60"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="aio is Unix-only")
 @pytest.mark.asyncio
 async def test_wait_for_connect_abandons_the_login():
     server, port, state = await _silent_server()
@@ -129,6 +131,7 @@ async def test_wait_for_connect_abandons_the_login():
         server.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="aio is Unix-only")
 @pytest.mark.asyncio
 async def test_wait_for_create_pool_abandons_the_logins():
     server, port, state = await _silent_server()

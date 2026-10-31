@@ -54,10 +54,6 @@ jobs:
           - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, manylinux: "2_28", smoke: native }
           - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, manylinux: musllinux_1_2, smoke: container, platform: linux/amd64, image: "python:3.13-alpine" }
           - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, manylinux: musllinux_1_2, smoke: container, platform: linux/arm64, image: "python:3.13-alpine" }
-          # No manylinux_2_28 image exists for i686; manylinux2014 is the newest policy.
-          - { runner: ubuntu-latest, target: i686-unknown-linux-gnu, manylinux: "2014", smoke: container, platform: linux/386, image: "python:3.13-slim" }
-          - { runner: ubuntu-latest, target: armv7-unknown-linux-gnueabihf, manylinux: "2_17", smoke: container, platform: linux/arm/v7, image: "python:3.13-slim" }
-          - { runner: ubuntu-latest, target: armv7-unknown-linux-musleabihf, manylinux: musllinux_1_2, smoke: container, platform: linux/arm/v7, image: "python:3.13-alpine" }
           - { runner: ubuntu-latest, target: powerpc64le-unknown-linux-gnu, manylinux: "2_28", smoke: container, platform: linux/ppc64le, image: "python:3.13-slim" }
           - { runner: ubuntu-latest, target: s390x-unknown-linux-gnu, manylinux: "2_28", smoke: container, platform: linux/s390x, image: "python:3.13-slim" }
     steps:
@@ -69,6 +65,9 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           rust-toolchain: stable
+          # --find-interpreter would also pick up the images' PyPy builds, which this
+          # crate does not support (PyUnicode_1BYTE_DATA is missing from PyPy's C API).
+          before-script-linux: rm -rf /opt/python/pp*
           args: --release --out dist --find-interpreter
       - uses: actions/upload-artifact@v4
         with:
@@ -161,7 +160,6 @@ jobs:
       matrix:
         include:
           - { runner: windows-latest, target: x86_64-pc-windows-msvc, arch: x64, name: x64, base: "3.10\n3.11\n3.12\n3.13\n3.14\n3.15", extra: "3.14t\n3.15t" }
-          - { runner: windows-latest, target: i686-pc-windows-msvc, arch: x86, name: x86, base: "3.10\n3.11\n3.12\n3.13\n3.14\n3.15", extra: "3.14t\n3.15t" }
           - { runner: windows-11-arm, target: aarch64-pc-windows-msvc, arch: arm64, name: arm64, base: "3.11\n3.12\n3.13\n3.14\n3.15", extra: "3.10\n3.14t\n3.15t" }
     steps:
       - uses: actions/checkout@v4

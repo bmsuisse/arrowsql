@@ -12,7 +12,9 @@ if ($existing) {
     $boot = Join-Path $work "SQL2022-SSEI-Expr.exe"
     Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?linkid=2216019" -OutFile $boot
     $media = Join-Path $work "media"
-    & $boot /Action=Download /MediaPath=$media /MediaType=Core /Quiet /IAcceptSqlServerLicenseTerms | Out-Host
+    New-Item -ItemType Directory -Force $media | Out-Null
+    $dl = Start-Process -FilePath $boot -ArgumentList "/Action=Download", "/MediaPath=$media", "/MediaType=Core", "/Quiet" -Wait -PassThru
+    Write-Host "bootstrapper exit code $($dl.ExitCode)"
     $pkg = Get-ChildItem $media -Filter "SQLEXPR*.exe" -Recurse | Select-Object -First 1
     if (-not $pkg) { throw "SQL Server Express media not downloaded" }
     $extract = Join-Path $work "extract"
