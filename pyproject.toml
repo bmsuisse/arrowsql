@@ -43,6 +43,9 @@ arrow = ["pyarrow>=14"]
 # Azure AD credential helpers (auth= / token_provider= with azure-identity credentials).
 azure = ["azure-identity"]
 
+[project.scripts]
+arrowsql-agent = "arrowsql.agent:main"
+
 [project.urls]
 Homepage = "https://github.com/bmsuisse/arrowsql"
 Repository = "https://github.com/bmsuisse/arrowsql"

@@ -25,6 +25,15 @@ Version numbers in this project are deliberately three different things:
 - Native Arrow: `cursor.arrow()`, `arrow_batch()`, `arrow_reader()`,
   `fetchall_arrow()`, `fetchmany_arrow()`, `arrow_stream()`, `read_arrow()`
   (partitioned parallel reads).
+- Agent mode (`arrowsql.agent`, `python -m arrowsql.agent`, console script
+  `arrowsql-agent`), ported from arrowbricks: `query()` / `query_cursor()` return
+  a compact typed TSV (or Markdown) preview with a strict byte ceiling, row and
+  cell limits, an optional head/tail sample, a footer that never claims an
+  unknown total, `-- rows_affected` / `-- message` lines and every result set;
+  failures are JSON with a category, the server's own message and a recovery
+  hint (SQL Server error number, then SQLSTATE). Rendering is Rust
+  (`ddbc_bindings.AgentRender`) over the Arrow sink; `sql_variant` is now
+  readable through it.
 - Native bulk copy (rows and Arrow), `write_arrow()` parallel loads.
 - Native asyncio (`arrowsql.aio`) with a built-in pool (Unix only).
 - `sqlstate` and `native_error` on every exception
