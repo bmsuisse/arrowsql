@@ -10,6 +10,11 @@ publish = false
 name = "ddbc_bindings"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Legacy TLS: native-tls (OpenSSL) + OpenSSL Always Encrypted crypto instead of rustls.
+# Adds ~8 MB (libssl, libcrypto, libzstd) to the wheel. Build: maturin build --features native-tls
+native-tls = ["mssql-tds/native-tls-backend"]
+
 [dependencies]
 pyo3 = { version = "0.29.0", features = ["extension-module"] }
 # Microsoft's native TDS implementation (MIT). Pinned: the API is pre-1.0.

@@ -54,7 +54,9 @@ fn get_or_build_connector(
     if validation.use_alpn {
         builder.request_alpns(&[TDS_8_ALPN_PROTOCOL]);
     }
-    let connector = builder.build()?;
+    let connector = builder
+        .build()
+        .map_err(|e| crate::error::Error::TlsError(e.to_string()))?;
 
     CONNECTOR_CACHE
         .write()
