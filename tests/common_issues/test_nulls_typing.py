@@ -20,12 +20,6 @@ from mssql_python.exceptions import IntegrityError
 
 VARBINARY_TYPES = ["VARBINARY(10)", "VARBINARY(MAX)"]
 
-UPSTREAM_VARBINARY_NONE_REASON = (
-    "upstream binds a None parameter as a character type, so inserting None into a "
-    "VARBINARY column fails with 'Implicit conversion from data type varchar to "
-    "varbinary is not allowed' (single execute and executemany alike)"
-)
-
 
 def _row(cursor):
     """Fetch one row as a plain tuple (upstream Row objects do not == tuples)."""
@@ -148,13 +142,16 @@ def test_sql_null_literal_into_varbinary_works(cursor):
     assert _row(cursor)[0] is None
 
 
-@pytest.mark.upstream_bug(reason=UPSTREAM_VARBINARY_NONE_REASON)
-@pytest.mark.xfail(strict=True, reason="upstream bug")
+# None into VARBINARY needs the server to describe the parameter, which it can
+# only do for permanent tables. For #temp tables upstream pins a ProgrammingError
+# (tests/upstream/test_004_cursor.py test_gh627_temp_table_null_varbinary_raises,
+# test_gh627_executemany_temp_table_raises) and the port matches it, so these use
+# permanent tables.
 @pytest.mark.parametrize("varbinary_type", VARBINARY_TYPES)
-def test_none_param_into_varbinary_column_inserts_null(cursor, varbinary_type):
-    cursor.execute(f"CREATE TABLE #t_vb_none (v {varbinary_type} NULL)")
-    cursor.execute("INSERT INTO #t_vb_none (v) VALUES (?)", (None,))
-    cursor.execute("SELECT v FROM #t_vb_none")
+def test_none_param_into_varbinary_column_inserts_null(cursor, table_name, varbinary_type):
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (v {varbinary_type} NULL)")
+    cursor.execute(f"INSERT INTO dbo.{table_name} (v) VALUES (?)", (None,))
+    cursor.execute(f"SELECT v FROM dbo.{table_name}")
     assert _row(cursor)[0] is None
 
 
@@ -200,15 +197,14 @@ def test_executemany_all_none_column_inserts_nulls(cursor):
     assert _rows(cursor) == [(1, None, None), (2, None, None), (3, None, None)]
 
 
-@pytest.mark.upstream_bug(reason=UPSTREAM_VARBINARY_NONE_REASON)
-@pytest.mark.xfail(strict=True, reason="upstream bug")
-def test_executemany_all_none_varbinary_column_inserts_nulls(cursor):
-    cursor.execute("CREATE TABLE #t_em_vb (id INT NOT NULL, payload VARBINARY(10) NULL)")
+def test_executemany_all_none_varbinary_column_inserts_nulls(cursor, table_name):
+    # Permanent table: see the comment above test_none_param_into_varbinary_column_inserts_null.
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (id INT NOT NULL, payload VARBINARY(10) NULL)")
     cursor.executemany(
-        "INSERT INTO #t_em_vb (id, payload) VALUES (?, ?)",
+        f"INSERT INTO dbo.{table_name} (id, payload) VALUES (?, ?)",
         [(1, None), (2, None)],
     )
-    cursor.execute("SELECT id, payload FROM #t_em_vb ORDER BY id")
+    cursor.execute(f"SELECT id, payload FROM dbo.{table_name} ORDER BY id")
     assert _rows(cursor) == [(1, None), (2, None)]
 
 
