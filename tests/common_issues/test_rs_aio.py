@@ -5,6 +5,7 @@ Port-only: upstream mssql-python has no ``aio`` module (its async preview is
 """
 
 import asyncio
+import sys
 import datetime
 import decimal
 import threading
@@ -482,6 +483,7 @@ async def test_connection_execute_cursors_are_retired(conn):
     assert await _open_cursors(conn) == 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="aio is Unix-only")
 def test_closed_event_loop_is_collected():
     import gc
     import weakref
