@@ -35,8 +35,8 @@ were loaded by `import mssql_python`. The expected result is `none`.
 
 `Cargo.toml` `[profile.release]`:
 
-* `opt-level = "s"`, `lto = "fat"`, `codegen-units = 1`. `s` is the size/speed
-  compromise, see "Lean profile" below.
+* `opt-level = "s"` for the cold crates, 3 for the hot ones (per-package
+  entries), `lto = "fat"`, `codegen-units = 1`. See "Lean profile" below.
 * `panic = "unwind"`: required by PyO3. Panics are converted to Python
   exceptions at the FFI boundary, so the abort strategy cannot be used.
 * `strip = true`: removes symbols from the `.so`. Runtime behavior does not
@@ -129,7 +129,7 @@ bundles it into `*.libs/`, which is the 3.2 MB above.
 | `tokio` `full` and `tokio-util` `full` narrowed to the features the crate uses (`mssql-tds` `Cargo.toml`) | `.so` about 20 KiB smaller, `signal-hook-registry` and a duplicate `hashbrown` dropped from the lock | adopted |
 | `opt-level = "s"` for `x509-parser`, `der-parser`, `asn1-rs`, `nom` (cold: connect-time cert parse) | a further 8 KiB smaller, below noise | rejected: not worth a per-package profile entry |
 | `opt-level = "s"` for `mssql-tds` only | `.so` +12% | rejected (earlier run) |
-| `opt-level = "s"` for everything | `.so` +3% | rejected (earlier run, before the TLS and Arrow work). Re-measured in the lean lane: adopted, see "Lean profile" |
+| `opt-level = "s"` for everything | `.so` +3% | rejected (earlier run, before the TLS and Arrow work). Re-measured in the lean lane: 5-6% slower on reads, so only the cold crates keep `s`, see "Lean profile" |
 | `encoding_rs/no-static-ideograph-encoder-tables` | not built | rejected by reading code: `mssql-tds` encodes GBK/Big5/EUC-KR for varchar parameters (`vendor/mssql-tds/src/datatypes/sql_string/encoding.rs`), so the feature would break those writes |
 | `abi3-py310` | not built, not benchmarked | open, see below |
 
@@ -230,7 +230,31 @@ Starting point: wheel 3,614,126 B, installed 8,008 KiB, `.so` 7,308 KiB.
 | `opt-level = "s"` for the whole graph (replaces the per-package `s` entries for rustls and x509-parser) | 2,975,495 B | 6,396 KiB | 5,696 KiB |
 | `.cargo/config.toml`: lld `--icf=all` and `-z pack-relative-relocs` | 2,942,855 B | 6,176 KiB | 5,476 KiB |
 
-Result: the wheel is 2.94 MB (target 3.0 MB, met). Installed is 6,176 KiB
+Wave F integration decision (this supersedes the lane's "s everywhere" result
+below, which is kept as measured by the lane): "s" for the whole graph costs
+speed, so the hot crates go back to 3. Alternating release builds in one
+session, rust_port, `--repeats 5 --no-prepare`, median of 4 rounds (3 for M2),
+machine load 3-5, noise about +-3%:
+
+| variant | `.so` | fetchall | all_3m.fetchmany | select1_x5000 | arrow |
+|---|---|---|---|---|---|
+| opt-level 3 everywhere (no ICF/RELR) | 7,484 KB | 0.1096 (0%) | 2.42 (0%) | 0.614 (0%) | 0.057 (0%) |
+| "s" everywhere + ICF/RELR | 5,608 KB | 0.1150 (+4.9%) | 2.57 (+6%) | 0.623 (+2%) | 0.057 (0%) |
+| "s" + mimalloc, libmimalloc-sys, encoding_rs, bytes, memchr, simdutf8, ring, arrow-* at 3 | 5,916 KB | +4.0% | +5.7% | +4.2% | +0.9% |
+| M2: that plus ddbc_bindings, mssql-tds, pyo3, tokio at 3 (kept) | 7,177 KB | -3.3% | -1.3% | -2.8% | -5.6% (vs opt-level 3, 3 rounds) |
+
+The code that decodes rows (`ddbc_bindings` with the inlined `mssql-tds`
+generics, `pyo3`, `tokio`) has to be at 3; the small leaf crates alone do not
+recover the loss. M2 is within noise of opt-level 3 on every hot read, and still
+smaller than it through ICF/RELR, the cold crates at "s" and `strip`. A
+per-package entry on `ddbc_bindings` makes Cargo ignore `[profile.release]
+strip`, so `pyproject.toml` sets `[tool.maturin] strip = true`.
+
+Glibc: `.cargo/config.toml` passes `-z pack-relative-relocs` (DT_RELR), which
+needs glibc >= 2.36 at load time. A `manylinux_2_28` build must drop that flag
+(there is no CI wheel build yet).
+
+Result of the lane (opt-level "s" everywhere): the wheel is 2.94 MB (target 3.0 MB, met). Installed is 6,176 KiB
 (target 6 MB, missed by about 3%, 176 KiB over 6,000 KiB). The `.so` is 5.6 MB
 and `mssql_python/*.py` is 0.7 MB (upstream-identical, not touched).
 
