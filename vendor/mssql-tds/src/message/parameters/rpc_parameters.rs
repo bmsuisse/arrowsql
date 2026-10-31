@@ -439,7 +439,7 @@ impl RpcParameter {
 
         let len_in_metadata = match value {
             SqlType::NVarcharMax(_) | SqlType::VarBinaryMax(_) | SqlType::VarcharMax(_) => {
-                "MAX".to_string()
+                "max".to_string()
             }
             SqlType::Varchar(_, len) | SqlType::VarBinary(_, len) | SqlType::NVarchar(_, len) => {
                 // The user may have specified an large length length.
@@ -451,7 +451,7 @@ impl RpcParameter {
                     && matches!(value, SqlType::Varchar(_, _) | SqlType::VarBinary(_, _)))
                     || (*len > 4000 && matches!(value, SqlType::NVarchar(_, _)))
                 {
-                    "MAX".to_string()
+                    "max".to_string()
                 } else {
                     len.to_string()
                 }
@@ -985,14 +985,14 @@ fn build_parameter_list_string_impl(
             if first_param {
                 first_param = false;
             } else {
-                params_list.push_str(", ");
+                params_list.push(',');
             }
             // OUTPUT has to appear in the declaration as well as at the call
             // site; sp_executesql silently drops the value if either is
             // missing, which is why an output parameter over the text path
             // used to come back unset.
-            let output = if param.is_output() { "OUTPUT " } else { "" };
-            params_list.push_str(&format!("{param_name} {param_type_name} {output}"));
+            let output = if param.is_output() { " OUTPUT" } else { "" };
+            params_list.push_str(&format!("{param_name} {param_type_name}{output}"));
         }
     }
     Ok(())
@@ -1734,7 +1734,7 @@ mod tests {
 
         let mut declarations = String::new();
         build_parameter_list_string(&vec![param.clone()], &mut declarations).unwrap();
-        assert_eq!(declarations, "@P1 decimal(12,3) ");
+        assert_eq!(declarations, "@P1 decimal(12,3)");
 
         // Layout: name (len 3, "@P1" UTF-16LE), status, then TYPE_INFO
         // `NUMERICN, max_len, precision, scale`.
@@ -1779,7 +1779,7 @@ mod tests {
             let parameter = parameter.with_numeric_declaration(12, 4).unwrap();
             let mut declaration = String::new();
             build_parameter_list_string(&vec![parameter.clone()], &mut declaration).unwrap();
-            assert_eq!(declaration, format!("@P1 {type_name}(12,4) "));
+            assert_eq!(declaration, format!("@P1 {type_name}(12,4)"));
             assert_eq!(serialize_param(&parameter), wire);
         }
     }
