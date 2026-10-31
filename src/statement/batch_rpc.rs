@@ -290,7 +290,7 @@ pub fn execute_many_rows(
     }
     let Some((mut cells, nulls)) = convert_rows(rows, ncols) else { return Ok(None) };
     let Ok(all_null) = batch::normalize(&mut cells, &nulls) else { return Ok(None) };
-    let ret = py.detach(|| execute_batch(&stmt, sql, cells, all_null));
+    let ret = crate::runtime::detach_interruptible(py, &stmt, || execute_batch(&stmt, sql, cells, all_null))?;
     Ok(Some(ret))
 }
 

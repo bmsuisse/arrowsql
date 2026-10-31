@@ -23,7 +23,11 @@
 //! only exist in the parent.
 
 use std::future::Future;
+use std::cell::{Cell, RefCell};
 use std::ops::{Deref, DerefMut};
+use std::pin::pin;
+use std::task::Poll;
+use std::time::Duration;
 use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use mssql_tds::connection::client_context::ClientContext;
@@ -32,7 +36,11 @@ use mssql_tds::connection_provider::tds_connection_provider::TdsConnectionProvid
 use mssql_tds::core::TdsResult;
 
 use parking_lot::Mutex;
+use pyo3::prelude::*;
 use tokio::runtime::{Builder, Runtime};
+use tokio::time::Instant;
+
+use crate::statement::StmtShared;
 
 /// The runtime of this process and the pid that built it. Readers check the
 /// pid first, without a lock: a forked child must never need a lock another
@@ -112,7 +120,97 @@ impl SyncClient {
     {
         let Self { client, io } = self;
         let _spin = mssql_tds::connection::transport::busy_poll::ThreadGuard::enter();
-        io.block_on(op(client))
+        if WATCHED.with(Cell::get).is_null() {
+            return io.block_on(op(client));
+        }
+        io.block_on(async move {
+            let mut work = pin!(op(client));
+            let mut slice = pin!(tokio::time::sleep(SIGNAL_SLICE));
+            let mut watching = true;
+            std::future::poll_fn(|cx| {
+                if let Poll::Ready(out) = work.as_mut().poll(cx) {
+                    return Poll::Ready(out);
+                }
+                while watching && slice.as_mut().poll(cx).is_ready() {
+                    watching = !interrupted();
+                    slice.as_mut().reset(Instant::now() + SIGNAL_SLICE);
+                }
+                Poll::Pending
+            })
+            .await
+        })
+    }
+}
+
+/// How often a wait on the main thread looks at pending Python signals.
+const SIGNAL_SLICE: Duration = Duration::from_millis(100);
+
+thread_local! {
+    /// The statement whose execution or fetch this thread is running with the
+    /// GIL released (see [`detach_interruptible`]); null otherwise.
+    static WATCHED: Cell<*const StmtShared> = const { Cell::new(std::ptr::null()) };
+    /// The exception a signal handler raised while the statement was waited on.
+    static RAISED: RefCell<Option<PyErr>> = const { RefCell::new(None) };
+    /// 0 = not asked yet, 1 = main thread, 2 = another thread.
+    static MAIN_THREAD: Cell<u8> = const { Cell::new(0) };
+}
+
+fn on_main_thread(py: Python<'_>) -> bool {
+    if MAIN_THREAD.with(Cell::get) == 0 {
+        let is_main = || -> PyResult<bool> {
+            let threading = py.import("threading")?;
+            Ok(threading.call_method0("current_thread")?.is(&threading.call_method0("main_thread")?))
+        };
+        MAIN_THREAD.with(|m| m.set(if is_main().unwrap_or(false) { 1 } else { 2 }));
+    }
+    MAIN_THREAD.with(Cell::get) == 1
+}
+
+/// Look at Python's pending signals (only the main thread can). When a signal
+/// handler raises (Ctrl-C), cancel the watched statement on the server and
+/// keep the exception for [`detach_interruptible`] to re-raise. Returns whether
+/// to stop looking.
+fn interrupted() -> bool {
+    let stmt = WATCHED.with(Cell::get);
+    Python::attach(|py| {
+        if !on_main_thread(py) {
+            return true;
+        }
+        match py.check_signals() {
+            Ok(()) => false,
+            Err(err) => {
+                RAISED.with(|r| *r.borrow_mut() = Some(err));
+                // SAFETY: `detach_interruptible` keeps the statement alive
+                // for as long as the pointer is published.
+                unsafe { &*stmt }.cancel_execution();
+                true
+            }
+        }
+    })
+}
+
+/// [`Python::detach`] for running a statement: while `f` waits for the server
+/// on the main thread, Python signals are looked at every [`SIGNAL_SLICE`].
+/// Ctrl-C cancels the statement on the server and raises its
+/// `KeyboardInterrupt` once `f` has returned, leaving the connection usable.
+pub fn detach_interruptible<R: Send>(
+    py: Python<'_>,
+    stmt: &StmtShared,
+    f: impl FnOnce() -> R + Send,
+) -> PyResult<R> {
+    struct Restore(*const StmtShared);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            WATCHED.with(|w| w.set(self.0));
+        }
+    }
+    let out = py.detach(|| {
+        let _restore = Restore(WATCHED.with(|w| w.replace(std::ptr::from_ref(stmt))));
+        f()
+    });
+    match RAISED.with(|r| r.borrow_mut().take()) {
+        Some(err) => Err(err),
+        None => Ok(out),
     }
 }
 
