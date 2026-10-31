@@ -185,7 +185,12 @@ def _load_worker(connection_str, table, pending, stop, bulk_options, connect_kwa
                     yield piece
                     piece = _next(pending, stop)
 
-            return cursor.bulkcopy_arrow(table, slices(), table_lock=True, **bulk_options)
+            import pyarrow as pa
+
+            # A RecordBatchReader is an Arrow C stream, which the native bulk
+            # copy consumes directly; a bare generator would need mssql_py_core.
+            reader = pa.RecordBatchReader.from_batches(first.schema, slices())
+            return cursor.bulkcopy_arrow(table, reader, table_lock=True, **bulk_options)
         finally:
             cursor.close()
 

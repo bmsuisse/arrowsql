@@ -5,6 +5,7 @@ row counts and contents across worker counts, the non-heap fallback, error
 propagation and the argument checks.
 """
 
+import sys
 import warnings
 
 import pytest
@@ -50,6 +51,18 @@ def test_loads_every_row_into_heap(conn_str, cursor, table_name, workers):
     assert count == N_ROWS
     assert total == sum(range(N_ROWS))
     assert (low, high) == (0, N_ROWS - 1)
+
+
+def test_parallel_load_needs_no_mssql_py_core(conn_str, cursor, table_name, monkeypatch):
+    # The base install has no mssql_py_core: every worker must use the native bulk copy.
+    monkeypatch.setitem(sys.modules, "mssql_py_core", None)
+    monkeypatch.setitem(sys.modules, "mssql_py_core.mssql_py_core", None)
+    table = f"dbo.{table_name}"
+    _create_heap(cursor, table)
+
+    result = write_arrow(conn_str, table, _source(), workers=4)
+
+    assert result["rows_copied"] == N_ROWS
 
 
 def test_parallel_load_keeps_row_contents(conn_str, cursor, table_name):
