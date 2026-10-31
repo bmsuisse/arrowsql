@@ -66,6 +66,8 @@ pub struct StmtState {
     /// next result). Background Arrow producers stop when it no longer
     /// matches theirs.
     pub generation: u64,
+    /// What `DDBCSQLDescribeCol` last returned.
+    pub(super) describe_cache: Option<describe::DescribeCache>,
 }
 
 impl StmtState {
