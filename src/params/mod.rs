@@ -84,6 +84,15 @@ impl ParamSet {
             .map(|(i, t)| RpcParameter::new(Some(format!("@P{}", i + 1)), StatusFlags::NONE, t))
             .collect()
     }
+
+    /// The parameters without names, for `execute_sp_executesql_positional`,
+    /// which names parameter `n` `@Pn` itself.
+    pub fn into_unnamed_rpc(self) -> Vec<RpcParameter> {
+        self.types
+            .into_iter()
+            .map(|t| RpcParameter::new(None, StatusFlags::NONE, t))
+            .collect()
+    }
 }
 
 /// Binds `params` as RPC parameters. `codec` encodes narrow text bound as

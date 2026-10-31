@@ -37,10 +37,25 @@ pub fn translate_call_escape(sql: &str) -> Option<String> {
 }
 
 pub fn rewrite_qmarks(sql: &str) -> (String, usize) {
-    if let Some(translated) = translate_call_escape(sql) {
-        return rewrite_qmarks_plain(&translated);
+    // A repeated statement (multirow inserts, loops) skips the scan.
+    static LAST: std::sync::Mutex<Option<(String, String, usize)>> = std::sync::Mutex::new(None);
+    if let Ok(last) = LAST.lock()
+        && let Some((source, rewritten, count)) = last.as_ref()
+        && source == sql
+    {
+        return (rewritten.clone(), *count);
     }
-    rewrite_qmarks_plain(sql)
+    let (rewritten, count) = match translate_call_escape(sql) {
+        Some(translated) => rewrite_qmarks_plain(&translated),
+        None => rewrite_qmarks_plain(sql),
+    };
+    // Only worth remembering when large enough for the scan to matter.
+    if sql.len() >= 256
+        && let Ok(mut last) = LAST.lock()
+    {
+        *last = Some((sql.to_owned(), rewritten.clone(), count));
+    }
+    (rewritten, count)
 }
 
 fn rewrite_qmarks_plain(sql: &str) -> (String, usize) {

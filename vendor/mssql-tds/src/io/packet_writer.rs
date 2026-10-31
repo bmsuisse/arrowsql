@@ -413,6 +413,21 @@ impl<'a> PacketWriter<'a> {
         Ok(())
     }
 
+    /// Appends `parts` back to back when they fit the current packet with room
+    /// to spare, the same bound `write_fixed_bytes` uses; otherwise writes
+    /// nothing and returns `false` so the caller takes its general path.
+    #[inline]
+    pub(crate) fn try_write_parts(&mut self, parts: &[&[u8]]) -> bool {
+        let total: usize = parts.iter().map(|part| part.len()).sum();
+        if !self.has_space(total + 1) {
+            return false;
+        }
+        for part in parts {
+            let _ = std::io::Write::write_all(&mut self.payload_cursor, part);
+        }
+        true
+    }
+
     async fn handle_overflow_if_needed(&mut self) -> TdsResult<()> {
         // If the payload size is greater than the max payload size, send the packet.
         if self.position() >= (self.max_payload_size as i32) {

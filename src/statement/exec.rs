@@ -362,7 +362,8 @@ fn run_command(ex: &mut Exclusive<'_>, command: Command) -> SqlReturn {
                 return SQL_ERROR;
             }
             let opts = options(ex.timeout, ex.cancel);
-            ex.client.block_on(|c| c.execute_sp_executesql(sql, params.into_rpc(), opts))
+            let rp = params.into_unnamed_rpc();
+            ex.client.block_on(|c| c.execute_sp_executesql_positional(sql, rp, opts))
         }
         Command::Typed(sql, params) => {
             let opts = options(ex.timeout, ex.cancel);

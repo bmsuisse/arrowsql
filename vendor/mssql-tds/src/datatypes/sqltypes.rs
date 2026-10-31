@@ -168,7 +168,7 @@ pub(crate) const NO_XML_SCHEMA: u8 = 0x00;
 const LEGACY_LOB_MAX_BYTES: usize = 0x7fff_ffff;
 
 impl SqlType {
-    fn get_nullable_type(&self) -> NullableTdsType {
+    pub(crate) fn get_nullable_type(&self) -> NullableTdsType {
         match self {
             SqlType::Bit(_)
             | SqlType::TinyInt(_)

@@ -30,6 +30,9 @@ const SHORT_VARTYPE_MAX_BYTES: usize = 8000;
 /// exceed [`SHORT_VARTYPE_MAX_BYTES`]. Mirrors JDBC `DataTypes.SQL_USHORTVARMAXLEN`.
 const SQL_USHORTVARMAXLEN: u16 = 0xFFFF;
 
+/// Wire size of a DECIMAL/NUMERIC value at precision 38: sign byte + 16 magnitude bytes.
+const DECIMAL_WIRE_SIZE: u8 = 17;
+
 bitflags! {
     /// TDS RPC parameter status flags.
     ///
@@ -378,6 +381,52 @@ impl RpcParameter {
         }
     }
 
+    /// Appends the declaration of the common scalar types without building an
+    /// intermediate `String`; the text equals what [`Self::sql_declaration`]
+    /// returns. `false` (nothing appended) leaves everything else to it.
+    fn write_plain_declaration(&self, out: &mut String) -> bool {
+        if self.streamed_declaration.is_some()
+            || self.numeric_declaration.is_some()
+            || self.type_metadata.is_some()
+        {
+            return false;
+        }
+        let RpcValue::Materialized(value) = &self.value else { return false };
+        match value {
+            SqlType::Int(_) => out.push_str("int"),
+            SqlType::BigInt(_) => out.push_str("bigint"),
+            SqlType::SmallInt(_) => out.push_str("smallint"),
+            SqlType::TinyInt(_) => out.push_str("tinyint"),
+            SqlType::Bit(_) => out.push_str("bit"),
+            SqlType::Float(_) => out.push_str("float"),
+            SqlType::Real(_) => out.push_str("real"),
+            SqlType::Varchar(_, len) if *len <= 8000 => {
+                out.push_str("varchar(");
+                push_number(out, u32::from(*len));
+                out.push(')');
+            }
+            SqlType::NVarchar(_, len) if *len <= 4000 => {
+                out.push_str("nvarchar(");
+                push_number(out, u32::from(*len));
+                out.push(')');
+            }
+            SqlType::DateTime2(Some(v)) => {
+                out.push_str("datetime2(");
+                push_number(out, u32::from(v.time.get_scale()));
+                out.push(')');
+            }
+            SqlType::Decimal(Some(parts)) | SqlType::Numeric(Some(parts)) => {
+                out.push_str(if matches!(value, SqlType::Decimal(_)) { "decimal(" } else { "numeric(" });
+                push_number(out, u32::from(parts.precision));
+                out.push(',');
+                push_number(out, u32::from(parts.scale));
+                out.push(')');
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// Requires this parameter to be encrypted under Always Encrypted.
     ///
     /// When set, the driver fails with a usage error if the server reports the
@@ -715,6 +764,17 @@ impl RpcParameter {
             RpcValue::Materialized(value) => value,
             RpcValue::Streamed(_) => unreachable!("streamed value handled above"),
         };
+        if options_written
+            && self.type_metadata.is_none()
+            && Self::write_plain_value(
+                packet_writer,
+                value,
+                db_collation,
+                self.narrow_string_byte_limit,
+            )
+        {
+            return Ok(());
+        }
         encoder
             .encode_sqlvalue(
                 packet_writer,
@@ -725,6 +785,109 @@ impl RpcParameter {
             )
             .await?;
         Ok(())
+    }
+
+    /// Writes TYPE_INFO and value of the common, non-NULL scalar types straight
+    /// into the packet buffer, producing the bytes the general encoder does.
+    /// Returns `false`, having written nothing, for every other value and for
+    /// anything that does not fit the packet's remaining space.
+    #[inline]
+    fn write_plain_value(
+        packet_writer: &mut PacketWriter<'_>,
+        value: &SqlType,
+        collation: &SqlCollation,
+        narrow_string_byte_limit: Option<usize>,
+    ) -> bool {
+        let mut buf = [0u8; 32];
+        match value {
+            SqlType::Int(Some(v)) => {
+                buf[..3].copy_from_slice(&[value.get_nullable_type() as u8, 4, 4]);
+                buf[3..7].copy_from_slice(&v.to_le_bytes());
+                packet_writer.try_write_parts(&[&buf[..7]])
+            }
+            SqlType::Bit(Some(v)) => {
+                buf[..4].copy_from_slice(&[value.get_nullable_type() as u8, 1, 1, u8::from(*v)]);
+                packet_writer.try_write_parts(&[&buf[..4]])
+            }
+            SqlType::TinyInt(Some(v)) => {
+                buf[..4].copy_from_slice(&[value.get_nullable_type() as u8, 1, 1, *v]);
+                packet_writer.try_write_parts(&[&buf[..4]])
+            }
+            SqlType::SmallInt(Some(v)) => {
+                buf[..3].copy_from_slice(&[value.get_nullable_type() as u8, 2, 2]);
+                buf[3..5].copy_from_slice(&v.to_le_bytes());
+                packet_writer.try_write_parts(&[&buf[..5]])
+            }
+            SqlType::BigInt(Some(v)) => {
+                buf[..3].copy_from_slice(&[value.get_nullable_type() as u8, 8, 8]);
+                buf[3..11].copy_from_slice(&v.to_le_bytes());
+                packet_writer.try_write_parts(&[&buf[..11]])
+            }
+            SqlType::Float(Some(v)) => {
+                buf[..3].copy_from_slice(&[value.get_nullable_type() as u8, 8, 8]);
+                buf[3..11].copy_from_slice(&v.to_le_bytes());
+                packet_writer.try_write_parts(&[&buf[..11]])
+            }
+            SqlType::Decimal(Some(parts)) | SqlType::Numeric(Some(parts)) => {
+                buf[..4].copy_from_slice(&[
+                    value.get_nullable_type() as u8,
+                    DECIMAL_WIRE_SIZE,
+                    parts.precision,
+                    parts.scale,
+                ]);
+                // Value: length, sign, four little-endian words (precision 38).
+                buf[4] = DECIMAL_WIRE_SIZE;
+                buf[5] = u8::from(parts.is_positive);
+                for word in 0..4 {
+                    buf[6 + word * 4..10 + word * 4].copy_from_slice(&parts.word(word).to_le_bytes());
+                }
+                packet_writer.try_write_parts(&[&buf[..22]])
+            }
+            SqlType::DateTime2(Some(v)) if v.time.scale == 7 && v.days < (1 << 24) => {
+                // Scale 7: 5 time bytes then 3 date bytes, 8 in all.
+                buf[..3].copy_from_slice(&[value.get_nullable_type() as u8, 7, 8]);
+                buf[3..8].copy_from_slice(&v.time.time_nanoseconds.to_le_bytes()[..5]);
+                buf[8..11].copy_from_slice(&v.days.to_le_bytes()[..3]);
+                packet_writer.try_write_parts(&[&buf[..11]])
+            }
+            SqlType::NVarchar(Some(text), len) if *len <= 4000 && text.is_utf16() => {
+                let bytes = &text.bytes;
+                if bytes.len() % 2 != 0 || bytes.len() / 2 > usize::from(*len) {
+                    return false;
+                }
+                buf[0] = value.get_nullable_type() as u8;
+                buf[1..3].copy_from_slice(&(*len * 2).to_le_bytes());
+                buf[3..7].copy_from_slice(&collation.info.to_le_bytes());
+                buf[7] = collation.sort_id;
+                buf[8..10].copy_from_slice(&(bytes.len() as u16).to_le_bytes());
+                packet_writer.try_write_parts(&[&buf[..10], bytes])
+            }
+            SqlType::Varchar(Some(text), len)
+                if *len <= 8000 && narrow_string_byte_limit.is_none() && text.is_utf16() =>
+            {
+                // ASCII text in UTF-16 narrows to its low bytes in every
+                // ASCII-compatible code page.
+                let bytes = &text.bytes;
+                let chars = bytes.len() / 2;
+                let mut narrow = [0u8; 256];
+                if bytes.len() % 2 != 0 || chars > narrow.len() || chars > usize::from(*len) {
+                    return false;
+                }
+                for (slot, unit) in narrow.iter_mut().zip(bytes.chunks_exact(2)) {
+                    if unit[1] != 0 || unit[0] >= 0x80 {
+                        return false;
+                    }
+                    *slot = unit[0];
+                }
+                buf[0] = value.get_nullable_type() as u8;
+                buf[1..3].copy_from_slice(&len.to_le_bytes());
+                buf[3..7].copy_from_slice(&collation.info.to_le_bytes());
+                buf[7] = collation.sort_id;
+                buf[8..10].copy_from_slice(&(chars as u16).to_le_bytes());
+                packet_writer.try_write_parts(&[&buf[..10], &narrow[..chars]])
+            }
+            _ => false,
+        }
     }
 
     /// Marks this parameter as encrypted, supplying the ciphertext (or `None`
@@ -976,23 +1139,65 @@ fn build_parameter_list_string_impl(
     named_params: &Vec<RpcParameter>,
     params_list: &mut String,
 ) -> TdsResult<()> {
+    build_list(named_params, params_list, false)
+}
+
+/// Like [`build_parameter_list_string`] for parameters built without names:
+/// parameter `n` (1-based) is declared as `@Pn`.
+pub(crate) fn build_positional_parameter_list_string(
+    params: &Vec<RpcParameter>,
+    params_list: &mut String,
+) -> TdsResult<()> {
+    build_list(params, params_list, true)
+}
+
+fn push_number(out: &mut String, mut n: u32) {
+    let mut digits = [0u8; 10];
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    // All ASCII digits.
+    out.push_str(std::str::from_utf8(&digits[at..]).unwrap_or(""));
+}
+
+fn build_list(params: &[RpcParameter], params_list: &mut String, ordinal_names: bool) -> TdsResult<()> {
     let mut first_param = true;
-    for param in named_params {
-        if let Some(param_name) = &param.name {
-            // TODO: while persisting types with length, we need to compute the length and
-            // add the length after the type name. e.g. Nvarchar(200), varchar(100) etc.
-            let param_type_name = param.sql_declaration()?;
-            if first_param {
-                first_param = false;
-            } else {
-                params_list.push(',');
+    for (index, param) in params.iter().enumerate() {
+        if !ordinal_names && param.name.is_none() {
+            continue;
+        }
+        if first_param {
+            first_param = false;
+        } else {
+            params_list.push(',');
+        }
+        match &param.name {
+            Some(name) if !ordinal_names => params_list.push_str(name),
+            _ => {
+                params_list.push_str("@P");
+                push_number(params_list, (index + 1) as u32);
             }
-            // OUTPUT has to appear in the declaration as well as at the call
-            // site; sp_executesql silently drops the value if either is
-            // missing, which is why an output parameter over the text path
-            // used to come back unset.
-            let output = if param.is_output() { " OUTPUT" } else { "" };
-            params_list.push_str(&format!("{param_name} {param_type_name}{output}"));
+        }
+        params_list.push(' ');
+        // Appends nothing when it declines.
+        if !param.is_output() && param.write_plain_declaration(params_list) {
+            continue;
+        }
+        // TODO: while persisting types with length, we need to compute the length and
+        // add the length after the type name. e.g. Nvarchar(200), varchar(100) etc.
+        params_list.push_str(&param.sql_declaration()?);
+        // OUTPUT has to appear in the declaration as well as at the call
+        // site; sp_executesql silently drops the value if either is
+        // missing, which is why an output parameter over the text path
+        // used to come back unset.
+        if param.is_output() {
+            params_list.push_str(" OUTPUT");
         }
     }
     Ok(())
