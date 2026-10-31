@@ -18,6 +18,10 @@ where possible, and the upstream test suite is the compatibility bar.
   directly via the Arrow PyCapsule interface.
 - Partitioned parallel reads: `mssql_python.read_arrow(conn_str, query,
   partition_on=, partitions=)`.
+- Native bulk copy (rows and Arrow) and parallel loads with
+  `mssql_python.write_arrow(conn_str, table, source, workers=N)`.
+- Native asyncio: `mssql_python.aio` with a built-in pool.
+- Free-threaded CPython (3.15t) support; zero required dependencies.
 - `sqlstate` and `native_error` on every exception
   ([upstream #581](https://github.com/microsoft/mssql-python/issues/581)).
 
@@ -65,49 +69,34 @@ for capsule streams.
 
 ### Async
 
-There are two options.
-
-**1. Threads over the sync driver (recommended).** The Rust core releases the
-GIL for all network I/O, so `asyncio.to_thread` gives real concurrency. Eight
-one-second queries finish in about 1.1 s:
-
-```python
-import asyncio, mssql_python
-
-def total_for(trip_id: int):
-    with mssql_python.connect(conn_str) as conn:  # pooled
-        cur = conn.cursor()
-        cur.execute("SELECT total_amount FROM dbo.yellow_trips WHERE trip_id = ?", (trip_id,))
-        return cur.fetchone()[0]
-
-async def main():
-    totals = await asyncio.gather(*(asyncio.to_thread(total_for, i) for i in range(1, 9)))
-    print(totals)
-
-asyncio.run(main())
-```
-
-**2. Native async (preview).** Upstream mssql-python ships an experimental
-async API backed by Microsoft's `mssql_py_core`, not by this project's Rust
-core. It is private (`_AsyncConnection`), emits a `FutureWarning`, and its
-signatures may change without notice:
+`mssql_python.aio` is native asyncio on this project's Rust core: waits never
+hold the GIL, `execute` returns the first rows itself, and a pool is built in.
+Cancelling a task (including `asyncio.wait_for` timeouts) cancels the query on
+the server and leaves the connection usable. Unix only (uses `loop.add_reader`).
 
 ```python
 import asyncio
-from mssql_python.async_query import _AsyncConnection
+from mssql_python import aio
 
 async def main():
-    async with await _AsyncConnection.connect(conn_str, autocommit=True) as conn:
+    async with await aio.connect(conn_str) as conn:
+        rows = await conn.fetch("SELECT TOP 3 trip_id, total_amount FROM dbo.yellow_trips WHERE PULocationID = ?", 132)
+
+    pool = await aio.create_pool(conn_str, min_size=4, max_size=32)
+    total = await pool.fetchval("SELECT SUM(total_amount) FROM dbo.yellow_trips")
+    async with pool.acquire() as conn:
         cur = conn.cursor()
-        await cur.execute("SELECT TOP 3 trip_id, total_amount FROM dbo.yellow_trips WHERE PULocationID = ?", (132,))
-        print(await cur.fetchall())
-        await cur.close()
+        await cur.execute("SELECT * FROM dbo.yellow_trips_100k")
+        table = await cur.fetchall_arrow()          # native Arrow, DuckDB-ready
+    await pool.close()
 
 asyncio.run(main())
 ```
 
-Native async on this project's own core is on the roadmap
-([upstream #9](https://github.com/microsoft/mssql-python/issues/9)).
+The sync driver also releases the GIL for all network I/O, so
+`asyncio.to_thread` over it works too. Upstream's private async preview
+(`mssql_python.async_query._AsyncConnection`, backed by Microsoft's
+`mssql_py_core`) stays available with the `[async-preview]` extra.
 
 ### Errors
 
@@ -122,40 +111,55 @@ except mssql_python.IntegrityError as exc:
 
 NYC yellow taxi data, January 2024 (2,964,624 rows × 20 columns), SQL Server
 2022 in podman on the same host. Upstream is mssql-python 1.16.0 (C++ + ODBC
-Driver 18). These numbers come from a shared dev box under load from other
-jobs, so treat them as indicative; compare ratios, not absolute times.
+Driver 18). Release build of this project at commit `1182ec1`, median of 5,
+one measurement at a time (machine-wide lock), but on a shared dev box with
+other jobs running: treat absolute times as indicative and compare ratios.
 
-**Arrow** (release build, median of 5):
+**Reads**
 
-| workload | upstream | this project | speedup |
-|---|---:|---:|---:|
-| `cursor.arrow()`, 100k rows | 0.163 s | 0.067 s | 2.4x |
-| `cursor.arrow()`, 3M rows | 4.253 s | 2.283 s | 1.9x |
-| DuckDB aggregate over `arrow_reader()`, 3M | 4.362 s | 2.006 s | 2.2x |
-| `read_arrow(..., partitions=4)`, 3M | 4.253 s | 0.832 s | 5.1x |
-| `read_arrow(..., partitions=8)`, 3M | 4.253 s | 0.591 s | 7.2x |
-| DuckDB over `read_arrow(..., partitions=8)`, 3M | 4.362 s | 0.459 s | 9.5x |
+| workload | upstream | this project | speedup | best other driver |
+|---|---:|---:|---:|---|
+| `fetchall()`, 100k rows × 20 cols | 0.392 s | 0.142 s | 2.8x | FastMssql 0.660 s |
+| `fetchmany(10_000)`, 100k rows | 0.367 s | 0.113 s | 3.2x | FastMssql 0.538 s |
+| `fetchone()` loop, 100k rows | 0.450 s | 0.240 s | 1.9x | FastMssql 0.680 s |
+| `fetchmany`, 3M rows × 20 cols | 12.93 s | 3.09 s | 4.2x | pyodbc 32.0 s |
+| decimal-heavy `fetchmany` | 1.844 s | 0.430 s | 4.3x | pyodbc 5.0 s |
+| string-heavy `fetchmany` | 1.476 s | 0.819 s | 1.8x | pyodbc 1.10 s |
+| `cursor.arrow()`, 100k rows | 0.155 s | 0.061 s | 2.6x | connectorx 0.350 s |
+| decimal-heavy Arrow | 0.800 s | 0.238 s | 3.4x | connectorx 1.43 s |
+| DuckDB over the Arrow stream, 3M rows | 4.595 s | 1.987 s | 2.3x | connectorx 9.85 s |
+| `read_arrow(..., partitions=8)`, 3M rows | 4.253 s | 0.591 s | 7.2x | connectorx (8 partitions) 2.63 s |
 
-On a single connection SQL Server's row serialization is the limit: draining
-3M rows into a sink that discards every value already takes about 2 s. The
+On a single connection SQL Server's row serialization is the limit (draining
+3M rows into a sink that discards every value takes about 2 s); the
 partitioned read is how to get past it.
 
-**Rows** (release build, median of 7):
+**Writes**
 
-| workload | upstream | this project | speedup |
-|---|---:|---:|---:|
-| `fetchone()` loop, 100k rows × 20 cols | 0.502 s | 0.274 s | 1.8x |
-| 1,000 point lookups | 0.373 s | 0.235 s | 1.6x |
-| `fetchmany(10_000)`, 3M rows × 4 cols | 1.701 s | 1.240 s | 1.4x |
-| `fetchall()`, 100k rows × 20 cols | 0.384 s | 0.289 s | 1.3x |
+| workload | upstream | this project | speedup | best other |
+|---|---:|---:|---:|---|
+| `bulkcopy_arrow`, 3M rows, heap + TABLOCK | 12.35 s | 6.07 s | 2.0x | `bcp` 6.67 s |
+| `write_arrow(..., workers=8)`, 3M rows | 12.35 s | 1.82 s | 6.8x | `bcp` 6.67 s |
+| `bulkcopy` (row tuples), 100k rows | 1.561 s | 0.716 s | 2.2x | `bcp` 0.382 s |
+| `executemany`, 100k rows | 1.301 s | 1.533 s | 0.85x | pyodbc `fast_executemany` 0.801 s |
 
-**All drivers.** pyodbc, pyodbc `fast_executemany`, connectorx, arrow-odbc,
-pymssql, FastMssql and `bcp`, across 58 workloads:
-[benchmarks/RESULTS.md](benchmarks/RESULTS.md). This is a quick run on a dev
-build of the port, before the native Arrow merge. Headline: the port is the
-fastest Python driver on every row-based read (1.38x geomean vs upstream).
-Writes are about even with upstream (0.91x), and `bcp` is still 4x faster on
-bulk loads, so that is the next target.
+**Latency and concurrency**
+
+| workload | upstream | this project | speedup | best other driver |
+|---|---:|---:|---:|---|
+| 1,000 point lookups | 0.328 s | 0.158 s | 2.1x | pyodbc 0.132 s |
+| 16 threads × point lookups | 2.395 s | 0.429 s | 5.6x | FastMssql 0.612 s |
+| `SELECT 1` × 5,000 | 0.829 s | 0.741 s | 1.1x | pyodbc 0.674 s |
+| connect + close × 50 | 0.199 s | 0.194 s | 1.0x | pyodbc 0.186 s |
+| async point lookups, 64 concurrent (`aio`) | ~7k q/s | ~40k q/s | ~5x | FastMssql ~15k q/s |
+| free-threaded 3.15t, 16 threads point lookups | 4.3k q/s | 18.7k q/s | 4.4x | – |
+
+Still behind: `executemany` (pyodbc `fast_executemany` is about 2x faster) and
+the tiniest round trips (`SELECT 1`, single-row lookups), where pyodbc is
+10-20 % faster. Both are being worked on.
+
+Full multi-driver matrix (pyodbc, connectorx, arrow-odbc, pymssql, FastMssql,
+`bcp`): [benchmarks/RESULTS.md](benchmarks/RESULTS.md).
 
 ```bash
 python benchmarks/run.py              # everything (benchmarks/README.md has filters)
@@ -164,6 +168,14 @@ python benchmarks/report.py           # -> benchmarks/RESULTS.md + results/repor
 
 Methodology, profiles and the compression findings are in
 [docs/PERFORMANCE_RESEARCH.md](docs/PERFORMANCE_RESEARCH.md).
+
+## Install
+
+```bash
+pip install mssql-python-rs-port              # zero required dependencies
+pip install 'mssql-python-rs-port[arrow]'     # + pyarrow for arrow() / bulkcopy_arrow
+pip install 'mssql-python-rs-port[azure]'     # + azure-identity credentials
+```
 
 ## Build and test
 
