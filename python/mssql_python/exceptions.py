@@ -255,6 +255,13 @@ class NotSupportedError(DatabaseError):
 
 
 # Mapping SQLSTATE codes to custom exception classes
+_LOCK_TIMEOUT_ERROR = 1222
+
+
+class LockTimeoutError(OperationalError, ProgrammingError):  # RUST-PORT
+    """SQL Server error 1222 (LOCK_TIMEOUT expired); SQLSTATE stays 42000."""
+
+
 def sqlstate_to_exception(
     sqlstate: str, ddbc_error: str, native_error: Optional[int] = None
 ) -> Optional[Exception]:
@@ -635,6 +642,10 @@ def sqlstate_to_exception(
         ),  # Corrupt file data source
     }
     exc = mapping.get(sqlstate, None)
+    # RUST-PORT: a lock timeout (1222) is operational (PEP 249) but upstream
+    # reports it as ProgrammingError (42000); keep both for compatibility.
+    if native_error == _LOCK_TIMEOUT_ERROR and isinstance(exc, ProgrammingError):
+        exc = LockTimeoutError(driver_error=exc.driver_error, ddbc_error=ddbc_error)
     if exc is not None:
         exc.sqlstate = sqlstate
         exc.native_error = native_error

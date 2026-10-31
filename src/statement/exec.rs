@@ -90,12 +90,23 @@ pub(crate) fn with_exclusive_wire(
         state.diag.push(DiagRecord::driver("08003", "Connection is closed"));
         return SQL_ERROR;
     };
+    if !conn.autocommit()
+        && conn.take_failed()
+        && !client.has_active_transaction()
+        && xact_abort_is_on(client, timeout, &cancel)
+    {
+        conn.mark_txn_aborted();
+    }
     if let Err(records) = prepare_session(conn, client, timeout, &cancel) {
         state.diag.extend(records);
         return SQL_ERROR;
     }
 
     let ret = body(&mut Exclusive { conn, client, state: &mut state, cancel: &cancel, timeout });
+    // The server may still be sending the rollback; the next statement checks.
+    if ret == SQL_ERROR && !conn.autocommit() {
+        conn.mark_failed();
+    }
     if state.on_wire {
         *owner = Some((stmt.id, Arc::downgrade(stmt)));
     }
@@ -124,6 +135,29 @@ fn recover(client: &mut SyncClient) {
         let _ = client.block_on(|c| c.cancel_query(RECOVER_SETTLE_SECS));
     }
     let _ = client.take_info_messages();
+}
+
+/// Whether the session has XACT_ABORT on. Asked only after a failed statement
+/// took the transaction with it: with XACT_ABORT the caller asked for
+/// abort-everything, so writes must not silently run outside their
+/// transaction. Other failures (e.g. a conversion error) roll back too, but
+/// msodbcsql silently starts a new transaction.
+fn xact_abort_is_on(client: &mut SyncClient, timeout: u32, cancel: &StmtCancel) -> bool {
+    // @@OPTIONS bit 16384 is XACT_ABORT; a server error answers "yes".
+    const PROBE: &str = "IF (@@OPTIONS & 16384) = 16384 RAISERROR('xact_abort', 16, 1)";
+    let opts = options(timeout, cancel);
+    let result = client.block_on(|c| async move {
+        c.execute(PROBE.to_string(), opts).await?;
+        c.close_query().await
+    });
+    let _ = client.take_info_messages();
+    match result {
+        Err(TdsError::SqlServerError { .. }) => {
+            recover(client);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Apply deferred session settings and, in manual-commit mode, make sure a
@@ -269,12 +303,38 @@ fn describe_row(rows: &RowBuffer, row: &[Cell]) -> Option<DescribedParam> {
     })
 }
 
+/// Statements that change data or schema, judged by their first keyword.
+fn is_write(sql: &str) -> bool {
+    let word = sql.trim_start().split(|c: char| !c.is_ascii_alphabetic()).next().unwrap_or("");
+    ["INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE", "CREATE", "ALTER", "DROP", "EXEC", "EXECUTE", "BULK"]
+        .iter()
+        .any(|w| word.eq_ignore_ascii_case(w))
+}
+
+/// Rejects a write issued after the server aborted the caller's transaction
+/// (XACT_ABORT), like go-mssqldb: it would run outside that transaction and a
+/// later commit() would persist it. The caller's rollback() clears the state.
+fn reject_write_after_abort(ex: &mut Exclusive<'_>, sql: &str) -> bool {
+    if !is_write(sql) || !ex.conn.take_txn_aborted() {
+        return false;
+    }
+    ex.state.diag.push(DiagRecord::driver(
+        "25000",
+        "The server rolled back the transaction after an error; the statement was not run. Call rollback() to continue.",
+    ));
+    true
+}
+
 /// Run one command and leave its first result current.
 pub fn execute_command(stmt: &Arc<StmtShared>, command: Command) -> SqlReturn {
     with_exclusive_wire(stmt, |ex| run_command(ex, command))
 }
 
 fn run_command(ex: &mut Exclusive<'_>, command: Command) -> SqlReturn {
+    let (Command::Batch(sql) | Command::Parameterized(sql, _) | Command::Typed(sql, _)) = &command;
+    if reject_write_after_abort(ex, sql) {
+        return SQL_ERROR;
+    }
     let batch_mode = BatchErrorMode::Continue;
     let result = match command {
         Command::Batch(sql) => {

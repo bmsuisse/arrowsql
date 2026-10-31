@@ -47,6 +47,11 @@ impl PendingSession {
 pub struct ConnShared {
     pub slot: Mutex<Slot>,
     autocommit: AtomicBool,
+    /// The last statement failed; if it also took the transaction with it the
+    /// next statement may have to be rejected (see `exec::rejects_after_abort`).
+    last_failed: AtomicBool,
+    /// XACT_ABORT rolled the caller's transaction back and no statement told them yet.
+    txn_aborted: AtomicBool,
     connection_timeout: AtomicU32,
     pending_session: Mutex<PendingSession>,
     /// sp_describe_undeclared_parameters results per SQL text.
@@ -58,6 +63,8 @@ impl ConnShared {
         Arc::new(Self {
             slot: Mutex::new(Slot { client: Some(client), owner: None }),
             autocommit: AtomicBool::new(attrs.autocommit),
+            last_failed: AtomicBool::new(false),
+            txn_aborted: AtomicBool::new(false),
             connection_timeout: AtomicU32::new(attrs.connection_timeout),
             pending_session: Mutex::new(attrs.pending.clone()),
             param_types: Mutex::new(HashMap::new()),
@@ -66,6 +73,22 @@ impl ConnShared {
 
     pub fn autocommit(&self) -> bool {
         self.autocommit.load(Ordering::Acquire)
+    }
+
+    pub fn mark_failed(&self) {
+        self.last_failed.store(true, Ordering::Release);
+    }
+
+    pub fn mark_txn_aborted(&self) {
+        self.txn_aborted.store(true, Ordering::Release);
+    }
+
+    pub fn take_txn_aborted(&self) -> bool {
+        self.txn_aborted.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn take_failed(&self) -> bool {
+        self.last_failed.swap(false, Ordering::AcqRel)
     }
 
     pub fn cached_param_types(&self, sql: &str) -> Option<Vec<DescribedParam>> {
@@ -468,6 +491,8 @@ impl Connection {
     }
 
     fn commit(&self, py: Python<'_>) -> PyResult<()> {
+        self.shared.take_failed();
+        self.shared.take_txn_aborted();
         self.client_op(py, |client| {
             if client.has_active_transaction() {
                 client.block_on(|c| c.commit_transaction(None, None))
@@ -478,6 +503,8 @@ impl Connection {
     }
 
     fn rollback(&self, py: Python<'_>) -> PyResult<()> {
+        self.shared.take_failed();
+        self.shared.take_txn_aborted();
         self.client_op(py, |client| {
             if client.has_active_transaction() {
                 client.block_on(|c| c.rollback_transaction(None, None))
@@ -516,7 +543,9 @@ impl Connection {
             }
             SQL_ATTR_TXN_ISOLATION => {
                 let level = value.extract::<i64>().map_err(|_| fail("Invalid attribute value"))?;
-                let sql = isolation_sql(level).ok_or_else(|| fail("Invalid attribute value"))?;
+                // Upstream's message carries no "invalid", which would make it an InterfaceError.
+                let sql = isolation_sql(level)
+                    .ok_or_else(|| PyRuntimeError::new_err(format!("Failed to set connection attribute {attribute}")))?;
                 self.run_session_sql(py, sql.to_string())?;
                 self.shared.supersede_isolation();
                 Ok(())
