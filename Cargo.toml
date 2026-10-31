@@ -40,7 +40,9 @@ opt-level = 1
 opt-level = 2
 
 [profile.release]
-opt-level = 3
+# "s" for the whole crate graph: the wheel is mostly this .so, and "s" is about
+# 20% smaller than 3 for 1-3% on read/latency workloads (docs/PACKAGING.md).
+opt-level = "s"
 lto = "fat"
 codegen-units = 1
 panic = "unwind"
@@ -51,16 +53,3 @@ strip = true
 # vendor/mssql-tds/VENDOR.md). Remove when the fix is upstream.
 [patch."https://github.com/microsoft/mssql-rs"]
 mssql-tds = { path = "vendor/mssql-tds" }
-
-# TLS + certificate parsing run once per connection (cold): optimise for size.
-# The record-layer AEAD/hash primitives (ring) stay at opt-level 3.
-[profile.release.package.rustls]
-opt-level = "s"
-[profile.release.package.rustls-webpki]
-opt-level = "s"
-[profile.release.package.tokio-rustls]
-opt-level = "s"
-[profile.release.package.rustls-native-certs]
-opt-level = "s"
-[profile.release.package.x509-parser]
-opt-level = "s"
