@@ -346,7 +346,7 @@ def truncate_error_message(error_message: str) -> str:
         string_second = error_message[error_message.index("]") + 1 :]
         string_third = string_second[string_second.index("]") + 1 :]
         return string_first + string_third
-    except Exception as e:
+    except ValueError as e:
         logger.warning("Error while truncating error message: %s", e)
         return error_message
 

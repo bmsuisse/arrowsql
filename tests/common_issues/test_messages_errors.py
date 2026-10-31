@@ -246,3 +246,12 @@ def test_sqlstate_class_text_differs_between_integrity_and_programming(cursor):
     assert dup.value.driver_error != missing.value.driver_error
     assert not isinstance(missing.value, IntegrityError)
     assert not isinstance(dup.value, ProgrammingError)
+
+
+def test_truncate_error_message_with_one_bracket_returns_message():
+    """A driver message with a single "[Microsoft]" prefix has nothing to cut;
+    it comes back unchanged instead of raising out of the error handler."""
+    from arrowsql.exceptions import truncate_error_message
+
+    assert truncate_error_message("[Microsoft]Operation canceled") == "[Microsoft]Operation canceled"
+    assert truncate_error_message("[Microsoft][ODBC Driver]boom") == "[Microsoft]boom"
