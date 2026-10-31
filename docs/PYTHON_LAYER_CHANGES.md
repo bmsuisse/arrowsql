@@ -214,11 +214,11 @@ and now uses about 1.3 us (measured with the native calls stubbed).
 - `_ResultLayout` caches the UUID stringification indices per `native_uuid`
   value (`uuid_native`, `uuid_indices`).
 - `fetchone` / `fetchall` use the cached column and converter maps directly when
-  the converter generation and the description are unchanged, and `fetchone`
-  builds the `Row` inline.
+  the converter generation and the description are unchanged.
 - `_get_encoding_settings` returns an open `Connection`'s settings dict without
   `getencoding()`'s lock and copy (the dict is replaced, never mutated, and the
-  native layer only reads it). Other connection objects keep the old path.
+  native layer only reads it). Mocks, closed connections and a connection with
+  an instance-level `getencoding` keep the old path.
 - Native: `DDBCSQLDescribeCol` fills the list with the same per-column dicts
   while the statement's columns stay the same (`src/decode/describe.rs`
   `shared_columns`), so `_initialize_description` compares layouts by identity.

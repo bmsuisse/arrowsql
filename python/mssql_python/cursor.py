@@ -749,11 +749,11 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         # RUST-PORT: an open Connection replaces its settings dict instead of
         # mutating it and the native layer only reads it, so hand it over
         # without getencoding()'s lock and defensive copy.
-        try:
-            if connection._closed is False:
-                return connection._encoding_settings
-        except AttributeError:
-            pass
+        state = getattr(connection, "__dict__", {})
+        if state.get("_closed") is False and "getencoding" not in state:
+            settings = state.get("_encoding_settings")
+            if settings is not None:
+                return settings
         if hasattr(self._connection, "getencoding"):
             try:
                 return self._connection.getencoding()
@@ -3078,13 +3078,9 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         else:
             column_map, converter_map, column_map_lower = self._get_column_and_converter_maps()
         if not converter_map and not self._uuid_str_indices:
-            row = Row.__new__(Row)
-            row._values = row_data
-            row._column_map = column_map
-            row._cursor = self
-            row._column_map_lower = column_map_lower
-            row._column_names = self._cached_result_columns
-            return row
+            return Row._fast_create(
+                row_data, column_map, self, column_map_lower, self._cached_result_columns
+            )
         return Row(
             row_data,
             column_map,
