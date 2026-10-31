@@ -531,3 +531,16 @@ def test_executemany_decimal_mixed_with_other_numbers_allows_zero_integer_digits
     assert sorted(r[0] for r in cursor.fetchall()) == sorted(
         [decimal.Decimal("1E-38"), decimal.Decimal(str(other))]
     )
+
+
+def test_module_imports_without_register_at_fork():
+    import subprocess
+    import sys
+
+    code = (
+        "import os\n"
+        "del os.register_at_fork\n"
+        "import mssql_python.ddbc_bindings\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
