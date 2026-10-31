@@ -14,7 +14,7 @@ use mssql_tds::datatypes::column_values::{
 };
 use mssql_tds::datatypes::decoder::DecimalParts;
 use mssql_tds::datatypes::sql_json::SqlJson;
-use mssql_tds::datatypes::sql_string::SqlString;
+use mssql_tds::datatypes::sql_string::{EncodingType, SqlString};
 use mssql_tds::datatypes::sql_vector::SqlVector;
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::error::Error;
@@ -129,6 +129,9 @@ impl TryFrom<i32> for InputSqlType {
     }
 }
 
+/// ODBC `SQL_C_CHAR`: the narrow C type whose `str` values take the settings codec.
+pub(crate) const SQL_C_CHAR: i32 = 1;
+
 /// A validated ODBC-compatible `setinputsizes()` entry lowered to [`SqlType`]
 /// before TDS serialization.
 #[derive(Clone, Copy)]
@@ -138,6 +141,8 @@ pub(crate) struct ParameterHint {
     size: u32,
     /// Numeric or temporal scale where the selected type supports one.
     scale: u8,
+    /// ODBC C type of the value (`paramCType`); 0 when the hint carries none.
+    c_type: i32,
 }
 
 impl ParameterHint {
@@ -165,7 +170,13 @@ impl ParameterHint {
             sql_type,
             size,
             scale,
+            c_type: 0,
         })
+    }
+
+    /// Records the ODBC C type the caller bound the value as.
+    pub(crate) fn with_c_type(self, c_type: i32) -> Self {
+        Self { c_type, ..self }
     }
 
     fn effective_numeric_precision(size: u32) -> u32 {
@@ -427,17 +438,47 @@ fn numeric_hint_error(sql_type: &str, error: PyErr) -> Error {
     if overflow { Error::TypeConversionError(message) } else { Error::UsageError(message) }
 }
 
+/// Reads the codec that narrow `str` parameters bound as `SQL_C_CHAR` use, from
+/// an `encodingSettings` dict. Only an explicit `SQL_C_CHAR` setting with an
+/// encoding applies; any other settings keep collation-based binding.
+pub(crate) fn narrow_codec(settings: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    let Ok(settings) = settings.cast::<PyDict>() else {
+        return Ok(None);
+    };
+    let (Some(ctype), Some(encoding)) = (settings.get_item("ctype")?, settings.get_item("encoding")?)
+    else {
+        return Ok(None);
+    };
+    if ctype.extract::<i32>().ok() != Some(SQL_C_CHAR) {
+        return Ok(None);
+    }
+    encoding.extract::<String>().map(Some)
+}
+
 /// Converts a Python value according to its validated `setinputsizes()` hint.
 ///
 /// Hints select the SQL type, but size handling remains type-specific: decimal
 /// precision and scale are authoritative, strings and binary values widen to
 /// fit their contents, and vector dimensions are validated against the value.
+/// `codec` encodes narrow `str` values bound as `SQL_C_CHAR` (see [`narrow_codec`]).
 pub(crate) fn py_to_sql_type_with_hint(
     py_obj: &Bound<'_, PyAny>,
     hint: ParameterHint,
+    codec: Option<&str>,
 ) -> TdsResult<SqlType> {
     if py_obj.is_none() {
         return null_sql_type(hint);
+    }
+
+    if let Some(codec) = codec
+        && hint.c_type == SQL_C_CHAR
+        && py_obj.is_instance_of::<PyString>()
+        && matches!(
+            hint.sql_type,
+            InputSqlType::Char | InputSqlType::VarChar | InputSqlType::LongVarChar
+        )
+    {
+        return hinted_encoded_text(py_obj, hint, codec);
     }
 
     match hint.sql_type {
@@ -668,6 +709,28 @@ fn hinted_string(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<Sq
         InputSqlType::WVarChar => sized_nvarchar(value, size),
         InputSqlType::WLongVarChar => SqlType::NText(value),
         _ => unreachable!("hinted_string receives only string constants"),
+    })
+}
+
+/// Binds narrow text as the bytes `codec` produces. The bytes go to the wire
+/// unchanged, as a `SQL_C_CHAR` buffer does, so they are not re-encoded for the
+/// column collation.
+fn hinted_encoded_text(py_obj: &Bound<'_, PyAny>, hint: ParameterHint, codec: &str) -> TdsResult<SqlType> {
+    let bytes = py_obj
+        .call_method1("encode", (codec, "strict"))
+        .and_then(|encoded| encoded.extract::<Vec<u8>>())
+        .map_err(|error| {
+            Error::UsageError(format!(
+                "Failed to encode parameter with encoding '{codec}': {error}"
+            ))
+        })?;
+    let size = hint.size.max(bytes.len() as u32).max(1);
+    let value = Some(SqlString::new(bytes, EncodingType::DelayedSet));
+    Ok(match hint.sql_type {
+        InputSqlType::Char => SqlType::Char(value, checked_length(size, 8_000, "CHAR")?),
+        InputSqlType::VarChar => sized_varchar(value, size),
+        InputSqlType::LongVarChar => SqlType::VarcharMax(value),
+        _ => unreachable!("hinted_encoded_text receives only narrow character hints"),
     })
 }
 

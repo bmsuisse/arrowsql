@@ -14,7 +14,9 @@ use super::{StmtShared, close_cursor, stmt_of};
 use crate::consts::*;
 use crate::decode::{describe, python as pyconv, text};
 use crate::diag::{self, DiagRecord};
-use crate::params::py_types::{ParameterHint, py_to_sql_type, py_to_sql_type_with_hint};
+use crate::params::py_types::{
+    ParameterHint, SQL_C_CHAR, narrow_codec, py_to_sql_type, py_to_sql_type_with_hint,
+};
 use crate::types::ParamInfo;
 
 /// Malformed UTF-16 policy for a batch fetch. Upstream binds bounded columns
@@ -84,7 +86,8 @@ pub fn execute(
     encodingSettings: &Bound<'_, PyAny>,
 ) -> PyResult<i16> {
     let stmt = stmt_of(statementHandle)?;
-    let rpc_params = crate::params::build_rpc_params(params, Some(inputSizes))?;
+    let codec = narrow_codec(encodingSettings)?;
+    let rpc_params = crate::params::build_rpc_params(params, Some(inputSizes), codec.as_deref())?;
     let (sql, markers) = crate::params::placeholders::rewrite_qmarks(&query);
     if markers != rpc_params.types.len() {
         let message = format!(
@@ -102,20 +105,33 @@ pub fn execute(
     Ok(py.detach(|| execute_command(&stmt, Command::Parameterized(sql, rpc_params))))
 }
 
-/// Type hints from executemany's `paramInfos`. Only DECIMAL/NUMERIC columns
-/// are hinted: the Python layer sends their values as strings and relies on
-/// the declared precision and scale to give them their numeric type. A column
+/// Type hints from executemany's `paramInfos`. DECIMAL/NUMERIC columns are
+/// hinted: the Python layer sends their values as strings and relies on the
+/// declared precision and scale to give them their numeric type. A column
 /// holding NULLs stays unhinted: the batch is declared from its first row,
 /// and a NULL decimal carries no precision or scale to declare it with.
-fn decimal_hints(
+/// With a codec, narrow text columns bound as `SQL_C_CHAR` are hinted as well,
+/// so their values are encoded with it.
+fn param_hints(
     param_infos: &Bound<'_, PyAny>,
     columns: &[Bound<'_, PyAny>],
+    codec: Option<&str>,
 ) -> PyResult<Vec<Option<ParameterHint>>> {
     let mut hints = vec![None; columns.len()];
     let Ok(infos) = param_infos.cast::<PyList>() else { return Ok(hints) };
     for ((slot, info), column) in hints.iter_mut().zip(infos.iter()).zip(columns) {
         let Ok(info) = info.cast::<ParamInfo>() else { continue };
         let info = info.borrow();
+        if codec.is_some()
+            && i32::from(info.paramCType) == SQL_C_CHAR
+            && matches!(info.paramSQLType, SQL_CHAR | SQL_VARCHAR | SQL_LONGVARCHAR)
+        {
+            let size = u32::try_from(info.columnSize).unwrap_or(u32::MAX);
+            *slot = ParameterHint::new(i32::from(info.paramSQLType), size, 0)
+                .ok()
+                .map(|hint| hint.with_c_type(SQL_C_CHAR));
+            continue;
+        }
         if info.paramSQLType != SQL_DECIMAL && info.paramSQLType != SQL_NUMERIC {
             continue;
         }
@@ -130,9 +146,15 @@ fn decimal_hints(
 }
 
 /// A hinted value falls back to plain inference when the hint cannot hold it.
-fn convert_cell(value: &Bound<'_, PyAny>, hint: Option<ParameterHint>) -> PyResult<SqlType> {
+fn convert_cell(
+    value: &Bound<'_, PyAny>,
+    hint: Option<ParameterHint>,
+    codec: Option<&str>,
+) -> PyResult<SqlType> {
     let converted = match hint {
-        Some(hint) => py_to_sql_type_with_hint(value, hint).or_else(|_| py_to_sql_type(value)),
+        Some(hint) => {
+            py_to_sql_type_with_hint(value, hint, codec).or_else(|_| py_to_sql_type(value))
+        }
         None => py_to_sql_type(value),
     };
     converted.map_err(|e| crate::params::conversion_error(&e))
@@ -160,7 +182,8 @@ pub fn execute_many(
         );
         return Ok(reject(py, &stmt, DiagRecord::driver("07002", message)));
     }
-    let hints = decimal_hints(paramInfos, &columns)?;
+    let codec = narrow_codec(encodingSettings)?;
+    let hints = param_hints(paramInfos, &columns, codec.as_deref())?;
     let mut rows: Vec<Vec<SqlType>> = Vec::with_capacity(paramSetSize);
     let mut nulls: Vec<Vec<bool>> = Vec::with_capacity(paramSetSize);
     for row in 0..paramSetSize {
@@ -169,7 +192,7 @@ pub fn execute_many(
         for (column, hint) in columns.iter().zip(&hints) {
             let value = column.get_item(row)?;
             null_row.push(value.is_none());
-            types.push(convert_cell(&value, *hint)?);
+            types.push(convert_cell(&value, *hint, codec.as_deref())?);
         }
         rows.push(types);
         nulls.push(null_row);

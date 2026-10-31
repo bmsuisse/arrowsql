@@ -38,10 +38,11 @@ fn parse_hint(item: &Bound<'_, PyAny>) -> PyResult<Option<ParameterHint>> {
         )));
     }
     let sql_type = fields.get_item(0)?.extract::<i32>()?;
+    let c_type = fields.get_item(1)?.extract::<i32>()?;
     let size = u32::try_from(saturating_size(&fields.get_item(2)?)?).unwrap_or(u32::MAX);
     let scale = u8::try_from(saturating_size(&fields.get_item(3)?)?).unwrap_or(u8::MAX);
     ParameterHint::new(sql_type, size, scale)
-        .map(Some)
+        .map(|hint| Some(hint.with_c_type(c_type)))
         .map_err(|error| conversion_error(&error))
 }
 
@@ -84,9 +85,12 @@ impl ParamSet {
     }
 }
 
+/// Binds `params` as RPC parameters. `codec` encodes narrow text bound as
+/// `SQL_C_CHAR` (see [`py_types::narrow_codec`]); `None` leaves text to inference.
 pub fn build_rpc_params(
     params: &Bound<'_, PyAny>,
     input_sizes: Option<&Bound<'_, PyAny>>,
+    codec: Option<&str>,
 ) -> PyResult<ParamSet> {
     let seq = params.cast::<PySequence>()?;
     let hints: Vec<Option<ParameterHint>> = match input_sizes {
@@ -114,7 +118,7 @@ pub fn build_rpc_params(
             untyped_nulls.push(i);
         }
         let sql_type = match hint {
-            Some(hint) => py_to_sql_type_with_hint(&value, hint),
+            Some(hint) => py_to_sql_type_with_hint(&value, hint, codec),
             None => py_to_sql_type(&value),
         }
         .map_err(|e| conversion_error(&e))?;
