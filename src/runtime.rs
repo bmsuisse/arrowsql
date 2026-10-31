@@ -24,6 +24,7 @@
 
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use mssql_tds::connection::client_context::ClientContext;
 use mssql_tds::connection::tds_client::TdsClient;
@@ -33,27 +34,42 @@ use mssql_tds::core::TdsResult;
 use parking_lot::Mutex;
 use tokio::runtime::{Builder, Runtime};
 
-struct OwnedRuntime {
-    pid: u32,
-    runtime: &'static Runtime,
-}
-
-static RUNTIME: Mutex<Option<OwnedRuntime>> = Mutex::new(None);
+/// The runtime of this process and the pid that built it. Readers check the
+/// pid first, without a lock: a forked child must never need a lock another
+/// parent thread held at fork time just to notice it is in a new process.
+static CURRENT: AtomicPtr<Runtime> = AtomicPtr::new(std::ptr::null_mut());
+static OWNER_PID: AtomicU32 = AtomicU32::new(0);
+/// Serializes building a runtime.
+static BUILD: Mutex<()> = Mutex::new(());
 
 pub fn runtime() -> &'static Runtime {
     let pid = std::process::id();
-    let mut slot = RUNTIME.lock();
-    if let Some(owned) = slot.as_ref() {
-        if owned.pid == pid {
-            return owned.runtime;
-        }
+    if OWNER_PID.load(Ordering::Acquire) == pid {
+        // SAFETY: the pointer is a leaked runtime, stored before the pid.
+        return unsafe { &*CURRENT.load(Ordering::Acquire) };
+    }
+    let _build = BUILD.lock();
+    if OWNER_PID.load(Ordering::Acquire) == pid {
+        return unsafe { &*CURRENT.load(Ordering::Acquire) };
     }
     // First use in this process, or first use in a child forked after the
     // runtime was built. The previous runtime (if any) is intentionally not
     // dropped; see the module docs.
     let runtime: &'static Runtime = Box::leak(Box::new(build_runtime()));
-    *slot = Some(OwnedRuntime { pid, runtime });
+    CURRENT.store(std::ptr::from_ref(runtime).cast_mut(), Ordering::Release);
+    OWNER_PID.store(pid, Ordering::Release);
     runtime
+}
+
+/// Runs in a forked child, which has only the forking thread: a `BUILD` lock
+/// held by another parent thread would never be released. The next
+/// [`runtime`] call builds a runtime for the child.
+pub fn forget_after_fork() {
+    if BUILD.is_locked() {
+        // SAFETY: its owner thread does not exist in this process.
+        unsafe { BUILD.force_unlock() };
+    }
+    OWNER_PID.store(0, Ordering::Release);
 }
 
 fn build_runtime() -> Runtime {

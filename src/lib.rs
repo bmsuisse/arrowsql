@@ -35,6 +35,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[pyfunction]
 fn reset_after_fork() {
     pooling::forget_after_fork();
+    runtime::forget_after_fork();
 }
 
 #[pyfunction]
@@ -95,7 +96,11 @@ fn register_fork_hook(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     let kwargs = PyDict::new(py);
     kwargs.set_item("after_in_child", wrap_pyfunction!(reset_after_fork, py)?)?;
-    PyModule::import(py, "os")?.call_method("register_at_fork", (), Some(&kwargs))?;
+    // Windows has no fork, and so no os.register_at_fork.
+    let os = PyModule::import(py, "os")?;
+    if os.hasattr("register_at_fork")? {
+        os.call_method("register_at_fork", (), Some(&kwargs))?;
+    }
     Ok(())
 }
 

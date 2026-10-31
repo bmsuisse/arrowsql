@@ -84,3 +84,51 @@ def test_several_children_forked_from_one_parent():
         assert os.WIFEXITED(wait_status) and os.WEXITSTATUS(wait_status) == 0
 
     assert _select_one(conn_str) == 1
+
+
+def test_fork_while_other_threads_use_the_runtime():
+    # Threads running statements with a timeout call runtime() (cancellation
+    # timer) in a loop. A child forked while one holds the runtime lock must not
+    # inherit it locked.
+    import signal
+    import threading
+    import time
+
+    conn_str = os.environ["DB_CONNECTION_STRING"]
+    assert _select_one(conn_str) == 1
+    stop = threading.Event()
+
+    def hammer():
+        conn = connect(conn_str)
+        conn.timeout = 30
+        cursor = conn.cursor()
+        while not stop.is_set():
+            cursor.execute("SELECT 1")
+            cursor.fetchall()
+        conn.close()
+
+    threads = [threading.Thread(target=hammer) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    hung = 0
+    try:
+        for _ in range(40):
+            pid = os.fork()
+            if pid == 0:
+                _run_in_child(conn_str)
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                done, status = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+                    break
+                time.sleep(0.01)
+            else:
+                hung += 1
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+    finally:
+        stop.set()
+        for thread in threads:
+            thread.join()
+    assert hung == 0, f"{hung} forked children hung on an inherited runtime lock"

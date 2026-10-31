@@ -412,6 +412,9 @@ pub fn execute_batch(stmt: &Arc<StmtShared>, sql: String, rows: Vec<Vec<SqlType>
 }
 
 fn run_batch(ex: &mut Exclusive<'_>, sql: String, mut rows: Vec<Vec<SqlType>>, all_null: Vec<usize>) -> SqlReturn {
+    if reject_write_after_abort(ex, &sql) {
+        return SQL_ERROR;
+    }
     if !all_null.is_empty() && !rows.is_empty() {
         let mut probe = ParamSet { types: rows[0].clone(), untyped_nulls: all_null.clone() };
         if let Err(records) = resolve_null_types(ex, &sql, &mut probe) {

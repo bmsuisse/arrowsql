@@ -463,3 +463,84 @@ def test_dropped_pooled_connection_gives_its_slot_back(conn_str):
             del dropped
     finally:
         ddbc.disable_pooling()
+
+
+# ---------------------------------------------------------------------------
+# r2 review: XACT_ABORT guard covers executemany; decimals with no integer digits
+# ---------------------------------------------------------------------------
+
+
+def test_executemany_after_xact_abort_is_rejected_like_execute(conn, cursor, table_name):
+    # Upstream (msodbcsql) lets every statement after the server-side rollback run
+    # outside the transaction; the port rejects the first write of execute() and
+    # must treat executemany the same way. rollback() clears the state.
+    from mssql_python import DatabaseError
+
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (id INT PRIMARY KEY)")
+    conn.commit()
+    cursor.execute("SET XACT_ABORT ON")
+    cursor.execute(f"INSERT INTO dbo.{table_name} VALUES (1)")
+    with pytest.raises(DatabaseError):
+        cursor.execute(f"INSERT INTO dbo.{table_name} VALUES (1)")
+    with pytest.raises(DatabaseError):
+        cursor.executemany(f"INSERT INTO dbo.{table_name} VALUES (?)", [(5,), (6,)])
+    conn.commit()
+    cursor.execute(f"SELECT COUNT(*) FROM dbo.{table_name}")
+    assert cursor.fetchone()[0] == 0
+    cursor.executemany(f"INSERT INTO dbo.{table_name} VALUES (?)", [(5,), (6,)])
+    conn.commit()
+    cursor.execute(f"SELECT COUNT(*) FROM dbo.{table_name}")
+    assert cursor.fetchone()[0] == 2
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [decimal.Decimal("1E-38")],
+        [decimal.Decimal("0.5")],
+        [decimal.Decimal("0")],
+        [decimal.Decimal("-0.00001")],
+        [decimal.Decimal("0.5"), decimal.Decimal("1E-38")],
+        [decimal.Decimal("9" * 38)],
+    ],
+)
+def test_decimal_with_zero_integer_digits_binds(conn, cursor, table_name, values):
+    scale = max(0, -min(v.as_tuple().exponent for v in values))
+    precision = max(len(v.as_tuple().digits) for v in values) if scale == 0 else 38
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (d NUMERIC({precision}, {scale}))")
+    cursor.executemany(f"INSERT INTO dbo.{table_name} VALUES (?)", [(v,) for v in values])
+    for v in values:
+        cursor.execute(f"INSERT INTO dbo.{table_name} VALUES (?)", (v,))
+    conn.commit()
+    cursor.execute(f"SELECT d FROM dbo.{table_name}")
+    assert sorted(r[0] for r in cursor.fetchall()) == sorted(values * 2)
+
+
+@pytest.mark.parametrize("other", [0, 0.0, decimal.Decimal("0.5")])
+def test_executemany_decimal_mixed_with_other_numbers_allows_zero_integer_digits(
+    conn, cursor, table_name, other
+):
+    # A column mixing a Decimal with an int/float is unified as one DECIMAL; 1E-38
+    # has no integer digits, so NUMERIC(38,38) needs precision 38, not 39.
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (d NUMERIC(38, 38))")
+    cursor.executemany(
+        f"INSERT INTO dbo.{table_name} VALUES (?)", [(decimal.Decimal("1E-38"),), (other,)]
+    )
+    conn.commit()
+    cursor.execute(f"SELECT d FROM dbo.{table_name}")
+    assert sorted(r[0] for r in cursor.fetchall()) == sorted(
+        [decimal.Decimal("1E-38"), decimal.Decimal(str(other))]
+    )
+
+
+def test_module_imports_without_register_at_fork():
+    import subprocess
+    import sys
+
+    code = (
+        "import os\n"
+        "del os.register_at_fork\n"
+        "import mssql_python.ddbc_bindings\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

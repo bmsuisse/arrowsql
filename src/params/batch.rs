@@ -186,7 +186,8 @@ fn fraction_digits(text: &str) -> usize {
 
 fn integer_digits(text: &str) -> usize {
     let digits = text.trim_start_matches('-');
-    digits.split_once('.').map_or(digits, |(int, _)| int).len().max(1)
+    let int = digits.split_once('.').map_or(digits, |(int, _)| int);
+    int.trim_start_matches('0').len()
 }
 
 /// Gives every cell of a numeric column one DECIMAL(precision, scale) type
@@ -201,8 +202,9 @@ fn unify_decimal(rows: &mut [Vec<SqlType>], col: usize, is_null: &[bool]) -> Tds
         .map(|(row, &null)| if null { Ok(None) } else { exact_decimal_text(&row[col]) })
         .collect::<TdsResult<Vec<_>>>()?;
     let scale = texts.iter().flatten().map(|t| fraction_digits(t)).max().unwrap_or(0);
-    let int_digits = texts.iter().flatten().map(|t| integer_digits(t)).max().unwrap_or(1);
-    let precision = int_digits + scale;
+    let int_digits = texts.iter().flatten().map(|t| integer_digits(t)).max().unwrap_or(0);
+    // Zero integer digits are fine ("0.5"); a bare 0 still needs precision 1.
+    let precision = (int_digits + scale).max(1);
     if precision > MAX_DECIMAL_PRECISION {
         return Err(Error::TypeConversionError(format!(
             "values in one column need a numeric precision of {precision}, above the maximum of {MAX_DECIMAL_PRECISION}"
@@ -229,12 +231,12 @@ fn decimal_parts(t: &SqlType) -> Option<&DecimalParts> {
 /// [`unify_decimal`] for a column of Decimal cells only: rescales the
 /// magnitudes without formatting them as text.
 fn unify_decimal_parts(rows: &mut [Vec<SqlType>], col: usize, is_null: &[bool]) -> TdsResult<()> {
-    let (mut scale, mut int_digits) = (0u8, 1u8);
+    let (mut scale, mut int_digits) = (0u8, 0u8);
     for part in rows.iter().filter_map(|row| decimal_parts(&row[col])) {
         scale = scale.max(part.scale);
         int_digits = int_digits.max(part.precision.saturating_sub(part.scale));
     }
-    let precision = usize::from(int_digits) + usize::from(scale);
+    let precision = (usize::from(int_digits) + usize::from(scale)).max(1);
     if precision > MAX_DECIMAL_PRECISION {
         return Err(Error::TypeConversionError(format!(
             "values in one column need a numeric precision of {precision}, above the maximum of {MAX_DECIMAL_PRECISION}"
