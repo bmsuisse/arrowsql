@@ -9,7 +9,7 @@ with proper escaping and formatting per MS-ODBCSTR specification.
 """
 
 from typing import Dict, Optional
-from mssql_python.constants import _CONNECTION_STRING_DRIVER_KEY
+from arrowsql.constants import _CONNECTION_STRING_DRIVER_KEY
 
 
 class _ConnectionStringBuilder:

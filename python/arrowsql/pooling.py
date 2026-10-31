@@ -8,8 +8,8 @@ import atexit
 import threading
 from typing import Dict
 
-from mssql_python import ddbc_bindings
-from mssql_python.logging import logger
+from arrowsql import ddbc_bindings
+from arrowsql.logging import logger
 
 
 class PoolingManager:

@@ -30,10 +30,10 @@ add it to `tests/upstream_excluded.txt` with a one-line reason.
 ## Code
 
 - `cargo clippy --all-targets` should not add warnings; run `cargo fmt` on files you touch.
-- Edits to the vendored Python layer (`python/mssql_python`) and to `vendor/mssql-tds`
+- Edits to the vendored Python layer (`python/arrowsql`) and to `vendor/mssql-tds`
   are marked `RUST-PORT` and listed in `docs/PYTHON_LAYER_CHANGES.md` /
   `vendor/mssql-tds/VENDOR.md`. Keep upstream's lines unchanged where you can.
-- New binding symbols go into `docs/CONTRACT.md` and `python/mssql_python/ddbc_bindings.pyi`.
+- New binding symbols go into `docs/CONTRACT.md` and `python/arrowsql/ddbc_bindings.pyi`.
 - Performance claims need a run of `benchmarks/run.py` (see `benchmarks/README.md`);
   do not hand-edit `benchmarks/RESULTS.md` or the README benchmark tables.
 - Do not commit local paths, host names or credentials.

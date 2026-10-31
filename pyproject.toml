@@ -55,7 +55,9 @@ Upstream = "https://github.com/microsoft/mssql-python"
 
 [tool.maturin]
 python-source = "python"
-module-name = "mssql_python.ddbc_bindings"
+module-name = "arrowsql.ddbc_bindings"
+# `import mssql_python` keeps working: a thin alias package for arrowsql.
+python-packages = ["mssql_python"]
 features = ["pyo3/extension-module"]
 strip = true
 # The sdist must carry the patched mssql-tds (the Cargo.toml patch section);

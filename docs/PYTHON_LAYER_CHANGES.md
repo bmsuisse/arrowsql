@@ -1,6 +1,6 @@
 # Python layer changes
 
-`python/mssql_python/` is vendored from microsoft/mssql-python (commit in
+`python/arrowsql/` is vendored from microsoft/mssql-python (commit in
 `tests/upstream/UPSTREAM_COMMIT`). Keep it upstream-identical where possible;
 every deliberate edit is marked `RUST-PORT` in the source and listed here.
 
@@ -13,7 +13,7 @@ every deliberate edit is marked `RUST-PORT` in the source and listed here.
 - `ddbc_bindings.py` (the platform-specific `.so` loader) is removed;
   maturin installs the extension as `mssql_python.ddbc_bindings` directly.
 
-Edits to `python/mssql_python` relative to upstream mssql-python (commit in
+Edits to `python/arrowsql` relative to upstream mssql-python (commit in
 `tests/upstream/UPSTREAM_COMMIT`). Keep them minimal; each section says why.
 
 ## Issue #581: `sqlstate` and `native_error` on exceptions
@@ -59,7 +59,7 @@ attributes; pre-#581 pickles (4 reduce args) still load.
 ### Validating Python-layer changes without the Rust core
 
 `scripts/overlay_upstream_binding.sh` builds `.overlay-upstream/`: this repo's
-`python/mssql_python` plus upstream's compiled C++ binding. `scripts/test_overlay.sh
+`python/arrowsql` plus upstream's compiled C++ binding. `scripts/test_overlay.sh
 <db-id> <pytest args>` runs pytest on it against a private database.
 
 ## Lock timeout class (`exceptions.py`, RUST-PORT)

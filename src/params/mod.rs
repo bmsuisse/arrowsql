@@ -200,7 +200,7 @@ fn data_error(message: &str, also_value_error: bool) -> PyErr {
         let class = if also_value_error {
             data_value_error_class(py)
         } else {
-            PyModule::import(py, "mssql_python.exceptions")
+            PyModule::import(py, "arrowsql.exceptions")
                 .and_then(|module| module.getattr("DataError"))
         };
         // `Error` takes (driver_error, ddbc_error) like the errors raised for server diagnostics.
@@ -214,7 +214,7 @@ fn data_error(message: &str, also_value_error: bool) -> PyErr {
 /// The class `DataError` + `ValueError`, created once per interpreter.
 fn data_value_error_class(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     let class = DATA_VALUE_ERROR_CLASS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
-        let data_error = PyModule::import(py, "mssql_python.exceptions")?.getattr("DataError")?;
+        let data_error = PyModule::import(py, "arrowsql.exceptions")?.getattr("DataError")?;
         let bases = PyTuple::new(py, [data_error, py.get_type::<PyValueError>().into_any()])?;
         // str() is the bare message, as upstream's ValueError reads: its parity
         // tests compare it byte for byte (test_023 test_integer_overflow_detected).

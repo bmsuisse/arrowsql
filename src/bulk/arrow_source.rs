@@ -38,7 +38,7 @@ fn is_native_result_stream(source: &Bound<'_, PyAny>) -> bool {
     source
         .get_type()
         .fully_qualified_name()
-        .is_ok_and(|name| name == "mssql_python.ddbc_bindings.ArrowStream")
+        .is_ok_and(|name| name == "arrowsql.ddbc_bindings.ArrowStream")
 }
 
 fn read_to_end(batches: ArrowBatches) -> PyResult<ArrowBatches> {

@@ -1,6 +1,6 @@
 """Native asyncio API on the Rust core.
 
-    from mssql_python import aio
+    from arrowsql import aio
 
     async with await aio.connect(conn_str, autocommit=True) as conn:
         cur = conn.cursor()
@@ -23,10 +23,10 @@ import asyncio
 import weakref
 from typing import Any, Optional, Sequence
 
-from mssql_python import ddbc_bindings as _core
-from mssql_python.constants import ConstantsDDBC as _const
-from mssql_python.cursor import Cursor as _SyncCursor
-from mssql_python.helpers import get_settings
+from arrowsql import ddbc_bindings as _core
+from arrowsql.constants import ConstantsDDBC as _const
+from arrowsql.cursor import Cursor as _SyncCursor
+from arrowsql.helpers import get_settings
 
 __all__ = ["connect", "create_pool", "AsyncConnection", "AsyncCursor", "Pool"]
 
@@ -62,9 +62,9 @@ class _Shape:
 def _require_native() -> None:
     # RUST-PORT: the native hub is compiled for Unix only (src/lib.rs).
     if not hasattr(_core, "AioHub"):
-        from mssql_python.exceptions import NotSupportedError
+        from arrowsql.exceptions import NotSupportedError
 
-        message = "mssql_python.aio is only available on Unix platforms (Linux, macOS)"
+        message = "arrowsql.aio is only available on Unix platforms (Linux, macOS)"
         raise NotSupportedError(driver_error=message, ddbc_error=message)
 
 
@@ -507,12 +507,12 @@ async def create_pool(
 
 
 def _interface_error(message: str):
-    from mssql_python.exceptions import InterfaceError
+    from arrowsql.exceptions import InterfaceError
 
     return InterfaceError(driver_error=message, ddbc_error=message)
 
 
 def _programming_error(message: str):
-    from mssql_python.exceptions import ProgrammingError
+    from arrowsql.exceptions import ProgrammingError
 
     return ProgrammingError(driver_error=message, ddbc_error=message)

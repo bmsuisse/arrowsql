@@ -338,7 +338,7 @@ class MSSQLLogger:
 
             # Get driver version (try to import from package)
             try:
-                from mssql_python import __version__
+                from arrowsql import __version__
 
                 driver_version = __version__
             except:
@@ -661,7 +661,7 @@ logger = MSSQLLogger()
 
 # Expose the underlying Python logger for use in application code
 # This allows applications to access the same logger used by the driver
-# Usage: from mssql_python.logging import driver_logger
+# Usage: from arrowsql.logging import driver_logger
 driver_logger = logger._logger
 
 # ============================================================================
@@ -687,7 +687,7 @@ def setup_logging(output: str = "file", log_file_path: Optional[str] = None):
                       If not specified, auto-generates in ./mssql_python_logs/
 
     Examples:
-        import mssql_python
+        import arrowsql
 
         # File only (default, in mssql_python_logs folder)
         mssql_python.setup_logging()

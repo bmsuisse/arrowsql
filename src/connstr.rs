@@ -270,7 +270,7 @@ pub fn build_context_with(
     } else if let AuthKeyword::Federated(method) = keyword {
         let factory = federated.ok_or_else(|| {
             format!(
-                "Authentication={} needs a token factory; connect through mssql_python.connect \
+                "Authentication={} needs a token factory; connect through arrowsql.connect \
                  (requires azure-identity: pip install arrowsql[azure])",
                 first(&map, &["authentication"]).unwrap_or_default()
             )

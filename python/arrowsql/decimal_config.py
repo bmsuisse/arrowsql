@@ -8,7 +8,7 @@ This module provides functions for managing decimal separator configuration.
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
-    from mssql_python.helpers import Settings
+    from arrowsql.helpers import Settings
 
 
 def _setDecimalSeparator(separator: str, settings: "Settings", set_in_cpp_func=None) -> None:
@@ -79,7 +79,7 @@ def create_decimal_separator_functions(settings: "Settings"):
     """
     # Try to import and initialize the C++ binding
     try:
-        from mssql_python.ddbc_bindings import DDBCSetDecimalSeparator
+        from arrowsql.ddbc_bindings import DDBCSetDecimalSeparator
 
         # Set the initial decimal separator in C++
         DDBCSetDecimalSeparator(settings.decimal_separator)

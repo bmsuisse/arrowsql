@@ -3,7 +3,7 @@
 //! Upstream's C++ layer formats its own messages with a `[DDBC] ` prefix and
 //! hands them to the Python logger, so they land in the same handlers and file
 //! as the Python-side records. This module does the same through
-//! `mssql_python.logging.logger.py_core_log`.
+//! `arrowsql.logging.logger.py_core_log`.
 //!
 //! The Python side pushes its level into `update_log_level`; `enabled` checks
 //! that cached level before any message is formatted.
@@ -50,7 +50,7 @@ pub fn debug(py: Python<'_>, msg: &str) {
 }
 
 fn emit(py: Python<'_>, level: i32, msg: &str) -> PyResult<()> {
-    let module = PyModule::import(py, "mssql_python.logging")?;
+    let module = PyModule::import(py, "arrowsql.logging")?;
     let logger = module.getattr("logger")?;
     logger.call_method1("py_core_log", (level, format!("[DDBC] {msg}")))?;
     Ok(())
