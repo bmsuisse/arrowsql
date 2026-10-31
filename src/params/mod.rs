@@ -15,7 +15,7 @@ pub mod udt;
 
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::message::parameters::rpc_parameters::{RpcParameter, StatusFlags};
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyTypeError, PyUnicodeEncodeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyInt, PyList, PyModule, PySequence, PyTuple, PyType};
@@ -157,10 +157,23 @@ pub fn conversion_error(err: &mssql_tds::error::Error) -> PyErr {
                 PyValueError::new_err(msg.clone())
             }
         }
-        mssql_tds::error::Error::UsageError(msg) => PyTypeError::new_err(msg.clone()),
+        mssql_tds::error::Error::UsageError(msg) => match msg.strip_prefix(UNICODE_ENCODE_PREFIX) {
+            Some(reason) => PyErr::new::<PyUnicodeEncodeError, _>((
+                "utf-8",
+                "",
+                0usize,
+                1usize,
+                reason.to_string(),
+            )),
+            None => PyTypeError::new_err(msg.clone()),
+        },
         other => PyTypeError::new_err(other.to_string()),
     }
 }
+
+/// Marks a `UsageError` for a str that cannot be encoded (a lone surrogate); the
+/// rest of the message is the encoder's reason. Raised as `UnicodeEncodeError`.
+pub(crate) const UNICODE_ENCODE_PREFIX: &str = "unicode encode error: ";
 
 static DATA_VALUE_ERROR_CLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 

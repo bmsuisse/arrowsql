@@ -192,18 +192,11 @@ def test_varchar_utf8_collation_stores_full_unicode(cursor):
     assert bytes(raw) == ("é€" + EMOJI + "中").encode("utf-8")
 
 
-@pytest.mark.upstream_bug(
-    reason=(
-        "CAST(N'<emoji>' AS NVARCHAR(1)) returns the lone high surrogate (2 bytes, D8 3D); "
-        "upstream fetch raises UnicodeDecodeError instead of returning the value "
-        "(fetchall returns '' on a first call, then raises on the next fetch)"
-    )
-)
-@pytest.mark.xfail(strict=True, reason="upstream bug")
-def test_truncated_surrogate_pair_fetch_returns_code_unit(cursor):
-    # Truncation splits the pair; the server returns the single code unit 0xD83D.
-    value = _fetch_one(cursor, f"SELECT CAST(N'{EMOJI}' AS NVARCHAR(1))")[0]
-    assert value == "\ud83d"
+def test_truncated_surrogate_pair_fetch_raises_decode_error(cursor):
+    # Truncation splits the pair, leaving the lone code unit 0xD83D. A strict fetch
+    # raises, as tests/upstream/test_017 requires for unpaired surrogates.
+    with pytest.raises(UnicodeDecodeError):
+        _fetch_one(cursor, f"SELECT CAST(N'{EMOJI}' AS NVARCHAR(1))")
 
 
 def test_nvarchar_max_many_emoji_roundtrip(cursor):

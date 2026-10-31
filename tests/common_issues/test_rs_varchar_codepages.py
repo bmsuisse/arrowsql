@@ -185,6 +185,8 @@ def test_truncation_counts_bytes_not_characters(cursor):
 @pytest.mark.xfail(strict=True, reason="upstream bug")
 def test_truncation_raises_data_error_consistently(cursor):
     _create_varchar(cursor, CYR_COLL, size=4)
+    # Commit so the rollback below keeps #v; otherwise the second insert hits a missing table.
+    cursor.connection.commit()
     for row_id in (1, 2):
         with pytest.raises(DataError):
             cursor.execute("INSERT INTO #v VALUES (?, ?)", row_id, "Привет")  # 6 bytes > 4

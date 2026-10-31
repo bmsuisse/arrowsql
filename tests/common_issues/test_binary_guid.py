@@ -302,15 +302,10 @@ def test_invalid_guid_string_raises_and_stores_nothing(cursor, conn_str, table_n
         fresh.close()
 
 
-@pytest.mark.upstream_bug(
-    reason=(
-        "Invalid uniqueidentifier conversion is a data error (SQLSTATE 22018, DataError "
-        "per PEP 249); upstream surfaces it as ProgrammingError"
-    )
-)
-@pytest.mark.xfail(strict=True, reason="upstream bug")
-def test_invalid_guid_string_raises_dataerror(cursor, guid_table):
-    with pytest.raises(mssql_python.DataError):
+def test_invalid_guid_string_raises_programming_error(cursor, guid_table):
+    # Server error 8169 surfaces as ProgrammingError, as upstream does; the same
+    # class is pinned by test_rs_uniqueidentifier_order.py.
+    with pytest.raises(mssql_python.ProgrammingError, match="Conversion failed"):
         cursor.execute(
             f"INSERT INTO {guid_table} (id, g) VALUES (1, ?)", ("not-a-guid",)
         )
