@@ -81,7 +81,16 @@ pub fn time_length(scale: u8) -> usize {
 
 /// `ticks` (100 ns) in the unit a fractional-second scale stores.
 fn time_units(ticks: u64, scale: u8) -> u64 {
-    ticks / 10u64.pow(7 - u32::from(scale.min(7)))
+    match scale {
+        0 => ticks / 10_000_000,
+        1 => ticks / 1_000_000,
+        2 => ticks / 100_000,
+        3 => ticks / 10_000,
+        4 => ticks / 1_000,
+        5 => ticks / 100,
+        6 => ticks / 10,
+        _ => ticks,
+    }
 }
 
 pub fn put_time(out: &mut Vec<u8>, ticks: u64, scale: u8) {
@@ -197,8 +206,8 @@ pub fn put_wide_text(out: &mut Vec<u8>, layout: Layout, text: &str) -> Result<()
         if text.is_ascii() {
             let start = out.len();
             out.resize(start + 2 * text.len(), 0);
-            for (i, byte) in text.bytes().enumerate() {
-                out[start + 2 * i] = byte;
+            for (unit, byte) in out[start..].chunks_exact_mut(2).zip(text.bytes()) {
+                unit[0] = byte;
             }
         } else {
             for unit in text.encode_utf16() {
@@ -309,4 +318,20 @@ pub fn finite(value: f64, name: &str) -> Result<(), String> {
         return Ok(());
     }
     Err(format!("Non-finite float value ({value}) is not allowed in column '{name}'"))
+}
+
+const POW10: [u128; 39] = {
+    let mut table = [1u128; 39];
+    let mut i = 1;
+    while i < 39 {
+        table[i] = table[i - 1] * 10;
+        i += 1;
+    }
+    table
+};
+
+/// `10^exponent` from a table, `None` past `10^38` (the u128 limit).
+#[inline]
+pub(super) fn checked_pow10(exponent: u32) -> Option<u128> {
+    POW10.get(exponent as usize).copied()
 }

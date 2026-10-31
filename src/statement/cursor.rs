@@ -206,7 +206,7 @@ pub fn read_rows_into<W: RowWriter + Send>(
 ) -> mssql_tds::core::TdsResult<bool> {
     client.block_on(|c| async move {
         let start = rows_written(sink);
-        while rows_written(sink) - start < max_rows && bytes_written(sink) < max_bytes {
+        while rows_written(sink) - start < max_rows && (max_bytes == usize::MAX || bytes_written(sink) < max_bytes) {
             if !c.next_row_into(sink).await? {
                 // Like msodbcsql, error 266 (BEGIN/COMMIT mismatch at procedure
                 // exit) fails the fetch of the procedure's last row set; other

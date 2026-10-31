@@ -147,17 +147,21 @@ impl RowBuffer {
                 // non-ASCII value no longer shows (UTF-8 and DBCS collations), so only
                 // ASCII values are padded; nchar(n) counts UTF-16 units, always exact.
                 let bytes = &self.arena[span.start..span.start + span.len];
-                if !wide && !bytes.is_ascii() {
-                    continue;
-                }
                 let chars = if wide { bytes.len() / 2 } else { bytes.len() };
-                if chars >= width {
+                if chars >= width || (!wide && !bytes.is_ascii()) {
                     continue;
                 }
                 let start = self.arena.len();
                 self.arena.extend_from_within(span.start..span.start + span.len);
-                for _ in chars..width {
-                    self.arena.extend_from_slice(if wide { b" \0" } else { b" " });
+                if wide {
+                    let end = self.arena.len() + 2 * (width - chars);
+                    self.arena.resize(end, 0);
+                    for unit in self.arena[start + span.len..].chunks_exact_mut(2) {
+                        unit[0] = b' ';
+                    }
+                } else {
+                    let end = self.arena.len() + (width - chars);
+                    self.arena.resize(end, b' ');
                 }
                 let padded = Span { start, len: self.arena.len() - start };
                 self.cells[index] = if wide { Cell::Utf16(padded) } else { Cell::Utf8(padded) };

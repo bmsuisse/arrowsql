@@ -45,11 +45,3 @@ pub fn decimal_object<'py>(py: Python<'py>, value: &DecimalParts) -> PyResult<Bo
     let mut buf = [0u8; DECIMAL_STR_LEN];
     decimal_from_str(py, value.format_into(&mut buf))
 }
-
-/// money/smallmoney scaled by 10^4 -> Decimal with 4 fractional digits.
-pub fn money(py: Python<'_>, scaled: i64) -> PyResult<*mut ffi::PyObject> {
-    let sign = if scaled < 0 { "-" } else { "" };
-    let magnitude = scaled.unsigned_abs();
-    let text = format!("{sign}{}.{:04}", magnitude / 10_000, magnitude % 10_000);
-    Ok(decimal_from_str(py, &text)?.into_ptr())
-}
