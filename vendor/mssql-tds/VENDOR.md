@@ -49,5 +49,18 @@ Local patches (search for `VENDOR PATCH`):
      ASCII fast path. `src/datatypes/sqltypes.rs`: `get_nullable_type` is
      `pub(crate)`.
 
+6. Busy polling for the first response byte (marked `RUST-PORT`):
+   `src/connection/transport/busy_poll.rs` (new), `network_transport.rs`
+   (`Stream::raw_fd`, `NetworkTransport::{raw_fd, awaiting_response,
+   first_byte_wait_ns}`, the first read in `get_new_tds_packet`). On threads
+   that opt in (`busy_poll::ThreadGuard`, entered by the port's synchronous
+   `block_on`), the first read after a request spins on `poll(fd, POLLIN, 0)`
+   for at most twice the connection's recent first-byte wait (100-400 us,
+   only while that wait is under 300 us) before sleeping in epoll, so a short
+   query skips the sleep and the scheduler's wake-up latency. At most two
+   threads spin at a time, none on machines with fewer than 4 CPUs;
+   `MSSQL_RS_BUSY_POLL=0` turns it off. Costs CPU: a short round trip keeps
+   one core busy while it waits.
+
 To drop the vendored copy, delete this directory and the `[patch]` section
 in ../../Cargo.toml once the fix is in the pinned upstream rev.

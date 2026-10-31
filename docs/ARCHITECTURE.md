@@ -88,6 +88,12 @@ and return `SQL_ERROR` — never panic.
   `get_info`): they wait for a running query without the GIL.
 - All network calls run through `runtime::block_on` on the shared runtime
   from the calling thread, with the GIL released.
+- Waiting for a short query's first response byte spins briefly on the socket
+  (`busy_poll`, see `vendor/mssql-tds/VENDOR.md` item 6) instead of sleeping in
+  epoll: it skips the scheduler's wake-up latency, which is a few percent of a
+  `SELECT 1` round trip, at the price of one busy core for the wait. Adaptive
+  (only while this connection's recent waits are under 300 us), at most two
+  spinners process-wide, `MSSQL_RS_BUSY_POLL=0` disables it.
 - `StmtShared::cancel` is a separate lock so `_cancel` from another thread
   never waits behind a running fetch; it cancels via `CancelHandle`.
 

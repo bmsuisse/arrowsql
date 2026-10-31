@@ -51,6 +51,8 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{self, TcpStream};
+
+use super::busy_poll;
 use tokio::time::{Instant, timeout, timeout_at};
 use tracing::{debug, error, event, info, trace, warn};
 
@@ -780,7 +782,8 @@ async fn create_transport_for_version(
         encryption_options,
     };
 
-    match tds_version {
+    let raw_fd = stream.raw_fd();
+    let created = match tds_version {
         TdsVersion::V7_4 => {
             // TDS 7.4 starts with unencrypted streams that could get encrypted as part of prelogin
             // negotiation. TLS must be wrapped in TDS packets for this version.
@@ -824,7 +827,11 @@ async fn create_transport_for_version(
         TdsVersion::Unknown(version_value) => Err(crate::error::Error::ProtocolError(format!(
             "Unsupported TDS version: 0x{version_value:08X}. Only TDS 7.4 and TDS 8.0 are supported."
         ))),
-    }
+    };
+    created.map(|mut transport| {
+        transport.raw_fd = raw_fd;
+        transport
+    })
 }
 
 /// Creates a network transport for the specified parameters, along with what a
@@ -900,6 +907,12 @@ pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send + Sync {
         false
     }
 
+    /// RUST-PORT: the socket's file descriptor when this stream is the plain
+    /// TCP socket itself (used for busy polling), `-1` otherwise.
+    fn raw_fd(&self) -> i32 {
+        -1
+    }
+
     /// Returns this connection's TLS channel binding token (`tls-unique`,
     /// RFC 5929 §3) if one is available.
     ///
@@ -917,6 +930,11 @@ pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send + Sync {
 }
 
 impl Stream for TcpStream {
+    #[cfg(unix)]
+    fn raw_fd(&self) -> i32 {
+        std::os::fd::AsRawFd::as_raw_fd(self)
+    }
+
     fn tls_handshake_starting(&mut self) {
         // No-op for plain TCP streams
     }
@@ -945,6 +963,10 @@ impl Stream for TcpStream {
 }
 
 impl Stream for Box<dyn Stream> {
+    fn raw_fd(&self) -> i32 {
+        (**self).raw_fd()
+    }
+
     fn tls_handshake_starting(&mut self) {
         (**self).tls_handshake_starting();
     }
@@ -1202,6 +1224,13 @@ pub(crate) struct NetworkTransport {
     data_classification_version: Option<DataClassificationVersion>,
     /// Tokens drained by the transport but still needed by client state handling.
     attention_settlement: Option<Box<AttentionSettlement>>,
+    /// RUST-PORT: socket descriptor for busy polling, `-1` when unavailable.
+    raw_fd: i32,
+    /// RUST-PORT: a request was sent and its first response byte has not been
+    /// read yet.
+    awaiting_response: bool,
+    /// RUST-PORT: moving average of that wait, nanoseconds.
+    first_byte_wait_ns: u64,
 }
 
 impl std::fmt::Debug for NetworkTransport {
@@ -1319,6 +1348,9 @@ impl NetworkTransport {
             column_encryption_supported: false,
             data_classification_version: None,
             attention_settlement: None,
+            raw_fd: -1,
+            awaiting_response: false,
+            first_byte_wait_ns: busy_poll::INITIAL_WAIT_NS,
         }
     }
 
@@ -1617,6 +1649,7 @@ impl NetworkTransport {
         let Some(new_packet_size) = self.try_get_new_tds_packet()? else {
             return Ok(false);
         };
+        self.awaiting_response = false;
         self.tds_read_buffer
             .remove_header_from_packet(new_packet_size);
         Ok(true)
@@ -1885,15 +1918,31 @@ impl NetworkTransport {
                 return Ok(packet_size);
             }
 
+            let first_byte_started = if std::mem::take(&mut self.awaiting_response) {
+                let started = std::time::Instant::now();
+                if self.raw_fd >= 0
+                    && self.stream.is_some()
+                    && busy_poll::should_spin(self.first_byte_wait_ns)
+                {
+                    busy_poll::spin(self.raw_fd, self.first_byte_wait_ns);
+                }
+                Some(started)
+            } else {
+                None
+            };
             let stream = self.stream.as_mut().ok_or_else(|| {
                 crate::error::Error::ConnectionClosed(
                     "Cannot read TDS packet: connection has been closed".to_string(),
                 )
             })?;
-            let bytes_read = match stream
+            let read_result = stream
                 .read(&mut self.tds_read_buffer.working_buffer[base_offset + bytes_available..])
-                .await
-            {
+                .await;
+            if let Some(started) = first_byte_started {
+                let waited = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                self.first_byte_wait_ns = (self.first_byte_wait_ns * 3 + waited.min(10_000_000)) / 4;
+            }
+            let bytes_read = match read_result {
                 Ok(bytes_read) => bytes_read,
                 Err(error) => {
                     self.known_dead = true;
@@ -3451,6 +3500,7 @@ impl crate::connection::transport::tds_transport::TdsTransport for NetworkTransp
     fn reset_reader(&mut self) {
         self.tds_read_buffer.change_packet_size(self.packet_size);
         self.tds_read_buffer.reset_to_length(0);
+        self.awaiting_response = true;
     }
 
     fn packet_size(&self) -> u32 {

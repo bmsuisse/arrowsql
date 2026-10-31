@@ -111,6 +111,7 @@ impl SyncClient {
         Fut: Future,
     {
         let Self { client, io } = self;
+        let _spin = mssql_tds::connection::transport::busy_poll::ThreadGuard::enter();
         io.block_on(op(client))
     }
 }

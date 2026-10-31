@@ -10,6 +10,7 @@ pub(crate) mod localdb;
 #[cfg(windows)]
 pub(crate) mod named_pipes;
 /// Network transport creation and TLS negotiation.
+pub mod busy_poll;
 pub mod network_transport;
 /// Parallel TCP connect for MultiSubnetFailover.
 pub mod parallel_connect;
