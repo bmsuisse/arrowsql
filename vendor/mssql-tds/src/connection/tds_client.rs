@@ -1464,6 +1464,17 @@ impl TdsClient {
         self.transport.connection_known_dead()
     }
 
+    /// RUST-PORT: whether the server ended this idle session, told from the
+    /// socket alone (no request, nothing read): any pending data, FIN or error
+    /// counts. Only meaningful with no request outstanding. `None` when the
+    /// transport cannot tell; a pool then has to send a probe request.
+    pub fn idle_peer_gone(&self) -> Option<bool> {
+        if self.transport.connection_known_dead() {
+            return Some(true);
+        }
+        self.transport.idle_peer_gone()
+    }
+
     /// Marks the connection known-dead so [`is_connection_dead`] reports it
     /// without touching the socket. A caller that observes the session in an
     /// unrecoverable state — e.g. a connection-pool reset that failed partway —

@@ -2834,6 +2834,14 @@ impl TdsPacketReader for NetworkTransport {
 }
 
 impl NetworkTransport {
+    /// RUST-PORT: see [`busy_poll::idle_peer_gone`].
+    pub(crate) fn idle_peer_gone(&self) -> Option<bool> {
+        if self.stream.is_none() {
+            return Some(true);
+        }
+        busy_poll::idle_peer_gone(self.raw_fd)
+    }
+
     /// Parses a buffered ROW/NBCROW header without refilling the network buffer.
     pub(crate) fn try_receive_row_header(
         &mut self,

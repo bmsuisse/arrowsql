@@ -84,9 +84,19 @@ def summarize(samples: list[float]) -> dict:
 def sqlcmd(sql: str, database: str = "nyctaxi", timeout: int = 900) -> str:
     """Run T-SQL through sqlcmd inside the container (driver-independent setup path)."""
     info = ConnInfo.from_env(database)
-    cmd = ["podman", "exec", "-i", CONTAINER, f"{SQLTOOLS}/sqlcmd", "-C", "-S", "localhost", "-U", info.user,
-           "-P", info.password, "-d", database, "-b", "-h", "-1", "-W", "-s", "|", "-i", "/dev/stdin"]
-    p = subprocess.run(cmd, input=sql, capture_output=True, text=True, timeout=timeout)
+    args = ["-C", "-U", info.user, "-P", info.password, "-d", database, "-b", "-h", "-1", "-W", "-s", "|",
+            "-i", "/dev/stdin"]
+    # BCP_HOST_BIN (see drivers/bcp_driver.py) also holds a host-side sqlcmd, used over
+    # the published port when `podman exec` into the container is unavailable.
+    host_bin = os.environ.get("BCP_HOST_BIN")
+    if host_bin:
+        odbc = Path(os.environ.get("BCP_ODBC_DIR", str(Path.home() / "devops/mssql-python-rs/.bench-odbc")))
+        cmd = [f"{host_bin}/sqlcmd", "-S", f"{info.host},{info.port}", *args]
+        env = {**os.environ, "LD_LIBRARY_PATH": str(odbc / "lib"), "ODBCSYSINI": str(odbc / "etc")}
+    else:
+        cmd = ["podman", "exec", "-i", CONTAINER, f"{SQLTOOLS}/sqlcmd", "-S", "localhost", *args]
+        env = None
+    p = subprocess.run(cmd, input=sql, capture_output=True, text=True, timeout=timeout, env=env)
     if p.returncode != 0:
         raise RuntimeError(f"sqlcmd failed: {(p.stdout + p.stderr).strip()[:500]}")
     return p.stdout

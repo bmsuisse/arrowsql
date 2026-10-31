@@ -428,6 +428,15 @@ impl AnyTransport {
         }
     }
 
+    /// RUST-PORT: see [`busy_poll::idle_peer_gone`](super::busy_poll::idle_peer_gone).
+    pub(crate) fn idle_peer_gone(&self) -> Option<bool> {
+        match self {
+            Self::Network(transport) => transport.idle_peer_gone(),
+            #[cfg(any(test, feature = "test-util", fuzzing))]
+            Self::Dynamic(_) => None,
+        }
+    }
+
     pub(crate) fn connection_known_dead(&self) -> bool {
         match self {
             Self::Network(transport) => TdsTransport::connection_known_dead(transport),

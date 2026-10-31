@@ -79,5 +79,13 @@ Local patches (search for `VENDOR PATCH`):
    sends `std::process::id()` instead of 0, as the ODBC driver does, so
    `sys.dm_exec_sessions.host_process_id` identifies the client process.
 
+9. Round-trip-free liveness of an idle session (marked `RUST-PORT`):
+   `TdsClient::idle_peer_gone`, `AnyTransport` / `NetworkTransport::idle_peer_gone`,
+   `busy_poll::idle_peer_gone`. A zero-timeout `poll(fd, POLLIN)` on the TCP
+   socket under the TLS layer: an idle TDS session never receives unsolicited
+   bytes, so any readiness (data, FIN, error) means the server ended it. Unlike
+   `TdsTransport::is_connection_dead` it reads nothing, so it cannot desync the
+   TLS stream. The port's connection pool uses it instead of a probe request.
+
 To drop the vendored copy, delete this directory and the `[patch]` section
 in ../../Cargo.toml once the fix is in the pinned upstream rev.

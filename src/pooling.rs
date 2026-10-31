@@ -138,21 +138,28 @@ pub enum Acquired {
     Fresh(Lease),
 }
 
-/// Check out a session for `key` or reserve capacity for a new one.
-pub fn acquire(key: &str) -> Result<Acquired, PoolFull> {
+/// Check out a session for `key` or reserve capacity for a new one. Also
+/// returns the expired or dead sessions it dropped, for the caller to close
+/// (`close_all`, network I/O) once it no longer needs the result in a hurry:
+/// the checkout itself does no I/O and takes the pool lock only briefly.
+pub fn acquire(key: &str) -> (Result<Acquired, PoolFull>, Vec<SyncClient>) {
     let mut to_close = Vec::new();
     let outcome = {
         let mut manager = MANAGER.lock();
         if !manager.accepting {
-            return Ok(Acquired::Declined);
+            return (Ok(Acquired::Declined), to_close);
         }
         evict_expired(&mut manager, &mut to_close);
         let generation = manager.generation;
         let max_size = manager.max_size;
-        let pool = manager.pools.entry(key.to_string()).or_default();
+        if !manager.pools.contains_key(key) {
+            manager.pools.insert(key.to_string(), KeyPool::default());
+        }
+        let pool = manager.pools.get_mut(key).expect("inserted above");
         let mut reusable = None;
         while let Some(idle) = pool.idle.pop() {
-            if idle.entry.client.is_connection_dead() {
+            let client = &idle.entry.client;
+            if client.idle_peer_gone().unwrap_or_else(|| client.is_connection_dead()) {
                 pool.size = pool.size.saturating_sub(1);
                 to_close.push(idle.entry.client);
             } else {
@@ -172,14 +179,17 @@ pub fn acquire(key: &str) -> Result<Acquired, PoolFull> {
             None => Err(PoolFull),
         }
     };
-    close_all(to_close);
-    outcome
+    (outcome, to_close)
 }
 
 /// Drop idle sessions older than the idle timeout, in every pool.
 fn evict_expired(manager: &mut Manager, to_close: &mut Vec<SyncClient>) {
     let timeout = manager.idle_timeout;
     manager.pools.retain(|_, pool| {
+        // Sessions are checked in at the back, so the front one is the oldest.
+        if pool.idle.first().is_none_or(|i| i.since.elapsed() <= timeout) {
+            return pool.size > 0 || !pool.idle.is_empty();
+        }
         let (expired, kept): (Vec<_>, Vec<_>) =
             std::mem::take(&mut pool.idle).into_iter().partition(|i| i.since.elapsed() > timeout);
         pool.size = pool.size.saturating_sub(expired.len());
@@ -232,17 +242,25 @@ pub fn checkin(mut lease: Lease, mut entry: IdleClient) -> Option<SyncClient> {
     None
 }
 
-/// Send one trivial request before a session is kept idle. A session the
-/// server ended while it sat in the caller's hands (KILL, network loss) looks
-/// healthy until something is sent on it; without this it would be pooled and
-/// fail the next borrower. Failure marks the session dead, so `checkin`
-/// refuses it. The request is a SET, which never opens an implicit
-/// transaction (a SELECT would, under IMPLICIT_TRANSACTIONS). Runs outside
-/// the pool lock. The probe is bounded by [`VERIFY_TIMEOUT`]: a half-open
-/// socket (peer gone without a FIN) would otherwise stall `close()` until TCP
-/// keepalive gives up. Returns false when the probe timed out.
+/// Make sure a session the server ended while it sat in the caller's hands
+/// (KILL, network loss) is not kept idle: it looks healthy until something is
+/// sent on it, and would fail the next borrower. Where the socket can be
+/// looked at, `acquire` does that before reusing it, a zero-timeout poll
+/// with no round trip: the server closes the socket of a session it ends, and
+/// an idle session gets no other data. Otherwise one trivial request
+/// is sent, a SET, which never opens an implicit transaction (a SELECT would,
+/// under IMPLICIT_TRANSACTIONS), outside the pool lock and bounded by
+/// [`VERIFY_TIMEOUT`]: a half-open socket (peer gone without a FIN) would
+/// otherwise stall `close()` until TCP keepalive gives up. Failure marks the
+/// session dead, so `checkin` refuses it. Returns false when the probe timed
+/// out.
 fn verify_alive(client: &mut SyncClient) -> bool {
     if client.is_connection_dead() || client.has_open_batch() {
+        return true;
+    }
+    // On unix `acquire` can always look at the socket (network sessions only:
+    // named pipes are Windows-only), and that check suffices.
+    if cfg!(unix) {
         return true;
     }
     client

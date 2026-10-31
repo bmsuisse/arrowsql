@@ -403,6 +403,36 @@ impl Connection {
         Ok(slot.client.take())
     }
 
+    /// The session, when it can go back to the pool without any I/O: no batch
+    /// on the wire, no transaction to roll back, and (on unix) liveness told
+    /// from the socket by the next checkout instead of a probe request.
+    fn take_quiet_client(&self, transaction_already_rolled_back: bool) -> Option<SyncClient> {
+        if !cfg!(unix) {
+            return None;
+        }
+        let mut slot = self.shared.slot.try_lock()?;
+        let quiet = slot.owner.is_none()
+            && slot.client.as_ref().is_some_and(|c| {
+                !c.has_open_batch() && (transaction_already_rolled_back || !c.has_active_transaction())
+            });
+        if !quiet {
+            return None;
+        }
+        self.closed.store(true, Ordering::Release);
+        slot.client.take()
+    }
+
+    /// Hand a sanitised session back to its pool; returns it when refused.
+    fn checkin(&self, client: SyncClient, membership: PoolMembership) -> Option<SyncClient> {
+        let entry = IdleClient {
+            client,
+            token: membership.token,
+            token_expiry: membership.token_expiry,
+            connection_timeout: self.shared.connection_timeout.load(Ordering::Relaxed),
+        };
+        pooling::checkin(membership.lease, entry)
+    }
+
     /// Close a non-pooled session, or sanitise a pooled one and return it.
     fn retire(&self, mut client: SyncClient, transaction_already_rolled_back: bool) -> PyResult<()> {
         let Some(membership) = self.pool.lock().take() else {
@@ -414,13 +444,7 @@ impl Connection {
             let _ = client.block_on(|c| c.close_connection());
             return Err(err);
         }
-        let entry = IdleClient {
-            client,
-            token: membership.token,
-            token_expiry: membership.token_expiry,
-            connection_timeout: self.shared.connection_timeout.load(Ordering::Relaxed),
-        };
-        if let Some(rejected) = pooling::checkin(membership.lease, entry) {
+        if let Some(rejected) = self.checkin(client, membership) {
             pooling::close_all(vec![rejected]);
         }
         Ok(())
@@ -580,9 +604,14 @@ impl Connection {
         let fedauth = fedauth_factory.filter(|f| !f.bind(py).is_none());
         let pool_id = use_pool.then(|| pooling::key(&conn_str, &pool_key));
         let acquired = match &pool_id {
-            Some(id) => py
-                .detach(|| pooling::acquire(id))
-                .map_err(|_| driver_error("HY000", "ConnectionPool::acquire: pool size limit reached"))?,
+            Some(id) => {
+                // The pool lock is never held by a thread waiting for the GIL.
+                let (acquired, to_close) = pooling::acquire(id);
+                if !to_close.is_empty() {
+                    py.detach(|| pooling::close_all(to_close));
+                }
+                acquired.map_err(|_| driver_error("HY000", "ConnectionPool::acquire: pool size limit reached"))?
+            }
             None => Acquired::Declined,
         };
         let (lease, pooled) = match acquired {
@@ -618,6 +647,14 @@ impl Connection {
             return Ok(());
         }
         let pooled = self.pool.lock().is_some();
+        if pooled && let Some(client) = self.take_quiet_client(transaction_already_rolled_back) {
+            // Nothing to send: back to the pool without releasing the GIL.
+            let membership = self.pool.lock().take().expect("pooled connection without membership");
+            if let Some(rejected) = self.checkin(client, membership) {
+                py.detach(|| pooling::close_all(vec![rejected]));
+            }
+            return Ok(());
+        }
         py.detach(|| {
             match self.take_client(transaction_already_rolled_back, pooled)? {
                 Some(client) => self.retire(client, transaction_already_rolled_back),

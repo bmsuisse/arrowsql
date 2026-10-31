@@ -19,6 +19,7 @@ import struct
 from types import MappingProxyType
 from typing import Any, Dict, Optional, Union, List, Tuple, Callable, Protocol, TYPE_CHECKING
 import threading
+import logging
 
 import arrowsql
 from arrowsql.cursor import Cursor
@@ -211,6 +212,17 @@ _GETINFO_RETURN_TYPES = MappingProxyType(
 UTF16_ENCODINGS: frozenset[str] = frozenset(["utf-16le", "utf-16be"])
 
 # Optional "NATIVE:<n>:" carries the SQL Server error number (bindings that have it).
+# Enum values read on every connect.
+_SQL_CHAR = ConstantsDDBC.SQL_CHAR.value
+_SQL_WCHAR = ConstantsDDBC.SQL_WCHAR.value
+_SQL_ATTR_AUTOCOMMIT = ConstantsDDBC.SQL_ATTR_AUTOCOMMIT.value
+_SQL_COPT_SS_ACCESS_TOKEN = ConstantsDDBC.SQL_COPT_SS_ACCESS_TOKEN.value
+
+# Results of Connection._construct_connection_string by arguments; cleared
+# when full. Holds connection strings, so passwords too, like the pool does.
+_CONN_STR_CACHE: Dict[Any, Tuple[str, Dict[str, str]]] = {}
+_CONN_STR_CACHE_SIZE = 64
+
 _SQLSTATE_RE = re.compile(r"^SQLSTATE:([A-Z0-9]{0,5}):(?:NATIVE:(-?\d+):)?(.*)", re.DOTALL)
 
 
@@ -529,7 +541,7 @@ class Connection:
         # Python 3 only has str (which is Unicode), so we use utf-16le by default
         self._encoding_settings = {
             "encoding": "utf-16le",
-            "ctype": ConstantsDDBC.SQL_WCHAR.value,
+            "ctype": _SQL_WCHAR,
         }
 
         # Initialize decoding settings with Python 3 defaults
@@ -538,17 +550,17 @@ class Connection:
         # Windows where the driver returns raw bytes in the server's native
         # code page (e.g. CP-1252) that may fail to decode as UTF-8.
         self._decoding_settings = {
-            ConstantsDDBC.SQL_CHAR.value: {
+            _SQL_CHAR: {
                 "encoding": "utf-16le",
-                "ctype": ConstantsDDBC.SQL_WCHAR.value,
+                "ctype": _SQL_WCHAR,
             },
-            ConstantsDDBC.SQL_WCHAR.value: {
+            _SQL_WCHAR: {
                 "encoding": "utf-16le",
-                "ctype": ConstantsDDBC.SQL_WCHAR.value,
+                "ctype": _SQL_WCHAR,
             },
             SQL_WMETADATA: {
                 "encoding": "utf-16le",
-                "ctype": ConstantsDDBC.SQL_WCHAR.value,
+                "ctype": _SQL_WCHAR,
             },
         }
         self._decoding_generation = 0
@@ -830,7 +842,7 @@ class Connection:
         # distinct tokens never collide (upholds the "a token is present =>
         # key is never the bare connStr" invariant).
         if not self._pool_key:
-            _raw_token = self._attrs_before.get(ConstantsDDBC.SQL_COPT_SS_ACCESS_TOKEN.value)
+            _raw_token = self._attrs_before.get(_SQL_COPT_SS_ACCESS_TOKEN)
             if _raw_token is not None and not isinstance(_raw_token, (bytes, bytearray)):
                 # Fail closed: an access token supplied as anything other than
                 # raw bytes (e.g. a str) cannot be hashed into an identity-aware
@@ -882,7 +894,7 @@ class Connection:
         # Configure a reused connection's mode inside native checkout, while
         # its temporary connection timeout still bounds attribute-setting I/O.
         native_attrs = self._attrs_before.copy()
-        native_attrs[ConstantsDDBC.SQL_ATTR_AUTOCOMMIT.value] = int(bool(autocommit))
+        native_attrs[_SQL_ATTR_AUTOCOMMIT] = int(bool(autocommit))
         try:
             self._conn = ddbc_bindings.Connection(
                 self.connection_str,
@@ -1057,6 +1069,23 @@ class Connection:
                     ddbc_error="Embedded NUL in connection parameter.",
                 )
 
+        # Steps 1-5 depend on the arguments alone: a pool checkout with the same
+        # arguments reuses the result instead of parsing again.
+        try:
+            cache_key = (
+                (connection_str, tuple((k, str(v)) for k, v in kwargs.items()))
+                if kwargs
+                else connection_str
+            )
+            cached = _CONN_STR_CACHE.get(cache_key)
+        except TypeError:
+            cache_key = cached = None
+        if cached is not None:
+            if logger._cached_level <= logging.INFO:
+                logger.info("Final connection string: %s", sanitize_connection_string(cached[0]))
+            return cached[0], dict(cached[1])
+        warned = False
+
         # Step 1: Parse base connection string with allowlist validation
         # The parser validates everything: unknown params, reserved params, duplicates, syntax
         parser = _ConnectionStringParser(validate_keywords=True)
@@ -1083,6 +1112,7 @@ class Connection:
                 normalized_params[normalized_key] = str(value)
             else:
                 logger.warning(f"Ignoring unknown connection parameter from kwargs: {key}")
+                warned = True
 
         # Step 4: Add Driver and APP (always controlled by the driver).
         normalized_params["Driver"] = "ODBC Driver 18 for SQL Server"
@@ -1091,8 +1121,13 @@ class Connection:
         # Step 5: Build final connection string
         conn_str = _ConnectionStringBuilder(normalized_params).build()
 
-        logger.info("Final connection string: %s", sanitize_connection_string(conn_str))
+        if logger._cached_level <= logging.INFO:
+            logger.info("Final connection string: %s", sanitize_connection_string(conn_str))
 
+        if cache_key is not None and not warned:
+            if len(_CONN_STR_CACHE) >= _CONN_STR_CACHE_SIZE:
+                _CONN_STR_CACHE.clear()
+            _CONN_STR_CACHE[cache_key] = (conn_str, dict(normalized_params))
         return conn_str, normalized_params
 
     @staticmethod
@@ -2221,7 +2256,7 @@ class Connection:
             return
 
         # Close all cursors first, but don't let one failure stop the others
-        if hasattr(self, "_cursors"):
+        if getattr(self, "_cursors", None):
             # Convert to list to avoid modification during iteration
             cursors_to_close = list(self._cursors)
             close_errors = []
@@ -2287,7 +2322,8 @@ class Connection:
             # Always mark as closed, even if there were errors
             self._closed = True
 
-        logger.info("Connection closed successfully.")
+        if logger._cached_level <= logging.INFO:
+            logger.info("Connection closed successfully.")
 
     def _remove_cursor(self, cursor: Cursor) -> None:
         """
