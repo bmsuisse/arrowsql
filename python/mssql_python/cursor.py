@@ -1342,6 +1342,9 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                             decimal_digits,
                         )
                     )
+                elif size_info is None:
+                    # RUST-PORT: None means "no hint" for this position (pyodbc style).
+                    self._inputsizes.append(None)
                 else:
                     # Handle single value (just sql_type)
                     sql_type = size_info
@@ -2614,7 +2617,12 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 )
                 sample_value, min_val, max_val, _ = self._compute_column_type(column)
 
-                if self._inputsizes and col_index < len(self._inputsizes):
+                # RUST-PORT: a None entry leaves this column to inference.
+                if (
+                    self._inputsizes
+                    and col_index < len(self._inputsizes)
+                    and self._inputsizes[col_index] is not None
+                ):
                     # Use explicitly set input sizes
                     sql_type, c_type, column_size, decimal_digits = self._inputsizes[col_index]
 

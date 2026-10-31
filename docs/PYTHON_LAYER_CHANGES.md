@@ -106,6 +106,20 @@ Behaviour is unchanged: each execute still returns a new `description` only when
 the layout differs, the description list is never mutated in place, and the
 converter map is still keyed on the converter generation.
 
+## `setinputsizes()` `None` entries (`cursor.py`, RUST-PORT)
+
+Upstream raises `ValueError('Invalid SQL type: None')` for a `None` entry in
+the sizes list. pyodbc treats it as "no hint for this position", and the
+upstream test `test_none_entry_in_sizes_list_leaves_that_parameter_untyped`
+asserts that behaviour.
+
+| Location | Change |
+|---|---|
+| `cursor.py` `setinputsizes` | A `None` entry is kept as `None` (no hint) instead of raising. |
+| `cursor.py` `executemany` | A `None` entry leaves that column to inference, as a missing entry does. |
+
+The Rust side already reads a `None` entry as "no hint" (`params::parse_hint`).
+
 ## Native bulk copy (docs/ARCHITECTURE.md, "Bulk copy")
 
 - `cursor.py` `bulkcopy` / `bulkcopy_arrow`: when `self.hstmt` is a native
