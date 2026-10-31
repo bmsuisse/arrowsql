@@ -11,7 +11,17 @@
 //! on Windows when the `tls-schannel-direct` feature is enabled (the default)
 //! and native-tls everywhere else.
 
+#[cfg(feature = "native-tls-backend")]
 pub(crate) mod native_tls_engine;
+#[cfg(feature = "rustls-tls")]
+pub(crate) mod rustls_engine;
+
+#[cfg(all(
+    not(feature = "native-tls-backend"),
+    not(feature = "rustls-tls"),
+    not(all(windows, feature = "tls-schannel-direct"))
+))]
+compile_error!("mssql-tds needs a TLS backend: enable `rustls-tls` or `native-tls-backend`");
 
 use crate::connection::transport::network_transport::Stream;
 use crate::core::TdsResult;
@@ -78,8 +88,16 @@ pub(crate) fn default_engine() -> &'static dyn TlsEngine {
     {
         return &crate::connection::transport::win_tls::engine::SCHANNEL_ENGINE;
     }
+    #[cfg(feature = "native-tls-backend")]
+    {
+        return &native_tls_engine::NATIVE_TLS_ENGINE;
+    }
+    #[cfg(all(feature = "rustls-tls", not(feature = "native-tls-backend")))]
+    {
+        return &rustls_engine::RUSTLS_ENGINE;
+    }
     #[allow(unreachable_code)]
     {
-        &native_tls_engine::NATIVE_TLS_ENGINE
+        unreachable!("no TLS backend compiled in")
     }
 }

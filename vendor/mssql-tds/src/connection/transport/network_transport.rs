@@ -1348,8 +1348,10 @@ impl NetworkTransport {
         // For TDS 7.4, wrap the stream in TlsOverTdsStream before TLS handshake
         // This is required because TLS packets must be framed within TDS packets during the handshake
         let base_stream: Box<dyn Stream> = if self.use_tds74_tls_wrapping {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", all(not(windows), feature = "rustls-tls", not(feature = "native-tls-backend"))))]
             {
+                // RUST-PORT: also used by the rustls engine (SQL Server wants the whole client
+                // handshake flight in one TDS packet).
                 // On macOS, wrap in BufferedTdsStream to handle Security.framework's
                 // multiple small writes during TLS handshake. Security.framework makes
                 // separate poll_write calls for ClientKeyExchange, ChangeCipherSpec, and
@@ -1360,7 +1362,7 @@ impl NetworkTransport {
                     crate::connection::transport::ssl_handler::BufferedTdsStream::new(tls_over_tds),
                 )
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", all(not(windows), feature = "rustls-tls", not(feature = "native-tls-backend")))))]
             {
                 Box::new(
                     crate::connection::transport::ssl_handler::TlsOverTdsStream::new(base_stream),

@@ -38,8 +38,15 @@ mod imp;
 #[path = "apple.rs"]
 mod imp;
 
-#[cfg(all(not(windows), not(target_os = "macos")))]
+#[cfg(all(not(windows), not(target_os = "macos"), feature = "native-tls-backend"))]
 #[path = "openssl.rs"]
+mod imp;
+
+// RUST-PORT: lean build (no OpenSSL). Always Encrypted is not wired into the
+// Python port, so the primitives report "unsupported" instead of linking
+// OpenSSL (and, through it, libzstd) into the wheel.
+#[cfg(all(not(windows), not(target_os = "macos"), not(feature = "native-tls-backend")))]
+#[path = "unsupported.rs"]
 mod imp;
 
 // PEM/DER framing helpers for the Apple backend. They contain no cryptography,

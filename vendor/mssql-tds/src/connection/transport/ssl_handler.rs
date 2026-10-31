@@ -14,7 +14,7 @@ use tracing::{debug, error, info, warn};
 
 use super::network_transport::PRE_NEGOTIATED_PACKET_SIZE;
 use crate::core::{EncryptionOptions, EncryptionSetting, NegotiatedEncryptionSetting, TdsResult};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(not(windows), feature = "rustls-tls", not(feature = "native-tls-backend"))))]
 use std::io::{ErrorKind, Write};
 
 #[derive(Debug)]
@@ -540,7 +540,7 @@ impl<S: Stream> Stream for TlsOverTdsStream<S> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(not(windows), feature = "rustls-tls", not(feature = "native-tls-backend"))))]
 impl Stream for BufferedTdsStream {
     fn tls_handshake_starting(&mut self) {
         self.is_executing_tls_handshake = true;
@@ -557,7 +557,7 @@ impl Stream for BufferedTdsStream {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(not(windows), feature = "rustls-tls", not(feature = "native-tls-backend"))))]
 pub(crate) struct BufferedTdsStream {
     buffer: Option<Vec<u8>>,
     tls_over_tds_stream: TlsOverTdsStream<Box<dyn Stream>>,
@@ -565,7 +565,7 @@ pub(crate) struct BufferedTdsStream {
     buffer_pos: usize,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(not(windows), feature = "rustls-tls", not(feature = "native-tls-backend"))))]
 impl BufferedTdsStream {
     pub(crate) fn new(tls_over_tds_stream: TlsOverTdsStream<Box<dyn Stream>>) -> Self {
         BufferedTdsStream {
@@ -616,7 +616,7 @@ impl BufferedTdsStream {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(not(windows), feature = "rustls-tls", not(feature = "native-tls-backend"))))]
 impl AsyncRead for BufferedTdsStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -637,7 +637,7 @@ impl AsyncRead for BufferedTdsStream {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(not(windows), feature = "rustls-tls", not(feature = "native-tls-backend"))))]
 impl AsyncWrite for BufferedTdsStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
