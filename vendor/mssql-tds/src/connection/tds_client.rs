@@ -5938,6 +5938,16 @@ impl TdsClient {
         self.execution_context.has_open_batch()
     }
 
+    /// Number of the server error that
+    /// [`complete_current_result`](Self::complete_current_result) parked: the
+    /// next [`advance`](Self::advance) raises it.
+    pub fn parked_error_number(&self) -> Option<u32> {
+        match self.parked_token.as_deref() {
+            Some(Tokens::Error(error)) => Some(error.number),
+            _ => None,
+        }
+    }
+
     /// Reads the next response token, replaying one parked by the RPC-terminator
     /// look-ahead before touching the wire.
     ///

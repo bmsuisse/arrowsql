@@ -160,6 +160,9 @@ impl StmtState {
     }
 }
 
+/// SQL Server error 266: transaction count after EXECUTE indicates a mismatch.
+const TRANSACTION_COUNT_MISMATCH: u32 = 266;
+
 /// Read rows of the current wire result into `sink` until `max_rows` rows
 /// were written, `max_bytes` is exceeded, or the result ends. This is the
 /// generic decode seam: any `RowWriter` (Python `RowBuffer`, Arrow builders)
@@ -176,6 +179,13 @@ pub fn read_rows_into<W: RowWriter + Send>(
         let start = rows_written(sink);
         while rows_written(sink) - start < max_rows && bytes_written(sink) < max_bytes {
             if !c.next_row_into(sink).await? {
+                // Like msodbcsql, error 266 (BEGIN/COMMIT mismatch at procedure
+                // exit) fails the fetch of the procedure's last row set; other
+                // errors wait for nextset.
+                c.complete_current_result().await?;
+                if c.parked_error_number() == Some(TRANSACTION_COUNT_MISMATCH) {
+                    c.advance().await?;
+                }
                 return Ok(true);
             }
         }
