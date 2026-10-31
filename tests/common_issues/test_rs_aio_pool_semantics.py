@@ -14,6 +14,11 @@ import pytest
 aio = pytest.importorskip("mssql_python.aio")
 pytest_asyncio = pytest.importorskip("pytest_asyncio")
 
+from mssql_python import ddbc_bindings as _ddbc  # noqa: E402
+
+# The native async hub is compiled for Unix only (src/lib.rs).
+pytestmark = pytest.mark.skipif(not hasattr(_ddbc, "AioHub"), reason="aio is Unix-only")
+
 import mssql_python  # noqa: E402
 from mssql_python import ddbc_bindings  # noqa: E402
 

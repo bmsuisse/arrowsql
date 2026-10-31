@@ -98,9 +98,6 @@ jobs:
     name: pytest (SQL Server Express, windows-latest)
     runs-on: windows-latest
     timeout-minutes: 60
-    # Advisory: the Windows TLS stack's handshake with SQL Server Express fails
-    # ("tls handshake eof") and is not understood yet; see docs/PACKAGING.md.
-    continue-on-error: true
     env:
       DB_CONNECTION_STRING: "Server=localhost,1433;Database=rs_ci;Uid=sa;Pwd=Ci-Test-Passw0rd-123;Encrypt=no;TrustServerCertificate=yes"
     steps:

@@ -37,9 +37,10 @@ fail to compile on 32-bit targets (`overflowing_literals`); the PLP length logic
 need a `u64` rewrite. PyPy and manylinux2014/i686 are likewise out.
 
 The Windows SQL Server Express job (`windows-db` in ci.yml, installer in
-`scripts/ci/install-sqlserver-windows.ps1`) installs and starts the server on 1433, but the
-connection fails with `tls handshake eof` in the Windows TLS stack, so it stays
-`continue-on-error: true` until that is understood.
+`scripts/ci/install-sqlserver-windows.ps1`) installs and starts the server on 1433. Windows
+targets use the in-tree Schannel TLS engine of mssql-tds (`tls-schannel-direct-on-windows`,
+set in Cargo.toml); rustls could not complete the handshake with SQL Server's self-generated
+certificate (`tls handshake eof`). The `aio` tests skip on Windows (the native hub is Unix-only).
 
 Release flow (`release.yml`): a push to `main` runs CI, then reads the version from
 `pyproject.toml`; if no `vX.Y.Z` tag exists it builds all wheels and the sdist. The
