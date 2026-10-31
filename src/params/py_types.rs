@@ -21,9 +21,11 @@ use mssql_tds::error::Error;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
-    PyBool, PyByteArray, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyModule, PyString,
-    PyTime, PyType,
+    PyBool, PyByteArray, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyMemoryView,
+    PyModule, PyString, PyTime, PyType,
 };
+
+use super::UNICODE_ENCODE_PREFIX;
 
 /// SQL Server's maximum precision for DECIMAL and NUMERIC.
 const MAX_NUMERIC_PRECISION: u32 = 38;
@@ -321,9 +323,7 @@ pub(crate) fn py_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
     }
 
     if py_obj.is_instance_of::<PyString>() {
-        let value = py_obj
-            .extract::<String>()
-            .map_err(|error| Error::UsageError(format!("Failed to extract string: {error}")))?;
+        let value = str_text(py_obj)?;
         // Geometry WKT binds as NVARCHAR even when it is ASCII, as upstream does.
         let is_geometry = GEOMETRY_WKT_PREFIXES
             .iter()
@@ -372,12 +372,21 @@ pub(crate) fn py_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
     Ok(column_value_to_sql_type(py_to_column_value(py_obj, None)?))
 }
 
+/// The text of a str parameter. Only a lone surrogate fails to encode, which
+/// raises `UnicodeEncodeError` as upstream does.
+fn str_text(py_obj: &Bound<'_, PyAny>) -> TdsResult<String> {
+    py_obj
+        .extract::<String>()
+        .map_err(|_| Error::UsageError(format!("{UNICODE_ENCODE_PREFIX}surrogates not allowed")))
+}
+
 /// Whether a value that is neither a scalar nor a Decimal converts through the
 /// column-value path (bytes, bytearray, date, UUID). Any other type is refused
 /// here so its error names the parameter rather than the bulk-copy path.
 fn is_fallback_bindable(py_obj: &Bound<'_, PyAny>) -> TdsResult<bool> {
     if py_obj.is_instance_of::<PyBytes>()
         || py_obj.is_instance_of::<PyByteArray>()
+        || py_obj.is_instance_of::<PyMemoryView>()
         || py_obj.is_instance_of::<PyDate>()
     {
         return Ok(true);
@@ -1176,9 +1185,7 @@ fn py_to_column_value_internal(
     // Check for string (second most common)
     if py_obj.is_instance_of::<PyString>() {
         // Direct string extraction - no fallback needed
-        let val = py_obj
-            .extract::<String>()
-            .map_err(|e| Error::UsageError(format!("Failed to extract string: {}", e)))?;
+        let val = str_text(py_obj)?;
         let sql_string = SqlString::from_utf8_string(val);
         return Ok(ColumnValues::String(sql_string));
     }
@@ -1224,6 +1231,15 @@ fn py_to_column_value_internal(
         let bytes = py_obj
             .extract::<Vec<u8>>()
             .map_err(|e| Error::UsageError(format!("Failed to extract bytearray: {}", e)))?;
+        return Ok(ColumnValues::Bytes(bytes));
+    }
+
+    // Check for memoryview (buffer protocol, binds as bytes)
+    if let Ok(view) = py_obj.cast::<PyMemoryView>() {
+        let bytes = view
+            .call_method0("tobytes")
+            .and_then(|b| b.extract::<Vec<u8>>())
+            .map_err(|e| Error::UsageError(format!("Failed to extract memoryview: {}", e)))?;
         return Ok(ColumnValues::Bytes(bytes));
     }
 
