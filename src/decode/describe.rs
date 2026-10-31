@@ -76,12 +76,13 @@ pub fn column_size(meta: &ColumnMetadata) -> u64 {
             _ => 0,
         },
         TdsDataType::Bit | TdsDataType::BitN => 1,
-        TdsDataType::Flt4 => 7,
-        TdsDataType::Flt8 => 15,
+        TdsDataType::Flt4 => 24,
+        TdsDataType::Flt8 => 53,
         TdsDataType::FltN => match meta.type_info.length {
-            4 => 7,
-            _ => 15,
+            4 => 24,
+            _ => 53,
         },
+        TdsDataType::SsVariant => 8000,
         TdsDataType::DateN => 10,
         TdsDataType::TimeN => {
             let scale = meta.get_scale().unwrap_or(0) as u64;
@@ -139,6 +140,11 @@ const BULK_BIND_MAX_SIZE: u64 = 8000;
 /// Columns upstream streams with `SQLGetData` instead of binding in bulk:
 /// unbounded (`max`, `text`, `xml`) or wider than [`BULK_BIND_MAX_SIZE`].
 pub fn is_lob(meta: &ColumnMetadata) -> bool {
+    // sql_variant reports 8000 as its ODBC size but carries a 9-byte header on
+    // the wire, so it is still streamed rather than bulk-bound.
+    if meta.data_type == TdsDataType::SsVariant {
+        return true;
+    }
     let size = column_size(meta);
     size == 0 || size > BULK_BIND_MAX_SIZE
 }
