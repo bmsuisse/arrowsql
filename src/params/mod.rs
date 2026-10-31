@@ -77,12 +77,34 @@ pub struct ParamSet {
     pub untyped_nulls: Vec<usize>,
 }
 
+/// `@Pn` without going through the `format!` machinery: it runs once per
+/// parameter per row in `executemany`.
+pub(crate) fn param_name(n: usize) -> String {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    let mut rest = n;
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    let mut name = String::with_capacity(2 + digits.len() - at);
+    name.push_str("@P");
+    for &d in &digits[at..] {
+        name.push(d as char);
+    }
+    name
+}
+
 impl ParamSet {
     pub fn into_rpc(self) -> Vec<RpcParameter> {
         self.types
             .into_iter()
             .enumerate()
-            .map(|(i, t)| RpcParameter::new(Some(format!("@P{}", i + 1)), StatusFlags::NONE, t))
+            .map(|(i, t)| RpcParameter::new(Some(param_name(i + 1)), StatusFlags::NONE, t))
             .collect()
     }
 

@@ -28,7 +28,7 @@ use crate::arrow::export::ArrowTable;
 use crate::decode::describe;
 use crate::diag::{self, DiagRecord};
 
-use super::convert::{RowBatch, Shape, rows_to_list};
+use super::convert::{RowBatch, Shape, rows_range, rows_to_list};
 use super::session::{ExecOut, RowsOut};
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
@@ -144,17 +144,19 @@ impl Hub {
                     Some(columns) if !as_tuple => Some(self.shape(py, columns)?),
                     _ => None,
                 };
-                let list = rows_to_list(py, &out.rows, ncols, shape.as_deref(), as_tuple)?;
                 match mode {
-                    QueryMode::All => list.into_any(),
-                    QueryMode::One => match list.len() {
-                        0 => py.None().into_bound(py),
-                        _ => list.get_item(0)?,
-                    },
-                    QueryMode::Value => match list.len() {
-                        0 => py.None().into_bound(py),
-                        _ => list.get_item(0)?.get_item(0)?,
-                    },
+                    QueryMode::All => {
+                        rows_to_list(py, &out.rows, ncols, shape.as_deref(), as_tuple)?.into_any()
+                    }
+                    QueryMode::One | QueryMode::Value if out.rows.rows == 0 => py.None().into_bound(py),
+                    QueryMode::One => {
+                        let list = rows_range(py, &out.rows, ncols, 0, 1, shape.as_deref(), as_tuple)?;
+                        list.get_item(0)?
+                    }
+                    QueryMode::Value => {
+                        let list = rows_range(py, &out.rows, ncols, 0, 1, shape.as_deref(), as_tuple)?;
+                        list.get_item(0)?.get_item(0)?
+                    }
                 }
             }
             Outcome::Arrow(schema, batches) => {

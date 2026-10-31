@@ -265,7 +265,7 @@ fn resolve_udt_names(ex: &mut Exclusive<'_>, sql: &str, params: &mut ParamSet) -
 
 /// Parameter metadata of `sql` from `sp_describe_undeclared_parameters`,
 /// cached per SQL text. Failures are not cached.
-fn described_params(ex: &mut Exclusive<'_>, sql: &str) -> Result<Vec<DescribedParam>, DescribeFailure> {
+fn described_params(ex: &mut Exclusive<'_>, sql: &str) -> Result<Arc<[DescribedParam]>, DescribeFailure> {
     if let Some(described) = ex.conn.cached_param_types(sql) {
         return Ok(described);
     }
@@ -285,7 +285,7 @@ fn described_params(ex: &mut Exclusive<'_>, sql: &str) -> Result<Vec<DescribedPa
     match outcome {
         Ok(()) => {
             let described = described_rows(&rows);
-            ex.conn.cache_param_types(sql, described.clone());
+            ex.conn.cache_param_types(sql, Arc::clone(&described));
             Ok(described)
         }
         Err(err @ TdsError::SqlServerError { .. }) => {
@@ -299,7 +299,7 @@ fn described_params(ex: &mut Exclusive<'_>, sql: &str) -> Result<Vec<DescribedPa
     }
 }
 
-fn described_rows(rows: &RowBuffer) -> Vec<DescribedParam> {
+fn described_rows(rows: &RowBuffer) -> Arc<[DescribedParam]> {
     let ncols = rows.cells.len().checked_div(rows.rows).unwrap_or(0);
     rows.cells.chunks(ncols.max(1)).filter_map(|row| describe_row(rows, row)).collect()
 }

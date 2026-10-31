@@ -59,7 +59,7 @@ pub struct ConnShared {
     connection_timeout: AtomicU32,
     pending_session: Mutex<PendingSession>,
     /// sp_describe_undeclared_parameters results per SQL text.
-    param_types: Mutex<HashMap<String, Vec<DescribedParam>>>,
+    param_types: Mutex<HashMap<String, Arc<[DescribedParam]>>>,
 }
 
 impl ConnShared {
@@ -106,11 +106,11 @@ impl ConnShared {
         self.last_failed.swap(false, Ordering::AcqRel)
     }
 
-    pub fn cached_param_types(&self, sql: &str) -> Option<Vec<DescribedParam>> {
+    pub fn cached_param_types(&self, sql: &str) -> Option<Arc<[DescribedParam]>> {
         self.param_types.lock().get(sql).cloned()
     }
 
-    pub fn cache_param_types(&self, sql: &str, types: Vec<DescribedParam>) {
+    pub fn cache_param_types(&self, sql: &str, types: Arc<[DescribedParam]>) {
         let mut cache = self.param_types.lock();
         if cache.len() >= PARAM_TYPE_CACHE_SIZE {
             cache.clear();
