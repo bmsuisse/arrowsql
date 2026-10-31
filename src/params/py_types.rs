@@ -38,7 +38,7 @@ const NON_FINITE_DECIMAL_MESSAGE: &str =
 
 const UNSUPPORTED_PARAMETER_TYPE_MESSAGE: &str =
     "Unsupported parameter type: The driver cannot safely convert it to a SQL type.";
-use crate::params::{DATA_ERROR_PREFIX, DATA_VALUE_ERROR_PREFIX, udt};
+use crate::params::{DATA_ERROR_PREFIX, DATA_VALUE_ERROR_PREFIX, RUNTIME_ERROR_PREFIX, udt};
 
 static DECIMAL_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static UUID_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -983,7 +983,14 @@ fn py_datetime_to_sql_type(
         .and_then(|timezone| timezone.getattr("utc"))
         .and_then(|utc| py_obj.call_method1("astimezone", (utc,)))
         .map_err(|error| {
-            Error::UsageError(format!("Failed to normalize datetime to UTC: {error}"))
+            // A UTC instant outside 0001..9999 is a value problem, as upstream reports it.
+            if Python::attach(|py| error.is_instance_of::<pyo3::exceptions::PyOverflowError>(py)) {
+                Error::TypeConversionError(format!(
+                    "{DATA_ERROR_PREFIX}Datetime is outside the DATETIMEOFFSET range in UTC: {error}"
+                ))
+            } else {
+                Error::UsageError(format!("Failed to normalize datetime to UTC: {error}"))
+            }
         })?;
 
     Ok(SqlType::DateTimeOffset(Some(SqlDateTimeOffset {
@@ -1013,8 +1020,8 @@ fn datetimeoffset_minutes(offset_seconds: f64) -> TdsResult<i16> {
     }
     let offset_minutes = offset_seconds / 60.0;
     if !(-840.0..=840.0).contains(&offset_minutes) {
-        return Err(Error::UsageError(format!(
-            "Timezone offset {offset_minutes} minutes is outside the DATETIMEOFFSET range"
+        return Err(Error::TypeConversionError(format!(
+            "{RUNTIME_ERROR_PREFIX}Datetimeoffset tz offset out of SQL Server range (-14h to +14h)"
         )));
     }
     Ok(offset_minutes as i16)

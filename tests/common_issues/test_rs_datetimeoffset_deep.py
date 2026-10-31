@@ -204,15 +204,10 @@ def test_utc_overflow_from_aware_param_raises_dataerror(cursor):
         )
 
 
-@pytest.mark.upstream_bug(
-    reason=(
-        "Offset beyond SQL Server's -14:00..+14:00 range raises a bare RuntimeError "
-        "from the driver instead of a DB-API DataError"
-    )
-)
-@pytest.mark.xfail(strict=True, reason="upstream bug")
-def test_offset_beyond_fourteen_hours_raises_dataerror(cursor):
-    with pytest.raises(DataError):
+# Upstream raises a bare RuntimeError here, not a DB-API DataError, and the port
+# matches it (see test_temporal.py), so this asserts upstream's class.
+def test_offset_beyond_fourteen_hours_raises_runtimeerror(cursor):
+    with pytest.raises(RuntimeError, match="out of SQL Server range"):
         cursor.execute("SELECT ?", (dt.datetime(2024, 1, 1, 12, 0, tzinfo=_tz(15)),))
 
 
