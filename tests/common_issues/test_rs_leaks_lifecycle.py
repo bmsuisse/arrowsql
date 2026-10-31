@@ -28,6 +28,7 @@ Research (issue trackers and docs, checked for this suite):
   cancelled must be closed, not returned to a pool)
 """
 
+import os
 import gc
 import time
 
@@ -275,10 +276,12 @@ def test_del_connection_with_open_cursor_releases_server_session(pooling_off, co
 
 
 def test_500_connect_close_cycles_no_session_or_rss_growth(pooling_off, conn_str, monitor):
+    # Only this process's sessions: other test runs share the server.
     def _count_user_sessions():
         monitor.execute(
             "SELECT COUNT(*) FROM sys.dm_exec_sessions "
-            "WHERE is_user_process = 1 AND login_name = SUSER_SNAME()"
+            "WHERE is_user_process = 1 AND host_process_id = ?",
+            (os.getpid(),),
         )
         return monitor.fetchone()[0]
 

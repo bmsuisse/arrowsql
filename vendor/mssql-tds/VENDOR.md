@@ -75,5 +75,9 @@ Local patches (search for `VENDOR PATCH`):
    `tds_client.rs` adds `MetadataHandle` / `TdsClient::metadata_handle` so the
    port can recognise an unchanged result shape by identity.
 
+8. Client process id in LOGIN7 (marked `RUST-PORT`): `src/message/login.rs`
+   sends `std::process::id()` instead of 0, as the ODBC driver does, so
+   `sys.dm_exec_sessions.host_process_id` identifies the client process.
+
 To drop the vendored copy, delete this directory and the `[patch]` section
 in ../../Cargo.toml once the fix is in the pinned upstream rev.

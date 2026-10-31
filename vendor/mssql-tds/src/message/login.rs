@@ -484,7 +484,8 @@ impl LoginRequestModel<'_> {
             user_input: context,
             transport_context,
             client_prog_ver: context.encode_driver_version(),
-            client_process_id: 0,
+            // RUST-PORT: the client PID, as ODBC sends it (sys.dm_exec_sessions.host_process_id).
+            client_process_id: i32::try_from(std::process::id()).unwrap_or(0),
             connection_id_deprecated: 0,
             client_time_zone_deprecated: 0,
             client_lcid_deprecated: 0,
