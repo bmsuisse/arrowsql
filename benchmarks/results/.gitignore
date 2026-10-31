@@ -1,2 +1,4 @@
 .run.lock
 __pycache__/
+*.jsonl
+report.html

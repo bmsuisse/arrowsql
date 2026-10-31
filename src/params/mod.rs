@@ -3,9 +3,10 @@
 //! - `placeholders`: `?` -> `@Pn` rewriting.
 //! - `py_types`: per-value type inference (vendored from mssql-py-core).
 //!
-//! TODO(params): `inputSizes` (setinputsizes) is accepted but only the SQL
-//! type of each hint is applied; NULL parameters default to NVARCHAR(1)
-//! unless a hint gives the type (upstream used SQLDescribeParam).
+//! `inputSizes` (setinputsizes) hints supply the SQL type, size, scale and
+//! C type of each parameter; an untyped NULL is typed from the server
+//! (`sp_describe_undeclared_parameters`, see `null_types`), as upstream did
+//! with SQLDescribeParam.
 
 pub mod batch;
 pub mod null_types;

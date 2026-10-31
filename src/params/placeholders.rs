@@ -6,7 +6,7 @@
 
 /// Translate the ODBC procedure-call escape `{call proc(args)}` /
 /// `{? = call proc(args)}` into T-SQL `EXEC`. Other text is unchanged.
-/// TODO(params): `{d ...}`, `{ts ...}`, `{fn ...}` escapes.
+/// The `{d ...}`, `{ts ...}` and `{fn ...}` escapes need no translation: SQL Server parses them itself.
 pub fn translate_call_escape(sql: &str) -> Option<String> {
     let trimmed = sql.trim();
     let inner = trimmed.strip_prefix('{')?.strip_suffix('}')?.trim();

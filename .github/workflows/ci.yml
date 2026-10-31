@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Throwaway password of the CI-only SQL Server service container.
+  MSSQL_SA_PASSWORD: "Ci-Test-Passw0rd-123"
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: cargo fmt --check
+        # The tree is not rustfmt-clean yet (hundreds of diffs). Advisory until
+        # someone runs `cargo fmt` over src/ in one dedicated commit.
+        continue-on-error: true
+        run: cargo fmt --check
+      - name: cargo clippy
+        # Warnings are reported, only errors fail. Tighten to -D warnings once clean.
+        run: cargo clippy --all-targets
+      - name: cargo test
+        run: cargo test --lib
+
+  portability:
+    name: cargo check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Nothing has been built on these platforms by hand yet; the wheels
+    # workflow is the real test. Keep this advisory until it is green once.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: cargo check --lib
+
+  tests:
+    name: pytest (SQL Server 2022, Python 3.13)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q 'SELECT 1' || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 20s
+    env:
+      # Same shape as scripts/run_tests.py builds from .env.local, with a private database.
+      DB_CONNECTION_STRING: "Server=localhost,1433;Database=rs_ci;Uid=sa;Pwd=Ci-Test-Passw0rd-123;Encrypt=yes;TrustServerCertificate=yes"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build the extension (maturin develop)
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -r requirements-dev.txt
+          maturin develop
+      - name: Create the test database
+        run: |
+          . .venv/bin/activate
+          python -I - <<'EOF'
+          import os, mssql_python
+          master = os.environ["DB_CONNECTION_STRING"].replace("Database=rs_ci", "Database=master")
+          conn = mssql_python.connect(master, autocommit=True)
+          conn.cursor().execute("IF DB_ID('rs_ci') IS NULL CREATE DATABASE [rs_ci]")
+          EOF
+      - name: common_issues and port suites
+        run: |
+          . .venv/bin/activate
+          python -m pytest -q --timeout 120 -p no:randomly tests/common_issues tests/port
+      - name: Upstream suite against the passing baseline
+        run: |
+          . .venv/bin/activate
+          python scripts/check_upstream_baseline.py -p no:randomly
