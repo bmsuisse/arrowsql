@@ -79,5 +79,29 @@ Local patches (search for `VENDOR PATCH`):
    sends `std::process::id()` instead of 0, as the ODBC driver does, so
    `sys.dm_exec_sessions.host_process_id` identifies the client process.
 
+9. Round-trip-free liveness of an idle session (marked `RUST-PORT`):
+   `TdsClient::idle_peer_gone`, `AnyTransport` / `NetworkTransport::idle_peer_gone`,
+   `busy_poll::idle_peer_gone`. A zero-timeout `poll(fd, POLLIN)` on the TCP
+   socket under the TLS layer: an idle TDS session never receives unsolicited
+   bytes, so any readiness (data, FIN, error) means the server ended it. Unlike
+   `TdsTransport::is_connection_dead` it reads nothing, so it cannot desync the
+   TLS stream. The port's connection pool uses it instead of a probe request.
+
+10. Bulk serializer allocation/per-byte cleanups (marked `RUST-PORT`):
+   `src/datatypes/tds_value_serializer.rs` writes BINARY/VARBINARY payloads
+   with one `write_async`, pads BINARY/CHAR/NCHAR from static zero/space
+   chunks, streams UTF-16LE (NVARCHAR/NCHAR/JSON/NTEXT) through a stack buffer
+   instead of collecting a `Vec<u16>`, and writes VECTOR f32 data in chunks;
+   `src/datatypes/decoder.rs` `read_guid` reads into a `[u8; 16]` stack array.
+   Wire output is unchanged.
+
 To drop the vendored copy, delete this directory and the `[patch]` section
 in ../../Cargo.toml once the fix is in the pinned upstream rev.
+
+11. Stale cancel handle on transaction requests (marked `RUST-PORT`):
+    `begin_transaction`, `save_transaction`, `commit_transaction` and
+    `rollback_transaction` take no cancel handle, but read their response
+    through `next_response_token`, which used the handle the previous request
+    left in `self.cancel_handle`. After a cancelled execution (e.g. an Arrow
+    stream closed early) a commit or rollback then failed as cancelled. They now
+    clear it first.

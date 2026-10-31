@@ -1464,6 +1464,17 @@ impl TdsClient {
         self.transport.connection_known_dead()
     }
 
+    /// RUST-PORT: whether the server ended this idle session, told from the
+    /// socket alone (no request, nothing read): any pending data, FIN or error
+    /// counts. Only meaningful with no request outstanding. `None` when the
+    /// transport cannot tell; a pool then has to send a probe request.
+    pub fn idle_peer_gone(&self) -> Option<bool> {
+        if self.transport.connection_known_dead() {
+            return Some(true);
+        }
+        self.transport.idle_peer_gone()
+    }
+
     /// Marks the connection known-dead so [`is_connection_dead`] reports it
     /// without touching the socket. A caller that observes the session in an
     /// unrecoverable state — e.g. a connection-pool reset that failed partway —
@@ -9273,6 +9284,9 @@ impl TdsClient {
         Self::note_on_error_ignored(on_error);
 
         self.begin_command();
+        // RUST-PORT: takes no cancel handle; one left by an earlier request
+        // (e.g. a cancelled stream) must not cancel this one.
+        self.cancel_handle = None;
         let reconnect_elapsed = self.check_and_reconnect(timeout, cancel).await?;
         let budget = Self::deduct_timeout(timeout, reconnect_elapsed);
         let resolved = budget.into_timeout()?;
@@ -9310,6 +9324,9 @@ impl TdsClient {
             ));
         }
         self.begin_command();
+        // RUST-PORT: takes no cancel handle; one left by an earlier request
+        // (e.g. a cancelled stream) must not cancel this one.
+        self.cancel_handle = None;
         let transaction = TransactionManagementRequest::new(
             TransactionManagementType::Save(name),
             &self.execution_context,
@@ -9339,6 +9356,9 @@ impl TdsClient {
             ));
         }
         self.begin_command();
+        // RUST-PORT: takes no cancel handle; one left by an earlier request
+        // (e.g. a cancelled stream) must not cancel this one.
+        self.cancel_handle = None;
         let transaction = TransactionManagementRequest::new(
             TransactionManagementType::Commit {
                 name,
@@ -9371,6 +9391,9 @@ impl TdsClient {
             ));
         }
         self.begin_command();
+        // RUST-PORT: takes no cancel handle; one left by an earlier request
+        // (e.g. a cancelled stream) must not cancel this one.
+        self.cancel_handle = None;
         let transaction = TransactionManagementRequest::new(
             TransactionManagementType::Rollback {
                 name,

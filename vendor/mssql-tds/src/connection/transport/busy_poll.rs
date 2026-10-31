@@ -118,3 +118,17 @@ pub(crate) async fn spin(fd: i32, expected_ns: u64) {
 
 #[cfg(not(unix))]
 pub(crate) async fn spin(_fd: i32, _expected_ns: u64) {}
+
+/// Whether an idle session's socket shows that the server ended it. A TDS
+/// server sends nothing unasked, so any readiness at all (data such as a TLS
+/// alert, a FIN, an error) means the session is gone. Reads nothing. `None`
+/// when it cannot be told (no socket descriptor, or not a unix platform).
+#[cfg(unix)]
+pub(crate) fn idle_peer_gone(fd: i32) -> Option<bool> {
+    (fd >= 0).then(|| readable(fd))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn idle_peer_gone(_fd: i32) -> Option<bool> {
+    None
+}

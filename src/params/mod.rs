@@ -118,6 +118,13 @@ impl ParamSet {
     }
 }
 
+/// Statements with more parameters than this are bulk inserts or long IN lists.
+/// Their uninformed small ints bind as INT instead of the narrowest type: the
+/// declaration is part of the plan cache key, so one that follows the value
+/// (tinyint, then smallint, then int across a run of multi-row INSERTs) compiles
+/// extra plans, and a plan over a thousand parameters takes ~10 ms to compile.
+const WIDE_INT_PARAM_COUNT: usize = 100;
+
 /// Binds `params` as RPC parameters. `codec` encodes narrow text bound as
 /// `SQL_C_CHAR` (see [`py_types::narrow_codec`]); `None` leaves text to inference.
 pub fn build_rpc_params(
@@ -158,6 +165,15 @@ pub fn build_rpc_params(
             },
         }
         .map_err(|e| conversion_error(&e))?;
+        let sql_type = match sql_type {
+            SqlType::TinyInt(Some(v)) if hint.is_none() && len > WIDE_INT_PARAM_COUNT => {
+                SqlType::Int(Some(i32::from(v)))
+            }
+            SqlType::SmallInt(Some(v)) if hint.is_none() && len > WIDE_INT_PARAM_COUNT => {
+                SqlType::Int(Some(i32::from(v)))
+            }
+            other => other,
+        };
         types.push(sql_type);
     }
     Ok(ParamSet { types, untyped_nulls })

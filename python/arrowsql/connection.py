@@ -19,6 +19,7 @@ import struct
 from types import MappingProxyType
 from typing import Any, Dict, Optional, Union, List, Tuple, Callable, Protocol, TYPE_CHECKING
 import threading
+import logging
 
 import arrowsql
 from arrowsql.cursor import Cursor
@@ -211,6 +212,21 @@ _GETINFO_RETURN_TYPES = MappingProxyType(
 UTF16_ENCODINGS: frozenset[str] = frozenset(["utf-16le", "utf-16be"])
 
 # Optional "NATIVE:<n>:" carries the SQL Server error number (bindings that have it).
+# Connection._cursors until the first cursor: empty, and shared by every
+# connection that never opens one.
+_NO_CURSORS: frozenset = frozenset()
+
+# Enum values read on every connect.
+_SQL_CHAR = ConstantsDDBC.SQL_CHAR.value
+_SQL_WCHAR = ConstantsDDBC.SQL_WCHAR.value
+_SQL_ATTR_AUTOCOMMIT = ConstantsDDBC.SQL_ATTR_AUTOCOMMIT.value
+_SQL_COPT_SS_ACCESS_TOKEN = ConstantsDDBC.SQL_COPT_SS_ACCESS_TOKEN.value
+
+# Results of Connection._construct_connection_string by arguments; cleared
+# when full. Holds connection strings, so passwords too, like the pool does.
+_CONN_STR_CACHE: Dict[Any, Tuple[str, Dict[str, str]]] = {}
+_CONN_STR_CACHE_SIZE = 64
+
 _SQLSTATE_RE = re.compile(r"^SQLSTATE:([A-Z0-9]{0,5}):(?:NATIVE:(-?\d+):)?(.*)", re.DOTALL)
 
 
@@ -392,6 +408,68 @@ class Connection:
     ProgrammingError = ProgrammingError
     NotSupportedError = NotSupportedError
 
+    # Per-connection defaults that __init__ only changes for some connections;
+    # class attributes spare a pooled connect the instance stores.
+
+    _timeout: int = 0
+
+    _decoding_generation: int = 0
+
+    # Auth type for acquiring fresh tokens at bulk copy time.
+    # We intentionally do NOT cache the token — a fresh one is acquired
+    # each time bulkcopy() is called to avoid expired-token errors.
+    _auth_type: Optional[str] = None
+
+    # Credential constructor kwargs (e.g. user-assigned MSI client_id)
+    # captured at __init__ time before remove_sensitive_params strips UID
+    # from self.connection_str. bulkcopy() re-uses these when acquiring a
+    # fresh token; re-parsing self.connection_str at that point would miss
+    # them because UID is already gone.
+    _credential_kwargs: Optional[Dict[str, str]] = None
+
+    # User-supplied token provider for custom Entra ID authentication.
+    # Stored so bulk copy can call .get_token() for a fresh JWT later.
+    _token_provider: Optional["TokenProvider"] = None
+
+    # POSIX timestamp (seconds) at which the current access token expires,
+    # captured from the credential's AccessToken result. None when unknown.
+    # The token is a pre-connect ODBC attribute and cannot be refreshed on
+    # a live connection — this is exposed for diagnostics/logging only.
+    # A custom token_provider may report a float POSIX timestamp, so the
+    # hint is Optional[float] (int is accepted under the numeric tower).
+    _token_expires_on: Optional[float] = None
+
+    # Composite, identity-aware pool key. Empty means "key the native pool
+    # on the connection string" (legacy behavior, used for non-token auth).
+    # For Entra access-token auth it is set to connStr + identity so that
+    # distinct identities never share a pooled connection.
+    _pool_key: str = ""
+
+    # Optional deferred-attrs callback handed to the native layer. When set,
+    # native invokes it *only* when it actually opens a physical connection
+    # (a pool miss or a non-pooled connect), so a same-identity pool hit
+    # skips token acquisition entirely. None means "no deferred
+    # token" — the token (if any) is already in self._attrs_before.
+    #
+    # NOTE: This is an internal, private callback and is intentionally NOT
+    # the public ``token_provider=`` credential parameter. It returns the
+    # full connect-attrs dict lazily; hence the distinct name
+    # ``_token_factory``.
+    _token_factory: Optional[Callable[..., Any]] = None
+
+    # RUST-PORT: (spn, sts_url, auth_method) -> JWT callable for the
+    # federated Entra flows the native login drives itself.
+    _fedauth_factory: Optional[Callable[..., Any]] = None
+
+    # Cursors created by cursor() (weak references: a cursor nobody holds
+    # is collected without explicit deletion). The shared empty placeholder
+    # is replaced by a WeakSet on the first cursor.
+    _cursors: Any = _NO_CURSORS
+
+    _converters_generation: int = 0
+
+    _searchescape: Optional[str] = None
+
     def __init__(
         self,
         connection_str: str = "",
@@ -520,8 +598,9 @@ class Connection:
         # 0 = disabled. Only inject the login timeout when the caller asked for
         # one (> 0) and did not already set it explicitly via attrs_before (an
         # explicit attrs_before value wins).
-        self._timeout = 0
-        login_timeout = self._validate_timeout(timeout, kind="Login timeout")
+        login_timeout = (
+            0 if timeout == 0 and type(timeout) is int else self._validate_timeout(timeout, kind="Login timeout")
+        )
         if login_timeout > 0:
             self._attrs_before.setdefault(ConstantsDDBC.SQL_ATTR_LOGIN_TIMEOUT.value, login_timeout)
 
@@ -529,7 +608,7 @@ class Connection:
         # Python 3 only has str (which is Unicode), so we use utf-16le by default
         self._encoding_settings = {
             "encoding": "utf-16le",
-            "ctype": ConstantsDDBC.SQL_WCHAR.value,
+            "ctype": _SQL_WCHAR,
         }
 
         # Initialize decoding settings with Python 3 defaults
@@ -538,62 +617,19 @@ class Connection:
         # Windows where the driver returns raw bytes in the server's native
         # code page (e.g. CP-1252) that may fail to decode as UTF-8.
         self._decoding_settings = {
-            ConstantsDDBC.SQL_CHAR.value: {
+            _SQL_CHAR: {
                 "encoding": "utf-16le",
-                "ctype": ConstantsDDBC.SQL_WCHAR.value,
+                "ctype": _SQL_WCHAR,
             },
-            ConstantsDDBC.SQL_WCHAR.value: {
+            _SQL_WCHAR: {
                 "encoding": "utf-16le",
-                "ctype": ConstantsDDBC.SQL_WCHAR.value,
+                "ctype": _SQL_WCHAR,
             },
             SQL_WMETADATA: {
                 "encoding": "utf-16le",
-                "ctype": ConstantsDDBC.SQL_WCHAR.value,
+                "ctype": _SQL_WCHAR,
             },
         }
-        self._decoding_generation = 0
-
-        # Auth type for acquiring fresh tokens at bulk copy time.
-        # We intentionally do NOT cache the token — a fresh one is acquired
-        # each time bulkcopy() is called to avoid expired-token errors.
-        self._auth_type = None
-        # Credential constructor kwargs (e.g. user-assigned MSI client_id)
-        # captured at __init__ time before remove_sensitive_params strips UID
-        # from self.connection_str. bulkcopy() re-uses these when acquiring a
-        # fresh token; re-parsing self.connection_str at that point would miss
-        # them because UID is already gone.
-        self._credential_kwargs: Optional[Dict[str, str]] = None
-        # User-supplied token provider for custom Entra ID authentication.
-        # Stored so bulk copy can call .get_token() for a fresh JWT later.
-        self._token_provider: Optional["TokenProvider"] = None
-        # POSIX timestamp (seconds) at which the current access token expires,
-        # captured from the credential's AccessToken result. None when unknown.
-        # The token is a pre-connect ODBC attribute and cannot be refreshed on
-        # a live connection — this is exposed for diagnostics/logging only.
-        # A custom token_provider may report a float POSIX timestamp, so the
-        # hint is Optional[float] (int is accepted under the numeric tower).
-        self._token_expires_on: Optional[float] = None
-
-        # Composite, identity-aware pool key. Empty means "key the native pool
-        # on the connection string" (legacy behavior, used for non-token auth).
-        # For Entra access-token auth it is set to connStr + identity so that
-        # distinct identities never share a pooled connection.
-        self._pool_key: str = ""
-
-        # Optional deferred-attrs callback handed to the native layer. When set,
-        # native invokes it *only* when it actually opens a physical connection
-        # (a pool miss or a non-pooled connect), so a same-identity pool hit
-        # skips token acquisition entirely. None means "no deferred
-        # token" — the token (if any) is already in self._attrs_before.
-        #
-        # NOTE: This is an internal, private callback and is intentionally NOT
-        # the public ``token_provider=`` credential parameter. It returns the
-        # full connect-attrs dict lazily; hence the distinct name
-        # ``_token_factory``.
-        self._token_factory = None
-        # RUST-PORT: (spn, sts_url, auth_method) -> JWT callable for the
-        # federated Entra flows the native login drives itself.
-        self._fedauth_factory = None
 
         # Custom token_provider= parameter — takes priority, mutually exclusive
         # with Authentication= in the connection string.
@@ -791,20 +827,8 @@ class Connection:
 
         self._closed = False
 
-        # Using WeakSet which automatically removes cursors when they are no
-        # longer in use
-        # It is a set that holds weak references to its elements.
-        # When an object is only weakly referenced, it can be garbage
-        # collected even if it's still in the set.
-        # It prevents memory leaks by ensuring that cursors are cleaned up
-        # when no longer in use without requiring explicit deletion.
-        # TODO: Think and implement scenarios for multi-threaded access
-        # to cursors
-        self._cursors = weakref.WeakSet()
-
         # Initialize output converters dictionary and its lock for thread safety
         self._output_converters = {}
-        self._converters_generation = 0
         self._converters_lock = threading.Lock()
 
         # Initialize encoding/decoding settings lock for thread safety
@@ -817,7 +841,6 @@ class Connection:
         self._encoding_lock = threading.Lock()
 
         # Initialize search escape character
-        self._searchescape = None
 
         # Safety net for the raw access-token pattern: a caller may pass
         # SQL_COPT_SS_ACCESS_TOKEN directly in attrs_before with no
@@ -830,7 +853,7 @@ class Connection:
         # distinct tokens never collide (upholds the "a token is present =>
         # key is never the bare connStr" invariant).
         if not self._pool_key:
-            _raw_token = self._attrs_before.get(ConstantsDDBC.SQL_COPT_SS_ACCESS_TOKEN.value)
+            _raw_token = self._attrs_before.get(_SQL_COPT_SS_ACCESS_TOKEN)
             if _raw_token is not None and not isinstance(_raw_token, (bytes, bytearray)):
                 # Fail closed: an access token supplied as anything other than
                 # raw bytes (e.g. a str) cannot be hashed into an identity-aware
@@ -882,7 +905,7 @@ class Connection:
         # Configure a reused connection's mode inside native checkout, while
         # its temporary connection timeout still bounds attribute-setting I/O.
         native_attrs = self._attrs_before.copy()
-        native_attrs[ConstantsDDBC.SQL_ATTR_AUTOCOMMIT.value] = int(bool(autocommit))
+        native_attrs[_SQL_ATTR_AUTOCOMMIT] = int(bool(autocommit))
         try:
             self._conn = ddbc_bindings.Connection(
                 self.connection_str,
@@ -1035,8 +1058,24 @@ class Connection:
                 the normalized parameter dictionary.
         """
 
-        # Reject embedded NUL (\x00) up front, for both the base string and every
-        # kwargs value. The ODBC layer terminates the connection string at the
+        # Steps 1-5 depend on the arguments alone: a pool checkout with the same
+        # arguments reuses the result instead of parsing again.
+        try:
+            cache_key = (
+                (connection_str, tuple((k, str(v)) for k, v in kwargs.items()))
+                if kwargs
+                else connection_str
+            )
+            cached = _CONN_STR_CACHE.get(cache_key)
+        except TypeError:
+            cache_key = cached = None
+        if cached is not None:
+            if logger._cached_level <= logging.INFO:
+                logger.info("Final connection string: %s", sanitize_connection_string(cached[0]))
+            return cached[0], dict(cached[1])
+
+        # Reject embedded NUL (\x00) (cached arguments passed this check), for
+        # both the base string and every kwargs value. The ODBC layer terminates the connection string at the
         # first NUL (SQL_NTS), so anything after it is silently dropped; worse,
         # the identity-aware pool key joins the connection string and the
         # per-identity discriminator with a NUL separator, so a NUL smuggled into
@@ -1056,6 +1095,8 @@ class Connection:
                     ),
                     ddbc_error="Embedded NUL in connection parameter.",
                 )
+
+        warned = False
 
         # Step 1: Parse base connection string with allowlist validation
         # The parser validates everything: unknown params, reserved params, duplicates, syntax
@@ -1083,6 +1124,7 @@ class Connection:
                 normalized_params[normalized_key] = str(value)
             else:
                 logger.warning(f"Ignoring unknown connection parameter from kwargs: {key}")
+                warned = True
 
         # Step 4: Add Driver and APP (always controlled by the driver).
         normalized_params["Driver"] = "ODBC Driver 18 for SQL Server"
@@ -1091,8 +1133,13 @@ class Connection:
         # Step 5: Build final connection string
         conn_str = _ConnectionStringBuilder(normalized_params).build()
 
-        logger.info("Final connection string: %s", sanitize_connection_string(conn_str))
+        if logger._cached_level <= logging.INFO:
+            logger.info("Final connection string: %s", sanitize_connection_string(conn_str))
 
+        if cache_key is not None and not warned:
+            if len(_CONN_STR_CACHE) >= _CONN_STR_CACHE_SIZE:
+                _CONN_STR_CACHE.clear()
+            _CONN_STR_CACHE[cache_key] = (conn_str, dict(normalized_params))
         return conn_str, normalized_params
 
     @staticmethod
@@ -1698,7 +1745,7 @@ class Connection:
             )
 
         cursor = Cursor(self, timeout=self._timeout)
-        self._cursors.add(cursor)  # Track the cursor
+        self._track_cursor(cursor)  # Track the cursor
         logger.debug("cursor: Cursor created successfully - total_cursors=%d", len(self._cursors))
         return cursor
 
@@ -1859,7 +1906,7 @@ class Connection:
         try:
             # Add the cursor to our tracking set BEFORE execution
             # This ensures it's tracked even if execution fails
-            self._cursors.add(cursor)
+            self._track_cursor(cursor)
 
             # Now execute the query
             cursor.execute(sql, *args)
@@ -2221,7 +2268,7 @@ class Connection:
             return
 
         # Close all cursors first, but don't let one failure stop the others
-        if hasattr(self, "_cursors"):
+        if getattr(self, "_cursors", None):
             # Convert to list to avoid modification during iteration
             cursors_to_close = list(self._cursors)
             close_errors = []
@@ -2287,7 +2334,14 @@ class Connection:
             # Always mark as closed, even if there were errors
             self._closed = True
 
-        logger.info("Connection closed successfully.")
+        if logger._cached_level <= logging.INFO:
+            logger.info("Connection closed successfully.")
+
+    def _track_cursor(self, cursor: Cursor) -> None:
+        """Remember `cursor` so close() closes it too."""
+        if self._cursors is _NO_CURSORS:
+            self._cursors = weakref.WeakSet()
+        self._cursors.add(cursor)
 
     def _remove_cursor(self, cursor: Cursor) -> None:
         """

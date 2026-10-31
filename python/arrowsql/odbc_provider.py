@@ -43,6 +43,19 @@ _DIST_BY_PROVIDER: Dict[str, str] = {
 }
 
 
+def _rust_port() -> bool:
+    """Whether the loaded bindings are the Rust ones (looked up once)."""
+    global _RUST_PORT
+    if _RUST_PORT is None:
+        from arrowsql import ddbc_bindings
+
+        _RUST_PORT = bool(getattr(ddbc_bindings, "__rust_port__", False))
+    return _RUST_PORT
+
+
+_RUST_PORT: Optional[bool] = None
+
+
 def _normalize(value: str) -> str:
     """Return the canonical provider id for ``value`` or raise ``ValueError``.
 
@@ -153,14 +166,13 @@ class ProviderManager:
         actually loaded - a later call can still select a different, installed
         provider instead of requiring a process restart.
         """
+        # RUST-PORT: the Rust bindings speak TDS natively; no ODBC driver
+        # package needs to be importable, and a frozen selection is final.
+        if _rust_port():
+            resolved = cls._resolved
+            return resolved if resolved is not None else cls.resolve()
         provider = cls.effective()
         package = _PACKAGE_BY_PROVIDER[provider]
-        # RUST-PORT: the Rust bindings speak TDS natively; no ODBC driver
-        # package needs to be importable.
-        from arrowsql import ddbc_bindings
-
-        if getattr(ddbc_bindings, "__rust_port__", False):
-            return cls.resolve()
         try:
             importlib.import_module(package)
         except ModuleNotFoundError as exc:

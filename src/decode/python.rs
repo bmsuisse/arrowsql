@@ -142,7 +142,10 @@ impl<'a> Converter<'a> {
             Cell::Utf16(span) => self.utf16(py, buf.bytes(*span))?,
             Cell::Bytes(span) => binary::bytes(py, buf.bytes(*span))?,
             Cell::Decimal(parts) => self.decimal(py, col, parts)?,
-            Cell::Money(scaled) => numeric::money(py, *scaled)?,
+            Cell::Money(scaled) => {
+                let parts = DecimalParts::new(*scaled >= 0, 19, 4, u128::from(scaled.unsigned_abs()));
+                self.decimal(py, col, &parts)?
+            }
             Cell::Date(days) => temporal::date(py, *days)?.into_ptr(),
             Cell::Time { ticks } => temporal::time(py, *ticks)?.into_ptr(),
             Cell::DateTime { days, ticks } => temporal::datetime(py, *days, *ticks)?.into_ptr(),

@@ -52,10 +52,17 @@ fn timestamp_values(array: &dyn Array, unit: TimeUnit) -> Result<&[i64], String>
 
 /// A timestamp as 100-ns ticks since the epoch.
 fn to_ticks(raw: i64, (mul, div): (i64, i64)) -> Result<i64, String> {
-    if div > 1 {
-        return Ok(raw.div_euclid(div));
+    let overflow = || "Timestamp overflow when scaling to 100-ns ticks".to_string();
+    // Literal operands let the compiler use shifts / multiply-high instead of a
+    // runtime division.
+    match (mul, div) {
+        (_, 100) => Ok(raw.div_euclid(100)),
+        (10_000_000, _) => raw.checked_mul(10_000_000).ok_or_else(overflow),
+        (10_000, _) => raw.checked_mul(10_000).ok_or_else(overflow),
+        (10, _) => raw.checked_mul(10).ok_or_else(overflow),
+        (_, d) if d > 1 => Ok(raw.div_euclid(d)),
+        _ => raw.checked_mul(mul).ok_or_else(overflow),
     }
-    raw.checked_mul(mul).ok_or_else(|| "Timestamp overflow when scaling to 100-ns ticks".to_string())
 }
 
 /// (SQL days since year one, ticks of the day) of a tick count since the epoch.

@@ -148,7 +148,7 @@ async fn read_rows<W: mssql_tds::datatypes::row_writer::RowWriter + Send>(
     cancel: Option<&OpCancel>,
 ) -> mssql_tds::core::TdsResult<bool> {
     let start = rows(sink);
-    while rows(sink) - start < max_rows && bytes(sink) < max_bytes {
+    while rows(sink) - start < max_rows && (max_bytes == usize::MAX || bytes(sink) < max_bytes) {
         if cancel.is_some_and(OpCancel::is_cancelled) {
             return Err(mssql_tds::error::Error::OperationCancelledError(
                 "Operation canceled".into(),

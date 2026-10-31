@@ -616,7 +616,7 @@ fn narrow_int(value: i64, dest: &BulkCopyColumnMetadata) -> TdsResult<ColumnValu
 }
 
 fn pow10(exponent: u32) -> Result<u128, String> {
-    10u128.checked_pow(exponent).ok_or_else(|| "decimal scale overflow".to_string())
+    super::wire::checked_pow10(exponent).ok_or_else(|| "decimal scale overflow".to_string())
 }
 
 /// Sign and magnitude of a `decimal128` raw value (scaled by `from_scale`) in
@@ -624,19 +624,22 @@ fn pow10(exponent: u32) -> Result<u128, String> {
 /// or precision is rejected, never rounded.
 pub(super) fn decimal_magnitude(raw: i128, from_scale: u8, dest: &BulkCopyColumnMetadata) -> Result<(bool, u128), String> {
     let magnitude = raw.unsigned_abs();
-    let scaled = if dest.scale >= from_scale {
+    let scaled = if dest.scale == from_scale {
+        magnitude
+    } else if dest.scale > from_scale {
         magnitude
             .checked_mul(pow10(u32::from(dest.scale - from_scale))?)
             .ok_or_else(|| format!("Decimal value out of range for column '{}'", dest.column_name))?
     } else {
         let divisor = pow10(u32::from(from_scale - dest.scale))?;
-        if magnitude % divisor != 0 {
+        let (quotient, remainder) = (magnitude / divisor, magnitude % divisor);
+        if remainder != 0 {
             return Err(format!(
                 "Input decimal scale {from_scale} exceeds target scale {} of column '{}'",
                 dest.scale, dest.column_name
             ));
         }
-        magnitude / divisor
+        quotient
     };
     if scaled >= pow10(u32::from(dest.precision))? {
         return Err(format!(
