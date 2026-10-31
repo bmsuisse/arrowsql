@@ -127,7 +127,7 @@ pub fn build_command(py: Python<'_>, sql: String, params: Option<&Bound<'_, PyAn
     if params.cast::<PySequence>()?.len()? == 0 {
         return Ok(Command::Batch(sql));
     }
-    let set = crate::params::build_rpc_params(params, None)?;
+    let set = crate::params::build_rpc_params(params, None, None)?;
     let (rewritten, markers) = crate::params::placeholders::rewrite_qmarks(&sql);
     if markers != set.types.len() {
         return Err(to_exception(
