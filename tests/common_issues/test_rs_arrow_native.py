@@ -347,3 +347,56 @@ def test_large_stream_bounded_memory(cursor):
     assert rows == 3_000_000
     # Full materialization would be ~3M * (8 + 8 + 23) bytes ≈ 120 MB.
     assert peak - before < 80 * 1024 * 1024
+
+
+DIV_ZERO_AFTER_ROWS = "SELECT 1 / (x - 3) AS v FROM (VALUES (1), (2), (3), (4)) AS t(x)"
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 1024])
+def test_fetchall_arrow_raises_on_error_after_rows(cursor, batch_size):
+    """An error after some rows must surface, not return a truncated table."""
+    cursor.execute(DIV_ZERO_AFTER_ROWS)
+    with pytest.raises(Exception, match="(?i)divide by zero"):
+        cursor.fetchall_arrow(batch_size=batch_size)
+
+
+def test_arrow_stream_raises_on_error_after_rows(cursor):
+    cursor.execute(DIV_ZERO_AFTER_ROWS)
+    stream = cursor.arrow_stream()
+    with pytest.raises(Exception, match="(?i)divide by zero"):
+        pa.RecordBatchReader.from_stream(stream).read_all()
+
+
+def test_closing_a_stream_blocked_on_a_lock_returns(conn, conn_str, cursor, table_name):
+    import threading
+    import time
+
+    from mssql_python import connect
+
+    table = f"dbo.{table_name}"
+    cursor.execute(f"CREATE TABLE {table} (id int PRIMARY KEY)")
+    cursor.execute(f"INSERT INTO {table} VALUES (1)")
+    conn.commit()
+    holder = connect(conn_str)
+    try:
+        holder.autocommit = False
+        hc = holder.cursor()
+        hc.execute(f"UPDATE {table} SET id = id WHERE id = 1")  # X lock, stays open
+
+        cursor.execute(
+            f"SELECT n FROM ({numbers(30000)}) q UNION ALL "
+            f"SELECT id FROM {table} WITH (READCOMMITTEDLOCK) OPTION (MAXDOP 1)"
+        )
+        stream = cursor.arrow_stream(batch_size=100_000)
+        time.sleep(1)  # let the producer reach the lock wait
+
+        closer = threading.Thread(target=stream.close, daemon=True)
+        closer.start()
+        closer.join(10)
+        assert not closer.is_alive(), "close() hangs while the producer waits on a lock"
+
+        holder.rollback()
+        cursor.execute("SELECT 42")
+        assert cursor.fetchone()[0] == 42
+    finally:
+        holder.close()

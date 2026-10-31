@@ -106,9 +106,8 @@ pub fn fetch_arrow_table(
                 Err(err) => return (Err(err), info, batches),
             }
             remaining -= got;
-            if got < want {
-                break;
-            }
+            // A short batch is not the end: an error that cut it short is
+            // reported by the next fetch, which is what ends the loop.
         }
         (Ok(ret), info, batches)
     });

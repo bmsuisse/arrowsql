@@ -83,7 +83,7 @@ impl StmtShared {
         self.query_timeout.store(seconds, Ordering::Relaxed);
     }
 
-    fn cancel_execution(&self) {
+    pub(crate) fn cancel_execution(&self) {
         // Like SQLCancel, only an operation in flight is cancelled: an
         // execution (flagged from before it waits for the wire) or a fetch
         // (which holds the state lock). Arming the handle of an idle
