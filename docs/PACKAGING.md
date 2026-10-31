@@ -250,6 +250,11 @@ smaller than it through ICF/RELR, the cold crates at "s" and `strip`. A
 per-package entry on `ddbc_bindings` makes Cargo ignore `[profile.release]
 strip`, so `pyproject.toml` sets `[tool.maturin] strip = true`.
 
+Size of the kept variant (M2, scripts/wheel_size.sh): wheel 3,558,119 B (was 3,614,126),
+installed 7,716 KiB (was 8,008), `.so` 7,016 KiB. The 3.0 MB / 6 MB lean targets are
+not met: they were only reachable with "s" on the hot path, which costs 4-6% on reads.
+Speed is the primary goal, so the targets give way.
+
 Glibc: `.cargo/config.toml` passes `-z pack-relative-relocs` (DT_RELR), which
 needs glibc >= 2.36 at load time. A `manylinux_2_28` build must drop that flag
 (there is no CI wheel build yet).
