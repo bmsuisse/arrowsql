@@ -25,7 +25,7 @@
 use std::future::Future;
 use std::cell::{Cell, RefCell};
 use std::ops::{Deref, DerefMut};
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::task::Poll;
 use std::time::Duration;
 use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
@@ -38,7 +38,7 @@ use mssql_tds::core::TdsResult;
 use parking_lot::Mutex;
 use pyo3::prelude::*;
 use tokio::runtime::{Builder, Runtime};
-use tokio::time::Instant;
+use tokio::time::{Instant, Sleep};
 
 use crate::statement::StmtShared;
 
@@ -97,6 +97,9 @@ fn build_runtime() -> Runtime {
 /// runtime whose reactor holds its socket.
 pub struct SyncClient {
     client: TdsClient,
+    /// Wakes a watched wait every [`SIGNAL_SLICE`]; created on first use and
+    /// kept registered between calls, so a short call only polls it.
+    slice: Option<Pin<Box<Sleep>>>,
     io: Runtime,
 }
 
@@ -108,7 +111,7 @@ impl SyncClient {
             .build()
             .expect("failed to start the connection I/O runtime (file descriptor limit reached?)");
         let client = io.block_on(TdsConnectionProvider {}.create_client(context, datasource, None))?;
-        Ok(Self { client, io })
+        Ok(Self { client, slice: None, io })
     }
 
     /// Drive the future built by `op` to completion on this connection's
@@ -118,14 +121,14 @@ impl SyncClient {
         F: FnOnce(&'a mut TdsClient) -> Fut,
         Fut: Future,
     {
-        let Self { client, io } = self;
+        let Self { client, slice, io } = self;
         let _spin = mssql_tds::connection::transport::busy_poll::ThreadGuard::enter();
         if WATCHED.with(Cell::get).is_null() {
             return io.block_on(op(client));
         }
         io.block_on(async move {
             let mut work = pin!(op(client));
-            let mut slice = pin!(tokio::time::sleep(SIGNAL_SLICE));
+            let slice = slice.get_or_insert_with(|| Box::pin(tokio::time::sleep(SIGNAL_SLICE)));
             let mut watching = true;
             std::future::poll_fn(|cx| {
                 if let Poll::Ready(out) = work.as_mut().poll(cx) {
