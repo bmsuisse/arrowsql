@@ -1997,11 +1997,15 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         profiling = _perf_timer._enabled
         if profiling:
             t_native = perf_start()
+        # Another thread may close() this cursor while the call runs (that is
+        # how it cancels it): the error check below must still see the handle
+        # that was executed, not the None close() leaves behind.
+        hstmt = self.hstmt
         if parameters:
             # Only the parameterized call takes encoding settings.
             encoding_settings = self._get_encoding_settings()
             ret = ddbc_bindings.DDBCSQLExecute(
-                self.hstmt,
+                hstmt,
                 operation,
                 parameters,
                 self._inputsizes,
@@ -2010,14 +2014,14 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 encoding_settings,
             )
         else:
-            ret = ddbc_bindings.DDBCSQLExecDirect(self.hstmt, operation)
+            ret = ddbc_bindings.DDBCSQLExecDirect(hstmt, operation)
         if profiling:
             perf_stop("py::execute::cpp_call", t_native)
         # Check return code
         if ret != _SQL_SUCCESS:
             try:
                 # Check for errors but don't raise exceptions for info/warning messages
-                check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
+                check_error(_SQL_HANDLE_STMT, hstmt, ret)
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.warning("Execute failed, resetting cursor: %s", e)
                 self._reset_cursor()

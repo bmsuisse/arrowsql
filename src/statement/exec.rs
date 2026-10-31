@@ -84,7 +84,11 @@ pub(crate) fn with_exclusive_wire(
     state.reset_results();
     state.execution = Some(cancel.clone());
     if state.is_freed() {
-        return SQL_INVALID_HANDLE;
+        // Freed while this execution was starting (`close()` from another
+        // thread beats it to the lock): report what the closer asked for, a
+        // cancellation, like an execution it interrupted halfway.
+        state.diag.push(DiagRecord::driver("HY008", "Operation canceled"));
+        return SQL_ERROR;
     }
     if let Some(record) = cancel.interrupt_record() {
         state.diag.push(record);
