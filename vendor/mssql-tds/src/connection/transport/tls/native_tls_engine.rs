@@ -54,7 +54,9 @@ fn get_or_build_connector(
     if validation.use_alpn {
         builder.request_alpns(&[TDS_8_ALPN_PROTOCOL]);
     }
-    let connector = builder.build()?;
+    let connector = builder
+        .build()
+        .map_err(|e| crate::error::Error::TlsError(e.to_string()))?;
 
     CONNECTOR_CACHE
         .write()
@@ -115,11 +117,11 @@ impl TlsEngine for NativeTlsEngine {
                     let peer_cert = stream
                         .get_ref()
                         .peer_certificate()
-                        .map_err(crate::error::Error::TlsError)?
+                        .map_err(|e| crate::error::Error::TlsError(e.to_string()))?
                         .ok_or(crate::error::Error::NoServerCertificate)?;
 
                     let server_cert_der =
-                        peer_cert.to_der().map_err(crate::error::Error::TlsError)?;
+                        peer_cert.to_der().map_err(|e| crate::error::Error::TlsError(e.to_string()))?;
 
                     certificate_validator::validate_server_certificate(
                         cert_path,
@@ -145,7 +147,7 @@ impl TlsEngine for NativeTlsEngine {
                     std::env::consts::OS,
                 );
                 Err(crate::error::Error::TlsHandshakeError {
-                    source: e,
+                    source: Box::new(e),
                     expected_host: params.host_name.to_string(),
                     cert_sans:
                         "(unavailable - handshake failed before certificate could be retrieved)"

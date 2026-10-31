@@ -176,7 +176,7 @@ pub enum Error {
 
     /// TLS/SSL library error.
     #[error("TLS Error: {0}")]
-    TlsError(#[from] native_tls::Error),
+    TlsError(String),
 
     /// TLS handshake failed with host/SAN details.
     #[error(
@@ -184,7 +184,7 @@ pub enum Error {
     )]
     TlsHandshakeError {
         /// Inner TLS error.
-        source: native_tls::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
         /// Hostname the client tried to connect to.
         expected_host: String,
         /// Subject Alternative Names found on the certificate.

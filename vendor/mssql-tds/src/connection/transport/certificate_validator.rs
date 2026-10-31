@@ -9,7 +9,6 @@
 
 use crate::core::TdsResult;
 use crate::error::Error;
-use native_tls::Certificate;
 use std::fs;
 use std::path::Path;
 use tracing::{debug, info};
@@ -40,23 +39,22 @@ pub fn load_certificate_from_file(path: &Path) -> TdsResult<Vec<u8>> {
         error: e.to_string(),
     })?;
 
-    // Try to parse as PEM first, fall back to DER
-    // native-tls handles the format detection and parsing
-    let certificate = Certificate::from_pem(&cert_data)
-        .or_else(|_| {
-            debug!("Not PEM format, trying DER");
-            Certificate::from_der(&cert_data)
-        })
-        .map_err(|_| Error::InvalidCertificateFormat {
-            path: path.to_path_buf(),
-        })?;
-
-    // Convert to DER format for binary comparison
-    let der_data = certificate
-        .to_der()
-        .map_err(|_| Error::InvalidCertificateFormat {
-            path: path.to_path_buf(),
-        })?;
+    // Try to parse as PEM first, fall back to DER.
+    let invalid = || Error::InvalidCertificateFormat {
+        path: path.to_path_buf(),
+    };
+    let der_data = {
+        use rustls_pki_types::{CertificateDer, pem::PemObject};
+        match CertificateDer::from_pem_slice(&cert_data) {
+            Ok(c) => c.as_ref().to_vec(),
+            Err(_) => {
+                debug!("Not PEM format, trying DER");
+                { use x509_parser::prelude::*; X509Certificate::from_der(&cert_data) }
+                    .map_err(|_| invalid())?;
+                cert_data
+            }
+        }
+    };
 
     info!(
         "Successfully loaded certificate from: {path:?} ({} bytes)",
