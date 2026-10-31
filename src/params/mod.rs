@@ -196,3 +196,34 @@ fn data_value_error_class(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     })?;
     Ok(class.bind(py).clone())
 }
+
+/// executemany: a string longer than its column's declared size (from
+/// `setinputsizes`) is a data error, as it is for `execute()`. Declared sizes
+/// the Python layer derives from the data itself are never exceeded.
+pub fn check_text_sizes(param_infos: &Bound<'_, PyAny>, columns: &[Bound<'_, PyAny>]) -> PyResult<()> {
+    use crate::consts::{SQL_CHAR, SQL_VARCHAR, SQL_WCHAR, SQL_WVARCHAR};
+    let Ok(infos) = param_infos.cast::<PyList>() else { return Ok(()) };
+    for (info, column) in infos.iter().zip(columns) {
+        let Ok(info) = info.cast::<crate::types::ParamInfo>() else { continue };
+        let (sql_type, declared) = {
+            let info = info.borrow();
+            (info.paramSQLType, info.columnSize)
+        };
+        if declared == 0 || !matches!(sql_type, SQL_CHAR | SQL_VARCHAR | SQL_WCHAR | SQL_WVARCHAR) {
+            continue;
+        }
+        for value in column.try_iter()? {
+            let value = value?;
+            if value.is_instance_of::<pyo3::types::PyString>() {
+                let actual = value.len()? as u64;
+                if actual > declared {
+                    return Err(conversion_error(&mssql_tds::error::Error::TypeConversionError(format!(
+                        "{DATA_ERROR_PREFIX}String or binary data would be truncated: a value of \
+                         {actual} units exceeds the declared size of {declared}"
+                    ))));
+                }
+            }
+        }
+    }
+    Ok(())
+}

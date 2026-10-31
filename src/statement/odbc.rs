@@ -184,6 +184,7 @@ pub fn execute_many(
     }
     let codec = narrow_codec(encodingSettings)?;
     let hints = param_hints(paramInfos, &columns, codec.as_deref())?;
+    crate::params::check_text_sizes(paramInfos, &columns)?;
     let mut rows: Vec<Vec<SqlType>> = Vec::with_capacity(paramSetSize);
     let mut nulls: Vec<Vec<bool>> = Vec::with_capacity(paramSetSize);
     for row in 0..paramSetSize {

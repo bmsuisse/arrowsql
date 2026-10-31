@@ -50,7 +50,7 @@ attributes; pre-#581 pickles (4 reduce args) still load.
   so on upstream `native_error` is `None` for connection errors; the
   `tests/common_issues/test_issue_581_sqlstate.py::test_login_failure_is_28000`
   native assertion skips in that case.
-- SQLSTATEs must match msodbcsql, quirks included: 2628 ("would be truncated
+- SQLSTATEs must match msodbcsql, quirks included (except the data errors listed under "Parameter styles and data errors"): 2628 ("would be truncated
   in table ...") is `42000`/`ProgrammingError` and 8152 is `22001`/`DataError`;
   1222 (lock timeout) is `42000`; query timeout is `HYT00` with no native
   number. Use the table in `_server_sqlstate.py` (or the mssql-odbc original)
@@ -222,3 +222,19 @@ and now uses about 1.3 us (measured with the native calls stubbed).
 - Native: `DDBCSQLDescribeCol` fills the list with the same per-column dicts
   while the statement's columns stay the same (`src/decode/describe.rs`
   `shared_columns`), so `_initialize_description` compares layouts by identity.
+
+## Parameter styles and data errors (compat_params)
+
+- `parameter_helper.py`: `%(name)s` placeholders are rewritten by scanned
+  position, so one inside a string literal, comment or quoted identifier is left
+  alone (upstream replaced every textual occurrence). A dict with both `?` and
+  `%(name)s` raises `ParameterStyleMismatchError`, which is both a
+  `ProgrammingError` (what the server-side rejection gave before) and the
+  client-side `TypeError` ("Parameter style mismatch") of the other mismatches.
+- `exceptions.py`: server error 2628 (verbose "string or binary data would be
+  truncated") is SQLSTATE 22001 and raises `StringTruncationError`, a
+  `DataError` that is also the `ProgrammingError` upstream raises (42000), so
+  both `except` clauses match. Error 8114 (error converting data type) keeps
+  SQLSTATE 42000 but raises `ConversionDataError`, a `DataError` that is also
+  a `ProgrammingError`. 2628 -> 22001 is in `src/diag.rs` and
+  `_server_sqlstate.py`.

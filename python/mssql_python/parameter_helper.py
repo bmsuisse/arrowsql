@@ -14,10 +14,18 @@ Reference: https://www.python.org/dev/peps/pep-0249/#paramstyle
 
 from typing import Dict, List, Tuple, Any, Union
 from mssql_python.logging import logger
+from mssql_python.exceptions import ProgrammingError
 
 # Distinctive marker for escaped percent signs during pyformat conversion
 # Uses a unique prefix/suffix that's extremely unlikely to appear in real SQL
 _ESCAPED_PERCENT_MARKER = "__MSSQL_PYFORMAT_ESCAPED_PERCENT_PLACEHOLDER__"
+
+
+# RUST-PORT: a statement mixing %(name)s and ? is both a ProgrammingError (what
+# drivers raised when the server rejected it) and the client-side TypeError the
+# other parameter style mismatches raise.
+class ParameterStyleMismatchError(ProgrammingError, TypeError):  # type: ignore[misc]
+    pass
 
 
 def _skip_quoted_context(sql: str, i: int, length: int) -> int:
@@ -179,6 +187,17 @@ def parse_pyformat_params(sql: str) -> List[str]:
         len(sql),
         sql[:100] if len(sql) > 100 else sql,
     )
+    params = [name for name, _start, _end in _scan_pyformat(sql)]
+    logger.debug(
+        "parse_pyformat_params: Completed - found %d parameters: %s",
+        len(params),
+        params,
+    )
+    return params
+
+
+def _scan_pyformat(sql: str) -> List[Tuple[str, int, int]]:
+    """RUST-PORT: (name, start, end) of every executable %(name)s placeholder."""
     params = []
     i = 0
     length = len(sql)
@@ -202,22 +221,12 @@ def parse_pyformat_params(sql: str) -> List[str]:
                 if j + 1 < length and sql[j + 1] == "s":
                     # Extract parameter name
                     param_name = sql[i + 2 : j]
-                    params.append(param_name)
-                    logger.debug(
-                        "parse_pyformat_params: Found parameter '%s' at position %d",
-                        param_name,
-                        i,
-                    )
+                    params.append((param_name, i, j + 2))
                     i = j + 2
                     continue
 
         i += 1
 
-    logger.debug(
-        "parse_pyformat_params: Completed - found %d parameters: %s",
-        len(params),
-        params,
-    )
     return params
 
 
@@ -334,15 +343,16 @@ def convert_pyformat_to_qmark(sql: str, param_dict: Dict[str, Any]) -> Tuple[str
         len(unique_params),
     )
 
-    for param_name in unique_params:  # Use set to avoid duplicate replacements
-        pattern = f"%({param_name})s"
-        occurrences = rewritten_sql.count(pattern)
-        rewritten_sql = rewritten_sql.replace(pattern, "?")
-        logger.debug(
-            "convert_pyformat_to_qmark: Replaced parameter '%s' (%d occurrences)",
-            param_name,
-            occurrences,
-        )
+    # RUST-PORT: rewrite by scanned position so a %(name)s inside a string
+    # literal, comment or quoted identifier stays untouched.
+    pieces = []
+    last = 0
+    for _name, start, end in _scan_pyformat(escaped_sql):
+        pieces.append(escaped_sql[last:start])
+        pieces.append("?")
+        last = end
+    pieces.append(escaped_sql[last:])
+    rewritten_sql = "".join(pieces)
 
     # Restore escaped %% back to %
     if _ESCAPED_PERCENT_MARKER in rewritten_sql:
@@ -457,7 +467,14 @@ def detect_and_convert_parameters(
         # Check if SQL appears to have qmark placeholders
         # Fast short-circuit: skip the O(n) context-aware scan if no ? exists at all
         # Then use context-aware check that ignores ? inside brackets, quotes, and comments
-        if "?" in sql and _has_unquoted_question_marks(sql) and not parse_pyformat_params(sql):
+        # RUST-PORT: a dict with both ? and %(name)s is also a style mismatch
+        if "?" in sql and _has_unquoted_question_marks(sql) and parse_pyformat_params(sql):
+            raise ParameterStyleMismatchError(
+                "Parameter style mismatch: query mixes named placeholders (%(name)s) "
+                "and positional placeholders (?). Use one style.",
+                "",
+            )
+        if "?" in sql and _has_unquoted_question_marks(sql):
             logger.error(
                 "detect_and_convert_parameters: Parameter style mismatch - SQL has ? placeholders but received dict"
             )
