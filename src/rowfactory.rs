@@ -31,9 +31,9 @@ pub fn construct_rows<'py>(
     let column_map_lower = column_map_lower.unwrap_or(&none);
     let column_names = column_names.unwrap_or(&none);
     let names = [
-        (pyo3::intern!(py, "_values"), None),
+        (pyo3::intern!(py, "_row_values"), None),
         (pyo3::intern!(py, "_column_map"), Some(column_map)),
-        (pyo3::intern!(py, "_cursor"), Some(cursor)),
+        (pyo3::intern!(py, "_row_cursor"), Some(cursor)),
         (pyo3::intern!(py, "_column_map_lower"), Some(column_map_lower)),
         (pyo3::intern!(py, "_column_names"), Some(column_names)),
     ];

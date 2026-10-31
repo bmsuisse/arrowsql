@@ -141,12 +141,14 @@ def test_column_name_lookup_is_case_sensitive(cursor):
 @pytest.mark.upstream_bug(
     reason=(
         "Row attribute lookup resolves the driver's internal attributes "
-        "(_values, _mapping, _cursor) before column names, so a column named "
-        "_values returns the internal value list instead of the column value"
+        "(_values, _cursor) before column names, so a column named "
+        "_values returns the internal value list instead of the column value. "
+        "_mapping is not tested here: it is a documented property (see Row._mapping), "
+        "so a column named _mapping is read with row['_mapping']."
     )
 )
 @pytest.mark.xfail(strict=True, reason="upstream bug")
-@pytest.mark.parametrize("column", ["_values", "_mapping", "_cursor"])
+@pytest.mark.parametrize("column", ["_values", "_cursor"])
 def test_underscore_column_name_is_not_shadowed_by_internals(cursor, column):
     cursor.execute(f"SELECT 42 AS [{column}]")
     row = cursor.fetchone()

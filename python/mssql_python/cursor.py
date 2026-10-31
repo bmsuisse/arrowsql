@@ -2630,6 +2630,9 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             if hasattr(seq_of_parameters, "__getitem__")
             else next(iter(seq_of_parameters))
         )
+        # RUST-PORT: a set of strings would otherwise insert each string as a row.
+        if isinstance(first_row, (str, bytes)):
+            raise TypeError("executemany rows must be sequences or mappings, not str")
 
         if isinstance(first_row, dict):
             # pyformat style - convert all rows
@@ -4012,7 +4015,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         if isinstance(first, tuple):
             return chain((first,), it)
         if isinstance(first, Row):
-            return (tuple(item._values) for item in chain((first,), it))
+            return (tuple(item._row_values) for item in chain((first,), it))
         raise TypeError(
             f"bulkcopy data rows must be tuples or Row objects, got {type(first).__name__}"
         )
