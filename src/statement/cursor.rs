@@ -326,9 +326,11 @@ fn deliver(state: &mut StmtState, client: Option<&mut SyncClient>, n: usize, pla
         return Fetched::without_rows(SQL_INVALID_HANDLE);
     }
     if state.columns.is_none() {
+        // No result set is positioned (the statement never produced one, or
+        // was closed): msodbcsql's HY010, not the 24000 of an open cursor.
         state
             .diag
-            .push(DiagRecord::new("24000", 0, "[Microsoft][ODBC Driver Manager] Invalid cursor state"));
+            .push(DiagRecord::new("HY010", 0, "[Microsoft][ODBC Driver Manager] Function sequence error"));
         return Fetched::without_rows(SQL_ERROR);
     }
     if state.pending_rows() < n
