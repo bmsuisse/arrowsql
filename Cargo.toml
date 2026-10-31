@@ -33,6 +33,12 @@ encoding_rs = "0.8"
 # BulkLoadRow is an async_trait; implemented in src/bulk/.
 async-trait = "0.1"
 
+# musl cannot load a shared library that uses initial-exec TLS through dlopen
+# ("initial-exec TLS resolves to dynamic definition"): mimalloc's thread-local
+# heap pointer has to use the local-dynamic model there.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
+
 [profile.dev]
 opt-level = 1
 
