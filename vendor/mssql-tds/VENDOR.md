@@ -15,6 +15,16 @@ Local patches (search for `VENDOR PATCH`):
    connection ("Connection is dead and session state does not allow
    recovery"). Repro: tests/upstream/test_004_cursor.py::
    test_executemany_utf16_length_validation on a cold plan cache.
+2. TLS backend (marked `RUST-PORT`): `src/connection/transport/tls/rustls_engine.rs`
+   (new) is the default engine, tokio-rustls with the `ring` provider and the
+   system trust store (rustls-native-certs, so `SSL_CERT_FILE` works). The
+   native-tls/OpenSSL engine and the OpenSSL-backed Always Encrypted crypto
+   are behind the `native-tls` feature; without it,
+   `src/security/crypto/unsupported.rs` makes column encryption fail cleanly.
+   Dropping OpenSSL removes libssl, libcrypto and libzstd from the wheel.
+   Covered by tests/port/test_tls.py.
+3. `src/connection/tds_client.rs` `execute_sp_executesql`: build the parameter
+   declaration from a reference instead of cloning every parameter.
 
 To drop the vendored copy, delete this directory and the `[patch]` section
 in ../../Cargo.toml once the fix is in the pinned upstream rev.
