@@ -271,6 +271,15 @@ class StringTruncationError(DataError, ProgrammingError):  # RUST-PORT
     ProgrammingError (42000); both classes match."""
 
 
+_CONVERSION_ERROR = 8114
+
+
+class ConversionDataError(DataError, ProgrammingError):  # RUST-PORT
+    """SQL Server error 8114 (error converting data type). SQLSTATE stays 42000
+    and it stays the ProgrammingError upstream raises, but it is a data
+    conversion failure like error 245, so it is a DataError too."""
+
+
 def sqlstate_to_exception(
     sqlstate: str, ddbc_error: str, native_error: Optional[int] = None
 ) -> Optional[Exception]:
@@ -655,6 +664,8 @@ def sqlstate_to_exception(
     # reports it as ProgrammingError (42000); keep both for compatibility.
     if native_error == _LOCK_TIMEOUT_ERROR and isinstance(exc, ProgrammingError):
         exc = LockTimeoutError(driver_error=exc.driver_error, ddbc_error=ddbc_error)
+    if native_error == _CONVERSION_ERROR and isinstance(exc, ProgrammingError):
+        exc = ConversionDataError(driver_error=exc.driver_error, ddbc_error=ddbc_error)
     if native_error == _VERBOSE_TRUNCATION_ERROR and isinstance(exc, DataError):
         exc = StringTruncationError(driver_error=exc.driver_error, ddbc_error=ddbc_error)
     if exc is not None:

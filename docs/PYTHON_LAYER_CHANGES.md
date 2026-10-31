@@ -206,6 +206,7 @@ The Rust side already reads a `None` entry as "no hint" (`params::parse_hint`).
 - `exceptions.py`: server error 2628 (verbose "string or binary data would be
   truncated") is SQLSTATE 22001 and raises `StringTruncationError`, a
   `DataError` that is also the `ProgrammingError` upstream raises (42000), so
-  both `except` clauses match. Error 8114 (error converting data type) maps to
-  22018 / `DataError`, like 245. Both are in `src/diag.rs` and
+  both `except` clauses match. Error 8114 (error converting data type) keeps
+  SQLSTATE 42000 but raises `ConversionDataError`, a `DataError` that is also
+  a `ProgrammingError`. 2628 -> 22001 is in `src/diag.rs` and
   `_server_sqlstate.py`.

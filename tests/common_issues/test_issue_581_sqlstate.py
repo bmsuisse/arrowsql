@@ -128,9 +128,12 @@ SERVER_ERRORS = [
         "CREATE TABLE #t (v varchar(3))",
         "INSERT #t VALUES (?)",
         ("abcdef",),
-        # msodbcsql has no SQLSTATE mapping for 2628, so the severity tier gives 42000.
-        exceptions.ProgrammingError,
-        "42000",
+        # msodbcsql has no SQLSTATE mapping for 2628 (severity tier: 42000, ProgrammingError).
+        # The port deliberately reports it as the data error it is: 22001, DataError
+        # (test_rs_string_truncation / test_messages_errors assert DataError).
+        exceptions.StringTruncationError if hasattr(exceptions, "StringTruncationError")
+        else exceptions.ProgrammingError,
+        "22001" if hasattr(exceptions, "StringTruncationError") else "42000",
         2628,
         id="verbose_truncation_2628_parameterized",
     ),
