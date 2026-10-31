@@ -17,6 +17,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<hub::Hub>()?;
     m.add_class::<connection::AioConnection>()?;
     m.add_class::<pool::AioPool>()?;
+    m.add_class::<connection::AioOpening>()?;
     m.add_class::<convert::RowBatch>()?;
     m.add_function(wrap_pyfunction!(connection::connect, m)?)?;
     m.add_function(wrap_pyfunction!(pool::create_pool, m)?)?;
