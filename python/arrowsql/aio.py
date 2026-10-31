@@ -26,6 +26,7 @@ from typing import Any, Optional, Sequence
 from arrowsql import ddbc_bindings as _core
 from arrowsql.constants import ConstantsDDBC as _const
 from arrowsql.cursor import Cursor as _SyncCursor
+from arrowsql.exceptions import InterfaceError, NotSupportedError, ProgrammingError
 from arrowsql.helpers import get_settings
 
 __all__ = ["connect", "create_pool", "AsyncConnection", "AsyncCursor", "Pool"]
@@ -62,8 +63,6 @@ class _Shape:
 def _require_native() -> None:
     # RUST-PORT: the native hub is compiled for Unix only (src/lib.rs).
     if not hasattr(_core, "AioHub"):
-        from arrowsql.exceptions import NotSupportedError
-
         message = "arrowsql.aio is only available on Unix platforms (Linux, macOS)"
         raise NotSupportedError(driver_error=message, ddbc_error=message)
 
@@ -101,7 +100,7 @@ class AsyncCursor:
     """DB-API style cursor; every method that talks to the server is a coroutine."""
 
     __slots__ = (
-        "_conn", "_c", "_id", "_batch", "_rows", "_pos", "_done", "_shape",
+        "_conn", "_c", "_id", "_batch", "_rows", "_pos", "_done",
         "description", "rowcount", "messages", "arraysize", "_closed",
     )
 
@@ -113,7 +112,6 @@ class AsyncCursor:
         self._rows = []  # rows fetched by fetchone in chunks
         self._pos = 0
         self._done = True
-        self._shape = None
         self.description = None
         self.rowcount = -1
         self.messages = []
@@ -125,8 +123,7 @@ class AsyncCursor:
         return self._conn
 
     def _install(self, result) -> None:
-        shape, batch, done, rowcount, messages = result
-        self._shape = shape
+        _, batch, done, rowcount, messages = result
         self._batch = batch
         self._rows = []
         self._pos = 0
@@ -149,7 +146,7 @@ class AsyncCursor:
     async def executemany(self, operation: str, seq_of_parameters: Sequence[Sequence[Any]]) -> None:
         self._check()
         rows = await _wait(self._c, self._c.executemany(_hub(), self._id, operation, seq_of_parameters))
-        self._shape = self._batch = None
+        self._batch = None
         self._done = True
         self.description = None
         self.rowcount = rows
@@ -216,7 +213,7 @@ class AsyncCursor:
         self._check()
         result = await _wait(self._c, self._c.nextset(_hub(), self._id))
         if result is None:
-            self._shape = self._batch = None
+            self._batch = None
             self._done = True
             self.description = None
             return None
@@ -254,7 +251,23 @@ class AsyncCursor:
         await self.close()
 
 
-class AsyncConnection:
+class _FetchMixin:
+    """fetch/fetchrow/fetchval shared by connections and pools; needs ``_query``."""
+
+    __slots__ = ()
+
+    async def fetch(self, operation: str, *parameters: Any) -> list:
+        """All rows of the first result, in one round trip."""
+        return await self._query(operation, parameters, 0)
+
+    async def fetchrow(self, operation: str, *parameters: Any) -> Optional[Any]:
+        return await self._query(operation, parameters, 1)
+
+    async def fetchval(self, operation: str, *parameters: Any) -> Any:
+        return await self._query(operation, parameters, 2)
+
+
+class AsyncConnection(_FetchMixin):
     """One TDS session. Operations on one connection run one at a time."""
 
     def __init__(self, native):
@@ -287,16 +300,6 @@ class AsyncConnection:
 
     async def execute(self, operation: str, *parameters: Any) -> AsyncCursor:
         return await self.cursor().execute(operation, *parameters)
-
-    async def fetch(self, operation: str, *parameters: Any) -> list:
-        """All rows of the first result, in one round trip."""
-        return await self._query(operation, parameters, 0)
-
-    async def fetchrow(self, operation: str, *parameters: Any) -> Optional[Any]:
-        return await self._query(operation, parameters, 1)
-
-    async def fetchval(self, operation: str, *parameters: Any) -> Any:
-        return await self._query(operation, parameters, 2)
 
     async def _query(self, operation, parameters, mode):
         if self._closed:
@@ -370,7 +373,7 @@ class _Acquire:
             await conn.__aexit__(exc_type, exc, tb)
 
 
-class Pool:
+class Pool(_FetchMixin):
     """A pool of sessions; the fetch/execute shortcuts use one session per call.
 
     With ``autocommit=False``, leaving ``async with pool.acquire()`` commits on
@@ -397,15 +400,6 @@ class Pool:
     @acquire_timeout.setter
     def acquire_timeout(self, value: float) -> None:
         self._p.acquire_timeout = value
-
-    async def fetch(self, operation: str, *parameters: Any) -> list:
-        return await self._query(operation, parameters, 0)
-
-    async def fetchrow(self, operation: str, *parameters: Any) -> Optional[Any]:
-        return await self._query(operation, parameters, 1)
-
-    async def fetchval(self, operation: str, *parameters: Any) -> Any:
-        return await self._query(operation, parameters, 2)
 
     async def execute(self, operation: str, *parameters: Any) -> int:
         """Run a statement; returns its rowcount (or rows, if it returns any)."""
@@ -509,12 +503,8 @@ async def create_pool(
 
 
 def _interface_error(message: str):
-    from arrowsql.exceptions import InterfaceError
-
     return InterfaceError(driver_error=message, ddbc_error=message)
 
 
 def _programming_error(message: str):
-    from arrowsql.exceptions import ProgrammingError
-
     return ProgrammingError(driver_error=message, ddbc_error=message)

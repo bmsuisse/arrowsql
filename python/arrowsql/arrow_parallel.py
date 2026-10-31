@@ -13,6 +13,7 @@ the wall time. The MIN/MAX probe runs on the first worker's connection.
 """
 
 import math
+from contextlib import closing
 import queue
 import re
 import threading
@@ -181,8 +182,7 @@ def _probe_meta(cursor, query, column) -> Tuple[Optional[int], bool]:
 
 def _plan(conn, query, column, name, partitions) -> List[Tuple[str, tuple]]:
     """Probe [min, max]; return the slices, or [] to read in one stream."""
-    cursor = conn.cursor()
-    try:
+    with closing(conn.cursor()) as cursor:
         cursor.execute(f"SELECT MIN({column}), MAX({column}) FROM ({query}) AS _q")
         low, high = cursor.fetchone()
         if low is None:
@@ -202,8 +202,6 @@ def _plan(conn, query, column, name, partitions) -> List[Tuple[str, tuple]]:
         count = min(count, span)
         if count < 2:
             return []
-    finally:
-        cursor.close()
     step = math.ceil(span / count)
     edges = [low + i * step for i in range(1, count) if low + i * step <= high]
     base = f"SELECT * FROM ({query}) AS _q WHERE "
@@ -219,12 +217,9 @@ def _plan(conn, query, column, name, partitions) -> List[Tuple[str, tuple]]:
 
 
 def _fetch(conn, sql, params, batch_size):
-    cursor = conn.cursor()
-    try:
+    with closing(conn.cursor()) as cursor:
         cursor.execute(sql, params) if params else cursor.execute(sql)
         return cursor.fetchall_arrow(batch_size)
-    finally:
-        cursor.close()
 
 
 def _read(connection_str, sql, params, batch_size, connect_kwargs):

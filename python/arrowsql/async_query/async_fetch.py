@@ -4,10 +4,11 @@ import asyncio
 
 from typing import TYPE_CHECKING, Any
 
-from ..exceptions import OperationalError, ProgrammingError
+from ..exceptions import ProgrammingError
 from ..logging import logger
 from ..row import Row
-from .exception_translator import translate_py_core_exceptions
+from .async_execute import _get_py_core_async_cursor
+from .exception_translator import is_connection_busy, translate_py_core_exceptions
 
 if TYPE_CHECKING:
     from .async_cursor import _AsyncCursor  # pyright: ignore[reportPrivateUsage]
@@ -19,10 +20,6 @@ _ResultSnapshot = tuple[
     dict[str, int] | None,
     tuple[str, ...] | None,
 ]
-
-
-def _get_py_core_async_cursor(cursor: "_AsyncCursor") -> Any:
-    return cursor._py_core_async_cursor  # pyright: ignore[reportPrivateUsage]
 
 
 def _snapshot_result(cursor: "_AsyncCursor") -> _ResultSnapshot:
@@ -40,9 +37,7 @@ def _reconcile_failed_fetch(
 ) -> None:
     if generation != cursor._result_generation:  # pyright: ignore[reportPrivateUsage]
         return
-    if isinstance(error, OperationalError) and str(error.__cause__).startswith(
-        "Connection is busy"
-    ):
+    if is_connection_busy(error):
         return
     logger.debug("AsyncCursor.%s: invalidating result state after fetch failure", operation)
     cursor._reset_fetch_tracking()  # pyright: ignore[reportPrivateUsage]

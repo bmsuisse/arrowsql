@@ -33,6 +33,13 @@ _EXCEPTION_TYPES = {
 
 _ASYNC_DRIVER_ERROR = "Async operation failed"
 
+def is_connection_busy(error: BaseException) -> bool:
+    """Whether py-core rejected the call because the connection is busy."""
+    return isinstance(error, OperationalError) and str(error.__cause__).startswith(
+        "Connection is busy"
+    )
+
+
 _PROGRAMMING_RUNTIME_ERRORS = ("Cursor is closed",)
 _INTERFACE_RUNTIME_ERRORS = (
     "Connection is closing",
