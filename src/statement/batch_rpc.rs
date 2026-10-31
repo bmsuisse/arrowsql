@@ -17,7 +17,8 @@ use std::mem::{Discriminant, discriminant};
 use mssql_tds::datatypes::decoder::DecimalParts;
 use mssql_tds::datatypes::sqltypes::SqlType;
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple, PyType};
+use mssql_tds::datatypes::column_values::{SqlDateTime2, SqlTime};
+use pyo3::types::{PyDateAccess, PyDateTime, PyList, PyTimeAccess, PyTuple, PyType, PyTzInfoAccess};
 
 use super::exec::execute_batch;
 use super::stmt_of;
@@ -69,6 +70,34 @@ fn decimal_cell(value: &Bound<'_, PyAny>, decimal_type: &Bound<'_, PyType>) -> O
     let positive = unsigned.is_none() || magnitude == 0;
     // Both fit in u8: they are at most 38.
     Some(SqlType::Numeric(Some(DecimalParts::new(positive, precision as u8, scale as u8, magnitude))))
+}
+
+/// A naive `datetime.datetime` as DATETIME2(7), read through the C-level
+/// accessors. Same result as `py_to_sql_type`, without its attribute lookups.
+/// `None` for subclasses and timezone-aware values, which the general
+/// converter handles.
+fn datetime_cell(value: &Bound<'_, PyAny>, datetime_type: &Bound<'_, PyType>) -> Option<SqlType> {
+    if !value.get_type().is(datetime_type) {
+        return None;
+    }
+    let dt = value.cast::<PyDateTime>().ok()?;
+    if dt.get_tzinfo().is_some() {
+        return None;
+    }
+    let (year, month, day) = (i64::from(dt.get_year()), i64::from(dt.get_month()), i64::from(dt.get_day()));
+    // Howard Hinnant's days_from_civil, shifted from 1970-01-01 to 0001-01-01.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let year_of_era = y - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468 + 719_162;
+    let days = u32::try_from(days).ok()?;
+    let seconds = u64::from(dt.get_hour()) * 3600 + u64::from(dt.get_minute()) * 60 + u64::from(dt.get_second());
+    Some(SqlType::DateTime2(Some(SqlDateTime2 {
+        days,
+        time: SqlTime { time_nanoseconds: seconds * 10_000_000 + u64::from(dt.get_microsecond()) * 10, scale: 7 },
+    })))
 }
 
 /// What a column holds. Cells of one column must share a kind.
@@ -123,6 +152,8 @@ impl ColumnScan {
 fn convert_rows(rows: &Bound<'_, PyAny>, ncols: usize) -> Option<(Vec<Vec<SqlType>>, Vec<Vec<bool>>)> {
     let decimal_type = rows.py().import("decimal").and_then(|module| module.getattr("Decimal")).ok()?;
     let decimal_type = decimal_type.cast_into::<PyType>().ok()?;
+    let datetime_type = rows.py().import("datetime").and_then(|module| module.getattr("datetime")).ok()?;
+    let datetime_type = datetime_type.cast_into::<PyType>().ok()?;
     let mut scans: Vec<ColumnScan> = (0..ncols).map(|_| ColumnScan::default()).collect();
     let (mut cells, mut nulls) = (Vec::new(), Vec::new());
     let mut push_row = |row: &Bound<'_, PyAny>| -> Option<()> {
@@ -130,7 +161,7 @@ fn convert_rows(rows: &Bound<'_, PyAny>, ncols: usize) -> Option<(Vec<Vec<SqlTyp
         let mut null_row = Vec::with_capacity(ncols);
         let mut convert = |index: usize, value: Bound<'_, PyAny>| -> Option<()> {
             let is_null = value.is_none();
-            let cell = match decimal_cell(&value, &decimal_type) {
+            let cell = match datetime_cell(&value, &datetime_type).or_else(|| decimal_cell(&value, &decimal_type)) {
                 Some(cell) => cell,
                 None => py_to_sql_type(&value).ok()?,
             };

@@ -464,11 +464,9 @@ fn run_batch(ex: &mut Exclusive<'_>, sql: String, mut rows: Vec<Vec<SqlType>>, a
 }
 
 fn name_positionally(types: Vec<SqlType>) -> Vec<RpcParameter> {
-    types
-        .into_iter()
-        .enumerate()
-        .map(|(j, t)| RpcParameter::new(Some(format!("@P{}", j + 1)), StatusFlags::NONE, t))
-        .collect()
+    // sp_execute takes the values in the order sp_prepare declared them, so no
+    // per-row `@Pn` name is built or sent.
+    types.into_iter().map(|t| RpcParameter::new(None, StatusFlags::NONE, t)).collect()
 }
 
 /// Error 2628 (verbose truncation) is data-related (22001) when a batch row
