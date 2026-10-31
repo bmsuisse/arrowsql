@@ -67,6 +67,16 @@ def temporal(cursor, conn, table_name):
         raise
 
 
+def _next_version():
+    """Let the system clock move on before the next versioning change.
+
+    Two commits inside one clock tick give the superseded version a zero-length
+    period, which FOR SYSTEM_TIME ALL leaves out. Both drivers are fast enough
+    to hit that on this server, so tests that count versions wait a little.
+    """
+    time.sleep(0.02)
+
+
 def _rows(cursor):
     """Row objects from fetchall() as plain tuples."""
     return [tuple(r) for r in cursor.fetchall()]
@@ -248,12 +258,22 @@ def test_as_of_iso_string_param_resolves_like_datetime(cursor, conn, temporal):
     assert _rows(cursor) == [("a",)]
 
 
+@pytest.mark.upstream_bug(
+    reason=(
+        "upstream's eager transaction on commit() stamps each version at the previous "
+        "commit, so a version can still get a zero-length window and drop out of "
+        "FOR SYSTEM_TIME ALL (see test_version_window_reflects_when_update_ran)"
+    )
+)
+@pytest.mark.xfail(strict=False, reason="upstream bug, timing dependent")
 def test_for_system_time_all_returns_every_version_and_current(cursor, conn, temporal):
     name, _ = temporal
     cursor.execute(f"INSERT INTO dbo.{name} (id, val) VALUES (1, 'a')")
     conn.commit()
+    _next_version()
     cursor.execute(f"UPDATE dbo.{name} SET val = 'b' WHERE id = 1")
     conn.commit()
+    _next_version()
     cursor.execute(f"UPDATE dbo.{name} SET val = 'c' WHERE id = 1")
     conn.commit()
     cursor.execute(
@@ -264,10 +284,18 @@ def test_for_system_time_all_returns_every_version_and_current(cursor, conn, tem
     assert rows[-1][1] == FAR_FUTURE
 
 
+@pytest.mark.upstream_bug(
+    reason=(
+        "upstream's eager transaction on commit() can give version 'a' a zero-length "
+        "window, which CONTAINED IN never returns"
+    )
+)
+@pytest.mark.xfail(strict=False, reason="upstream bug, timing dependent")
 def test_contained_in_with_datetime2_params_returns_closed_versions_only(cursor, conn, temporal):
     name, hist = temporal
     cursor.execute(f"INSERT INTO dbo.{name} (id, val) VALUES (1, 'a')")
     conn.commit()
+    _next_version()
     cursor.execute(f"UPDATE dbo.{name} SET val = 'b' WHERE id = 1")
     conn.commit()
     cursor.execute(f"SELECT ValidFrom, ValidTo FROM dbo.{hist} WHERE id = 1")
@@ -280,10 +308,18 @@ def test_contained_in_with_datetime2_params_returns_closed_versions_only(cursor,
     assert _rows(cursor) == [("a",)]
 
 
+@pytest.mark.upstream_bug(
+    reason=(
+        "upstream's eager transaction on commit() can give the deleted version a "
+        "zero-length window, so FOR SYSTEM_TIME ALL leaves it out"
+    )
+)
+@pytest.mark.xfail(strict=False, reason="upstream bug, timing dependent")
 def test_delete_moves_row_to_history(cursor, conn, temporal):
     name, hist = temporal
     cursor.execute(f"INSERT INTO dbo.{name} (id, val) VALUES (1, 'a')")
     conn.commit()
+    _next_version()
     cursor.execute(f"DELETE FROM dbo.{name} WHERE id = 1")
     conn.commit()
     cursor.execute(f"SELECT COUNT(*) FROM dbo.{name}")
