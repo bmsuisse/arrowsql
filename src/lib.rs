@@ -35,6 +35,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[pyfunction]
 fn reset_after_fork() {
     pooling::forget_after_fork();
+    runtime::forget_after_fork();
 }
 
 #[pyfunction]
