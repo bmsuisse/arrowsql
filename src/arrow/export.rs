@@ -52,7 +52,7 @@ fn schema_capsule<'py>(py: Python<'py>, schema: &SchemaRef) -> PyResult<Bound<'p
 }
 
 /// A fully fetched result. Zero-copy for any Arrow consumer.
-#[pyclass(name = "ArrowTable", module = "mssql_python.ddbc_bindings", frozen)]
+#[pyclass(name = "ArrowTable", module = "arrowsql.ddbc_bindings", frozen)]
 pub struct ArrowTable {
     schema: SchemaRef,
     batches: Vec<RecordBatch>,
@@ -283,7 +283,7 @@ impl Drop for ExportReader {
 }
 
 /// A result being streamed as Arrow record batches (one-shot).
-#[pyclass(name = "ArrowStream", module = "mssql_python.ddbc_bindings", frozen)]
+#[pyclass(name = "ArrowStream", module = "arrowsql.ddbc_bindings", frozen)]
 pub struct ArrowStream {
     core: Arc<StreamCore>,
 }

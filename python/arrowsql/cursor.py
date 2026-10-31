@@ -19,11 +19,11 @@ import datetime
 import warnings
 from importlib import import_module
 from typing import List, Mapping, Union, Any, Optional, Tuple, Sequence, TYPE_CHECKING, Iterable
-from mssql_python.constants import ConstantsDDBC as ddbc_sql_const, SQLTypes
-from mssql_python.helpers import check_error, connstr_to_pycore_params
-from mssql_python.logging import logger
-from mssql_python import ddbc_bindings
-from mssql_python.exceptions import (
+from arrowsql.constants import ConstantsDDBC as ddbc_sql_const, SQLTypes
+from arrowsql.helpers import check_error, connstr_to_pycore_params
+from arrowsql.logging import logger
+from arrowsql import ddbc_bindings
+from arrowsql.exceptions import (
     InterfaceError,
     NotSupportedError,
     ProgrammingError,
@@ -31,11 +31,11 @@ from mssql_python.exceptions import (
     DatabaseError,
     raise_exception,
 )
-from mssql_python.row import Row
-from mssql_python import perf_timer as _perf_timer
-from mssql_python.perf_timer import perf_phase, perf_start, perf_stop
-from mssql_python import get_settings
-from mssql_python.parameter_helper import (
+from arrowsql.row import Row
+from arrowsql import perf_timer as _perf_timer
+from arrowsql.perf_timer import perf_phase, perf_start, perf_stop
+from arrowsql import get_settings
+from arrowsql.parameter_helper import (
     detect_and_convert_parameters,
     parse_pyformat_params,
     convert_pyformat_to_qmark,
@@ -43,7 +43,7 @@ from mssql_python.parameter_helper import (
 
 if TYPE_CHECKING:
     import pyarrow  # type: ignore
-    from mssql_python.connection import Connection
+    from arrowsql.connection import Connection
 else:
     pyarrow = None
 
@@ -1347,7 +1347,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             SQL Server. Use setinputsizes to explicitly specify types for ALL
             parameters::
 
-                from mssql_python.constants import ConstantsDDBC
+                from arrowsql.constants import ConstantsDDBC
                 cursor.setinputsizes([
                     (ConstantsDDBC.SQL_INTEGER.value, 0, 0),
                     (ConstantsDDBC.SQL_VARBINARY.value, 100, 0)
@@ -3617,7 +3617,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             raise RuntimeError("Connection string not available for bulk copy")
 
         # Use the proper connection string parser that handles braced values
-        from mssql_python.connection_string_parser import _ConnectionStringParser
+        from arrowsql.connection_string_parser import _ConnectionStringParser
 
         parser = _ConnectionStringParser(validate_keywords=False)
         params = parser._parse(self.connection.connection_str)
@@ -3663,7 +3663,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         # Token acquisition — only thing cursor must handle (needs azure-identity SDK)
         if self.connection._token_provider is not None:
             # User-supplied credential — use it directly for a fresh token.
-            from mssql_python.auth import acquire_raw_token_from_credential
+            from arrowsql.auth import acquire_raw_token_from_credential
 
             try:
                 raw_token, _ = acquire_raw_token_from_credential(self.connection._token_provider)
@@ -3688,8 +3688,8 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             )
         elif self.connection._auth_type:
             # Fresh token acquisition for mssql-py-core connection
-            from mssql_python.auth import AADAuth, ServicePrincipalAuth
-            from mssql_python.constants import _AuthInternal
+            from arrowsql.auth import AADAuth, ServicePrincipalAuth
+            from arrowsql.constants import _AuthInternal
 
             if self.connection._auth_type == _AuthInternal.SERVICE_PRINCIPAL:
                 # Callback-based path: tenant_id is only known from the STS URL
@@ -3796,7 +3796,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             raise ImportError(
                 "Bulk copy requires the mssql_py_core library for this source, which is "
                 "not installed. Install the optional extra: "
-                "pip install 'mssql-python-rs-port[async-preview]'"
+                "pip install 'arrowsql[async-preview]'"
             ) from exc
 
     @classmethod

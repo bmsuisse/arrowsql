@@ -8,22 +8,25 @@ Version numbers in this project are deliberately three different things:
 
 | what | value | meaning |
 |---|---|---|
-| distribution `mssql-python-rs-port` | 0.1.0 | this project's release number (`pyproject.toml`) |
-| `mssql_python.__version__` | 1.16.0 | the upstream `mssql-python` release the Python layer is vendored from; kept so code that checks the upstream version keeps working |
-| `mssql_python.ddbc_bindings.__version__` | 1.0.0 | version of the Rust binding contract (`docs/CONTRACT.md`) |
+| distribution `arrowsql` | 0.1.0 | this project's release number (`pyproject.toml`) |
+| `arrowsql.__version__` | 1.16.0 | the upstream `mssql-python` release the Python layer is vendored from; kept so code that checks the upstream version keeps working |
+| `arrowsql.ddbc_bindings.__version__` | 1.0.0 | version of the Rust binding contract (`docs/CONTRACT.md`) |
 
 ## [Unreleased]
 
 ### Added
 
-- PyO3 extension `mssql_python.ddbc_bindings` over Microsoft's `mssql-tds`
+- The project is called **arrowsql** (distribution and import name `arrowsql`,
+  repository github.com/bmsuisse/arrowsql). A `mssql_python` alias package keeps
+  `import mssql_python` working: its modules are the `arrowsql` modules.
+- PyO3 extension `arrowsql.ddbc_bindings` over Microsoft's `mssql-tds`
   (vendored, with local patches, in `vendor/mssql-tds`): no ODBC driver, same
-  `mssql_python` Python API as upstream 1.16.0.
+  Python API as upstream mssql-python 1.16.0.
 - Native Arrow: `cursor.arrow()`, `arrow_batch()`, `arrow_reader()`,
   `fetchall_arrow()`, `fetchmany_arrow()`, `arrow_stream()`, `read_arrow()`
   (partitioned parallel reads).
 - Native bulk copy (rows and Arrow), `write_arrow()` parallel loads.
-- Native asyncio (`mssql_python.aio`) with a built-in pool (Unix only).
+- Native asyncio (`arrowsql.aio`) with a built-in pool (Unix only).
 - `sqlstate` and `native_error` on every exception
   ([upstream #581](https://github.com/microsoft/mssql-python/issues/581));
   bulk copy on the cursor's own connection, so `#temp` tables work

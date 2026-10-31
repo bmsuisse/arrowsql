@@ -283,7 +283,7 @@ Not in the list: I found no issue on read correctness for timestamps or decimals
 - **Typed parameters** instead of all-VARCHAR.
 - **Stream, not batch calls.** PyCapsule C stream (`ArrowStream`) with the GIL released during decode.
 - **Bulk-copy write path.** Our target is bulk copy, which arrow-odbc does not implement. We have no like-for-like arrow-odbc write number yet (see 8.1). The only direct comparison is `bcp`, which is ahead of us (see TL;DR).
-- **Parallel read.** `python/mssql_python/arrow_parallel.py` partitions reads. arrow-odbc has no parallel read.
+- **Parallel read.** `python/arrowsql/arrow_parallel.py` partitions reads. arrow-odbc has no parallel read.
 
 Our weak points relative to them:
 

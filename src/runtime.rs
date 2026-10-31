@@ -130,10 +130,18 @@ impl SyncClient {
             let mut work = pin!(op(client));
             let slice = slice.get_or_insert_with(|| Box::pin(tokio::time::sleep(SIGNAL_SLICE)));
             let mut watching = true;
+            let mut armed = false;
             std::future::poll_fn(|cx| {
                 if let Poll::Ready(out) = work.as_mut().poll(cx) {
                     return Poll::Ready(out);
                 }
+                // The busy poll wakes this future many times per round trip;
+                // the timer needs a poll only to register this call's waker
+                // and once its deadline has passed.
+                if armed && Instant::now() < slice.deadline() {
+                    return Poll::Pending;
+                }
+                armed = true;
                 while watching && slice.as_mut().poll(cx).is_ready() {
                     watching = !interrupted();
                     slice.as_mut().reset(Instant::now() + SIGNAL_SLICE);

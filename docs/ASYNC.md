@@ -97,7 +97,7 @@ hub.drain() <-- socket readable  <---------   hub queue; write 1 byte only if
 
 Source: `src/aio/` (`hub.rs` completion hub and conversion, `session.rs`
 async session state machine, `connection.rs` / `pool.rs` pyclasses),
-`python/mssql_python/aio.py` (thin Python API).
+`python/arrowsql/aio.py` (thin Python API).
 
 ### Coupling with the sync core
 

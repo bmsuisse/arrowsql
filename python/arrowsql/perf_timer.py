@@ -4,13 +4,13 @@
 Lightweight phase-level profiling for the Python layer.
 
 Usage in cursor.py:
-    from mssql_python.perf_timer import perf_phase
+    from arrowsql.perf_timer import perf_phase
 
     with perf_phase("py::execute::param_type_detection"):
         ...
 
 Control from profiler script:
-    from mssql_python.perf_timer import enable, disable, get_stats, reset
+    from arrowsql.perf_timer import enable, disable, get_stats, reset
 
 Stats dict matches the C++ profiling format so both layers can be
 printed with the same reporter. Entries use a "py::" prefix to

@@ -270,13 +270,13 @@ static DATABASE_ERROR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 pub fn to_exception(py: Python<'_>, records: &[DiagRecord]) -> PyErr {
     let record = records.first().cloned().unwrap_or_else(|| DiagRecord::driver("HY000", "Unknown error"));
     let build = || -> PyResult<PyErr> {
-        let mapper = SQLSTATE_TO_EXCEPTION.import(py, "mssql_python.exceptions", "sqlstate_to_exception")?;
+        let mapper = SQLSTATE_TO_EXCEPTION.import(py, "arrowsql.exceptions", "sqlstate_to_exception")?;
         let native = (record.native_error != 0).then_some(record.native_error);
         let exc = mapper.call1((record.sqlstate.as_str(), record.message.as_str(), native))?;
         if !exc.is_none() {
             return Ok(PyErr::from_value(exc));
         }
-        let class = DATABASE_ERROR.import(py, "mssql_python.exceptions", "DatabaseError")?;
+        let class = DATABASE_ERROR.import(py, "arrowsql.exceptions", "DatabaseError")?;
         let kwargs = pyo3::types::PyDict::new(py);
         kwargs.set_item(intern!(py, "sqlstate"), record.sqlstate.as_str())?;
         kwargs.set_item(intern!(py, "native_error"), native)?;

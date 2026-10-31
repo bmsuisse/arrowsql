@@ -16,10 +16,10 @@ Parser behavior:
 """
 
 from typing import Dict, Tuple, Optional
-from mssql_python.exceptions import ConnectionStringParseError
-from mssql_python.constants import _ALLOWED_CONNECTION_STRING_PARAMS, _RESERVED_PARAMETERS
-from mssql_python.helpers import sanitize_user_input
-from mssql_python.logging import logger
+from arrowsql.exceptions import ConnectionStringParseError
+from arrowsql.constants import _ALLOWED_CONNECTION_STRING_PARAMS, _RESERVED_PARAMETERS
+from arrowsql.helpers import sanitize_user_input
+from arrowsql.logging import logger
 
 _SENSITIVE_KEYS = frozenset({"pwd", "password"})
 
@@ -395,7 +395,7 @@ def sanitize_connection_string(conn_str: str) -> str:
     Returns:
         str: The sanitized connection string.
     """
-    from mssql_python.connection_string_builder import _ConnectionStringBuilder
+    from arrowsql.connection_string_builder import _ConnectionStringBuilder
 
     logger.debug(
         "sanitize_connection_string: Sanitizing connection string (length=%d)", len(conn_str)

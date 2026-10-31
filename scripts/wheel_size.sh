@@ -55,8 +55,8 @@ site="$("$venv/bin/python" -I -c 'import site; print(site.getsitepackages()[0])'
 pkg_kib="$(du -sk "$site/mssql_python" | cut -f1)"
 so_kib="$(du -k "$site"/mssql_python/*.so | cut -f1)"
 libs_kib=0
-if [ -d "$site/mssql_python_rs_port.libs" ]; then
-  libs_kib="$(du -sk "$site/mssql_python_rs_port.libs" | cut -f1)"
+if [ -d "$site/arrowsql.libs" ]; then
+  libs_kib="$(du -sk "$site/arrowsql.libs" | cut -f1)"
 fi
 echo "installed KiB:   $((pkg_kib + libs_kib)) (mssql_python/ ${pkg_kib} + bundled .libs ${libs_kib})"
 echo "installed .so:   ${so_kib} KiB"

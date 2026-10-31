@@ -1,4 +1,4 @@
-//! Native async on the Rust core (`mssql_python.aio`). See docs/ASYNC.md.
+//! Native async on the Rust core (`arrowsql.aio`). See docs/ASYNC.md.
 //!
 //! * `hub`: per-event-loop completion hub (futures, wake-ups, Python conversion).
 //! * `session`: the async TDS session state machine (no Python).

@@ -12,8 +12,8 @@ import math
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
-from mssql_python import ddbc_bindings
-from mssql_python.db_connection import connect
+from arrowsql import ddbc_bindings
+from arrowsql.db_connection import connect
 
 
 def _quote_identifier(name: str) -> str:
