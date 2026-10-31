@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use mssql_tds::datatypes::sqltypes::SqlType;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyList, PyTuple};
 
 use super::cursor::{FETCHALL_BATCH_ROWS, FETCHONE_READAHEAD, Fetched, FetchPlan, StmtState, fetch, fetch_buffered, next_result};
 use super::exec::{Command, execute_batch, execute_command};
@@ -210,15 +210,7 @@ pub fn describe_col(
     let stmt = stmt_of(StatementHandle)?;
     let columns = with_state(py, &stmt, |state| state.columns());
     let Some(columns) = columns else { return Ok(SQL_SUCCESS) };
-    for meta in columns.iter() {
-        let d = PyDict::new(py);
-        d.set_item("ColumnName", &meta.column_name)?;
-        d.set_item("DataType", describe::odbc_sql_type(meta))?;
-        d.set_item("ColumnSize", describe::column_size(meta))?;
-        d.set_item("DecimalDigits", describe::decimal_digits(meta))?;
-        d.set_item("Nullable", describe::nullable(meta))?;
-        ColumnMetadata.append(d)?;
-    }
+    describe::append_columns(py, &columns, ColumnMetadata)?;
     Ok(SQL_SUCCESS)
 }
 

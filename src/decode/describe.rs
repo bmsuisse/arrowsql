@@ -4,8 +4,26 @@
 
 use mssql_tds::datatypes::sqldatatypes::TdsDataType;
 use mssql_tds::query::metadata::ColumnMetadata;
+use pyo3::intern;
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
 
 use crate::consts::*;
+
+/// Append one ODBC metadata dict per column to `out`. Runs on every execute,
+/// so the keys are interned rather than allocated per column.
+pub fn append_columns(py: Python<'_>, columns: &[ColumnMetadata], out: &Bound<'_, PyList>) -> PyResult<()> {
+    for meta in columns {
+        let d = PyDict::new(py);
+        d.set_item(intern!(py, "ColumnName"), &meta.column_name)?;
+        d.set_item(intern!(py, "DataType"), odbc_sql_type(meta))?;
+        d.set_item(intern!(py, "ColumnSize"), column_size(meta))?;
+        d.set_item(intern!(py, "DecimalDigits"), decimal_digits(meta))?;
+        d.set_item(intern!(py, "Nullable"), nullable(meta))?;
+        out.append(d)?;
+    }
+    Ok(())
+}
 
 pub fn odbc_sql_type(meta: &ColumnMetadata) -> i16 {
     match meta.data_type {
