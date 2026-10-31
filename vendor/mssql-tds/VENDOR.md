@@ -56,8 +56,10 @@ Local patches (search for `VENDOR PATCH`):
    that opt in (`busy_poll::ThreadGuard`, entered by the port's synchronous
    `block_on`), the first read after a request spins on `poll(fd, POLLIN, 0)`
    for at most twice the connection's recent first-byte wait (100-400 us,
-   only while that wait is under 300 us) before sleeping in epoll, so a short
-   query skips the sleep and the scheduler's wake-up latency. At most two
+   only while that wait is under 300 us), yielding to the current-thread
+   runtime between checks (its zero-timeout `epoll_wait` makes the readiness
+   visible, so the read that follows finds a ready socket and never parks), so a
+   short query skips the sleep and the scheduler's wake-up latency. At most two
    threads spin at a time, none on machines with fewer than 4 CPUs;
    `MSSQL_RS_BUSY_POLL=0` turns it off. Costs CPU: a short round trip keeps
    one core busy while it waits.

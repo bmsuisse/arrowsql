@@ -3,8 +3,8 @@
 //! A synchronous caller that sends a short query and waits for the answer
 //! sleeps in `epoll_wait` for the ~100 us the server needs, and pays the
 //! scheduler's wake-up latency (idle core, C-state exit, a second syscall) on
-//! top. Polling the socket with a zero timeout for that short window skips the
-//! sleep. The spin is deliberately narrow:
+//! top. Checking the socket with a zero timeout for that short window, through
+//! the runtime's own zero-timeout driver turns, skips the sleep. The spin is deliberately narrow:
 //!
 //! * only on threads that opted in ([`ThreadGuard`], used by the synchronous
 //!   client; async tasks on the shared runtime never spin),
@@ -64,29 +64,57 @@ pub(crate) fn should_spin(expected_ns: u64) -> bool {
     expected_ns < ENTRY_WAIT_NS && ENABLED.with(Cell::get)
 }
 
-/// Polls `fd` until it is readable, for at most twice `expected_ns`.
-#[cfg(unix)]
-pub(crate) fn spin(fd: i32, expected_ns: u64) {
-    let max = max_spinners();
-    if max == 0 {
-        return;
+/// Holds one of the spinner slots until dropped.
+struct Slot;
+
+impl Slot {
+    fn acquire() -> Option<Self> {
+        let max = max_spinners();
+        if max == 0 || SPINNERS.fetch_add(1, Ordering::AcqRel) >= max {
+            if max != 0 {
+                SPINNERS.fetch_sub(1, Ordering::AcqRel);
+            }
+            return None;
+        }
+        Some(Self)
     }
-    if SPINNERS.fetch_add(1, Ordering::AcqRel) >= max {
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
         SPINNERS.fetch_sub(1, Ordering::AcqRel);
-        return;
     }
+}
+
+#[cfg(unix)]
+fn readable(fd: i32) -> bool {
+    let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    // SAFETY: `pfd` is a valid pollfd for the duration of the call.
+    unsafe { libc::poll(&mut pfd, 1, 0) != 0 }
+}
+
+/// Waits until `fd` has data, for at most twice `expected_ns`, without sleeping.
+///
+/// Each round yields to the runtime, whose zero-timeout driver turn
+/// (`epoll_wait(0)`) is what makes the socket's readiness visible to the read
+/// that follows; the last yield after the data showed up lets that read start
+/// from a ready socket instead of parking once more.
+#[cfg(unix)]
+pub(crate) async fn spin(fd: i32, expected_ns: u64) {
+    let Some(_slot) = Slot::acquire() else { return };
     let limit = Duration::from_nanos(expected_ns.saturating_mul(2).clamp(MIN_SPIN_NS, MAX_SPIN_NS));
     let started = Instant::now();
-    let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
     loop {
-        // SAFETY: `pfd` is a valid pollfd for the duration of the call.
-        if unsafe { libc::poll(&mut pfd, 1, 0) } != 0 || started.elapsed() > limit {
-            break;
+        if readable(fd) {
+            tokio::task::yield_now().await;
+            return;
         }
-        std::hint::spin_loop();
+        if started.elapsed() > limit {
+            return;
+        }
+        tokio::task::yield_now().await;
     }
-    SPINNERS.fetch_sub(1, Ordering::AcqRel);
 }
 
 #[cfg(not(unix))]
-pub(crate) fn spin(_fd: i32, _expected_ns: u64) {}
+pub(crate) async fn spin(_fd: i32, _expected_ns: u64) {}

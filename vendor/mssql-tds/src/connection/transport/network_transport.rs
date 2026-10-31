@@ -1950,7 +1950,7 @@ impl NetworkTransport {
                     && self.stream.is_some()
                     && busy_poll::should_spin(self.first_byte_wait_ns)
                 {
-                    busy_poll::spin(self.raw_fd, self.first_byte_wait_ns);
+                    busy_poll::spin(self.raw_fd, self.first_byte_wait_ns).await;
                 }
                 Some(started)
             } else {
