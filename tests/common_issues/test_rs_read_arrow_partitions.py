@@ -138,3 +138,122 @@ def test_worker_error_propagates(conn_str, cursor, table_name):
             partition_on="id",
             partitions=4,
         )
+
+
+def test_bigint_key_range_wider_than_int32(conn_str, cursor, table_name):
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (id bigint NOT NULL, v int NOT NULL)")
+    # keys from -6e9 to +6e9: wider than 2**32, slice edges do not fit an int32
+    cursor.execute(
+        f"INSERT INTO dbo.{table_name} SELECT TOP ({ROWS}) "
+        "(ROW_NUMBER() OVER (ORDER BY (SELECT 1)) - 60000) * 100000, 1 "
+        "FROM sys.all_columns a CROSS JOIN sys.all_columns b"
+    )
+    cursor.connection.commit()
+    query = f"SELECT id, v FROM dbo.{table_name}"
+    with connect(conn_str, autocommit=True) as conn:
+        work = arrow_parallel._plan(conn, query, "[id]", "id", 4)
+    edges = [value for _, params in work for value in params]
+    assert len(work) > 2
+    assert max(edges) > 2**31 and min(edges) < -(2**31)
+    assert _check(conn_str, table_name, 4).num_rows == ROWS
+
+
+class _DescribeFails:
+    """Connection proxy whose cursors fail the sys.dm_exec_describe_first_result_set call."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        real = self._conn.cursor()
+
+        class _Cursor:
+            def execute(self, sql, *args):
+                if "dm_exec_describe_first_result_set" in sql:
+                    raise RuntimeError("describe not permitted")
+                return real.execute(sql, *args)
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        return _Cursor()
+
+
+def test_describe_failure_counts_as_nullable(conn_str, cursor, table_name):
+    _fill(cursor, table_name, nullable=False, extra_nulls=0)
+    query = f"SELECT id, v FROM dbo.{table_name}"
+    with connect(conn_str, autocommit=True) as conn:
+        work = arrow_parallel._plan(_DescribeFails(conn), query, "[id]", "id", 4)
+    assert work[0][0].endswith("[id] IS NULL")
+
+
+def test_extra_worker_connect_failure_aborts(conn_str, cursor, table_name, monkeypatch):
+    _fill(cursor, table_name, nullable=False, rows=400_000)
+    real_connect = arrow_parallel.connect
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 3:  # probe is call 1; this is the second extra worker
+            raise ConnectionError("no more connections")
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(arrow_parallel, "connect", flaky)
+    with pytest.raises(ConnectionError, match="no more connections"):
+        mssql_python.read_arrow(
+            conn_str, f"SELECT id, v FROM dbo.{table_name}", partition_on="id", partitions=4
+        )
+
+
+@pytest.mark.parametrize("distinct", [1, 5])
+def test_many_rows_few_key_values_still_parallel(conn_str, cursor, table_name, monkeypatch, distinct):
+    rows = 600_000
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (k int NOT NULL, v int NOT NULL)")
+    cursor.execute(
+        f"INSERT INTO dbo.{table_name} SELECT TOP ({rows}) "
+        f"ROW_NUMBER() OVER (ORDER BY (SELECT 1)) % {distinct}, 1 "
+        "FROM sys.all_columns a CROSS JOIN sys.all_columns b CROSS JOIN sys.all_columns c"
+    )
+    cursor.connection.commit()
+    real_connect = arrow_parallel.connect
+    connects = []
+
+    def counting(*args, **kwargs):
+        connects.append(1)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(arrow_parallel, "connect", counting)
+    result = pa.table(
+        mssql_python.read_arrow(
+            conn_str,
+            f"SELECT k, v, @@SPID AS spid FROM dbo.{table_name}",
+            partition_on="k",
+            partitions=4,
+        )
+    )
+    assert result.num_rows == rows
+    assert sorted(set(result.column("k").to_pylist())) == list(range(distinct))
+    if distinct == 1:
+        # one key value cannot be cut: one stream
+        assert len(connects) == 1
+    else:
+        assert len(connects) > 1
+        assert len(set(result.column("spid").to_pylist())) > 1
+
+
+def test_slice_count_capped_at_key_span(conn_str, cursor, table_name):
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (k int NOT NULL, v int NOT NULL)")
+    cursor.execute(
+        f"INSERT INTO dbo.{table_name} SELECT TOP (100000) ROW_NUMBER() OVER (ORDER BY (SELECT 1)) % 3, 1 "
+        "FROM sys.all_columns a CROSS JOIN sys.all_columns b"
+    )
+    cursor.connection.commit()
+    with connect(conn_str, autocommit=True) as conn:
+        work = arrow_parallel._plan(conn, f"SELECT k, v FROM dbo.{table_name}", "[k]", "k", 8)
+    assert len(work) == 3  # keys 0..2: one slice per key value, no empty slices
+
+
+def test_small_table_single_stream(conn_str, cursor, table_name):
+    _fill(cursor, table_name, nullable=False, rows=5_000)
+    with connect(conn_str, autocommit=True) as conn:
+        assert arrow_parallel._plan(conn, f"SELECT id, v FROM dbo.{table_name}", "[id]", "id", 8) == []
