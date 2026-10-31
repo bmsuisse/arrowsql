@@ -5,6 +5,7 @@
 //! the wire, applies deferred session SQL and registers the statement as the
 //! wire's owner when its results are still pending afterwards.
 
+use crate::runtime::Lockable;
 use std::sync::Arc;
 
 use mssql_tds::connection::tds_client::{
@@ -76,9 +77,9 @@ pub(crate) fn with_exclusive_wire(
     let timeout = stmt.query_timeout();
     let conn = &stmt.conn;
 
-    let mut slot = conn.slot.lock();
+    let mut slot = conn.slot.lock_checked();
     wire::free_for_statement(&mut slot, stmt, &cancel, timeout);
-    let mut state = stmt.state.lock();
+    let mut state = stmt.state.lock_checked();
     state.diag.clear();
     state.reset_results();
     state.execution = Some(cancel.clone());

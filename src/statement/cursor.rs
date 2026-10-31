@@ -5,6 +5,7 @@
 //! released; the caller converts them to Python objects after dropping the
 //! locks.
 
+use crate::runtime::Lockable;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -331,8 +332,8 @@ pub enum FetchPlan {
 
 /// Deliver up to `n` rows of the statement's current result.
 pub fn fetch(stmt: &StmtShared, n: usize, plan: FetchPlan) -> Fetched {
-    let mut slot = stmt.conn.slot.lock();
-    let mut state = stmt.state.lock();
+    let mut slot = stmt.conn.slot.lock_checked();
+    let mut state = stmt.state.lock_checked();
     deliver(&mut state, slot.client.as_mut(), n, plan)
 }
 
@@ -403,8 +404,8 @@ fn read_for_fetch(client: &mut SyncClient, state: &mut StmtState, n: usize, plan
 
 /// Move to the statement's next result (`SQLMoreResults`).
 pub fn next_result(stmt: &StmtShared) -> SqlReturn {
-    let mut slot = stmt.conn.slot.lock();
-    let mut state = stmt.state.lock();
+    let mut slot = stmt.conn.slot.lock_checked();
+    let mut state = stmt.state.lock_checked();
     state.diag.clear();
     state.generation += 1;
     // An error met while reading ahead belongs to the result being left.
@@ -544,13 +545,13 @@ pub struct SinkFetch {
 
 /// Current result columns and result generation; `None` without a result.
 pub fn result_columns(stmt: &StmtShared) -> Option<(Arc<Vec<ColumnMetadata>>, u64, Option<Arc<StmtCancel>>)> {
-    let state = stmt.state.lock();
+    let state = stmt.state.lock_checked();
     state.columns.clone().map(|c| (c, state.generation, state.execution.clone()))
 }
 
 /// Error records of the statement (after a failed `fetch_into`).
 pub fn diag_records(stmt: &StmtShared) -> Vec<DiagRecord> {
-    stmt.state.lock().diag.clone()
+    stmt.state.lock_checked().diag.clone()
 }
 
 /// Deliver up to `n` rows of the current result into `sink`: buffered rows
@@ -562,8 +563,8 @@ pub fn fetch_into<S: BatchSink>(
     n: usize,
     generation: Option<u64>,
 ) -> SinkFetch {
-    let mut slot = stmt.conn.slot.lock();
-    let mut state = stmt.state.lock();
+    let mut slot = stmt.conn.slot.lock_checked();
+    let mut state = stmt.state.lock_checked();
     if state.freed || generation.is_some_and(|g| g != state.generation) {
         return SinkFetch { ret: SQL_NO_DATA, info: vec![], stale: true };
     }

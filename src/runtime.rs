@@ -23,7 +23,7 @@
 //! only exist in the parent.
 
 use std::future::Future;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ops::{Deref, DerefMut};
 use std::pin::{Pin, pin};
 use std::task::Poll;
@@ -164,8 +164,11 @@ thread_local! {
     /// GIL released (see [`detach_interruptible`]); null otherwise, and always
     /// null off the main thread (only it can receive signals).
     static WATCHED: Cell<*const StmtShared> = const { Cell::new(std::ptr::null()) };
-    /// A SIGINT arrived while the statement was waited on.
-    static SIGINT_SEEN: Cell<bool> = const { Cell::new(false) };
+    /// A Python signal handler is running inside a watched wait, with the
+    /// statement's locks held (see [`interrupted`]).
+    static IN_HANDLER: Cell<bool> = const { Cell::new(false) };
+    /// The exception a signal handler raised while the statement was waited on.
+    static RAISED: RefCell<Option<PyErr>> = const { RefCell::new(None) };
     /// 0 = not asked yet, 1 = main thread, 2 = another thread.
     static MAIN_THREAD: Cell<u8> = const { Cell::new(0) };
 }
@@ -184,37 +187,62 @@ fn on_main_thread(py: Python<'_>) -> bool {
     MAIN_THREAD.with(Cell::get) == 1
 }
 
-/// Whether a SIGINT is pending. When one is, cancel the watched statement on
-/// the server and remember it for [`detach_interruptible`]. Returns whether
+/// Look at Python's pending signals (only the main thread can). When a signal
+/// handler raises (Ctrl-C), cancel the watched statement on the server and
+/// keep the exception for [`detach_interruptible`] to re-raise. Returns whether
 /// to stop looking.
 ///
-/// This runs inside the wait, with the statement's connection and state locks
-/// held, so it must not run Python code: a signal handler that touched the
-/// same cursor or connection would deadlock on those locks. It only consumes
-/// the pending flag (`PyOS_InterruptOccurred` runs no handler); the handler
-/// runs once the locks are gone, from [`detach_interruptible`].
+/// The handler runs inside the wait, so the statement's connection and state
+/// locks are held by this very thread. A handler may call `cursor.cancel()`
+/// (lock free), but any driver call that needs those locks would wait for
+/// itself: [`Lockable::lock_checked`] turns that into an immediate error.
+/// Attaching to the GIL here cannot deadlock against another thread: nobody
+/// blocks on a statement lock while holding the GIL.
 fn interrupted() -> bool {
     let stmt = WATCHED.with(Cell::get);
-    // Attaching waits for the GIL while locks are held. That cannot deadlock
-    // because no driver code blocks on those locks with the GIL held.
-    Python::attach(|_py| {
-        // SAFETY: the thread is attached.
-        if unsafe { pyo3::ffi::PyOS_InterruptOccurred() } == 0 {
-            return false;
+    Python::attach(|py| {
+        IN_HANDLER.with(|h| h.set(true));
+        let result = py.check_signals();
+        IN_HANDLER.with(|h| h.set(false));
+        match result {
+            Ok(()) => false,
+            Err(err) => {
+                RAISED.with(|r| *r.borrow_mut() = Some(err));
+                // SAFETY: `detach_interruptible` keeps the statement alive
+                // for as long as the pointer is published.
+                unsafe { &*stmt }.cancel_execution();
+                true
+            }
         }
-        SIGINT_SEEN.with(|s| s.set(true));
-        // SAFETY: `detach_interruptible` keeps the statement alive for as
-        // long as the pointer is published.
-        unsafe { &*stmt }.cancel_execution();
-        true
     })
 }
 
+/// A lock that fails fast when taken by a signal handler that interrupted
+/// this thread's own wait, instead of deadlocking on itself.
+pub trait Lockable<T> {
+    fn lock_checked(&self) -> parking_lot::MutexGuard<'_, T>;
+}
+
+impl<T> Lockable<T> for Mutex<T> {
+    #[inline]
+    fn lock_checked(&self) -> parking_lot::MutexGuard<'_, T> {
+        if IN_HANDLER.with(Cell::get) {
+            return self.try_lock().unwrap_or_else(|| {
+                panic!(
+                    "arrowsql: this call needs the connection a statement on this thread is \
+                     waiting on, and was made from a signal handler that interrupted that wait. \
+                     Only cursor.cancel() is allowed there; do other work after the handler returns."
+                )
+            });
+        }
+        self.lock()
+    }
+}
+
 /// [`Python::detach`] for running a statement: while `f` waits for the server
-/// on the main thread, a pending SIGINT is looked for every [`SIGNAL_SLICE`].
-/// Ctrl-C cancels the statement on the server; once `f` has returned and its
-/// locks are released, the signal handlers run (the default one raises
-/// `KeyboardInterrupt`), leaving the connection usable.
+/// on the main thread, Python signals are looked at every [`SIGNAL_SLICE`].
+/// Ctrl-C cancels the statement on the server and raises its
+/// `KeyboardInterrupt` once `f` has returned, leaving the connection usable.
 pub fn detach_interruptible<R: Send>(
     py: Python<'_>,
     stmt: &StmtShared,
@@ -231,13 +259,10 @@ pub fn detach_interruptible<R: Send>(
         let _restore = Restore(WATCHED.with(|w| w.replace(published as *const StmtShared)));
         f()
     });
-    if SIGINT_SEEN.with(|s| s.replace(false)) {
-        // Hand the consumed SIGINT back to Python so its handler runs now.
-        // SAFETY: plain call, the GIL is held.
-        unsafe { pyo3::ffi::PyErr_SetInterrupt() };
-        py.check_signals()?;
+    match RAISED.with(|r| r.borrow_mut().take()) {
+        Some(err) => Err(err),
+        None => Ok(out),
     }
-    Ok(out)
 }
 
 impl Deref for SyncClient {

@@ -21,6 +21,9 @@ use super::connection::{AioOpening, CancelMap, ConnCore, build_command, open_ses
 use super::hub::{Hub, Outcome, QueryMode, to_exception};
 use super::session::{Command, Diag, OpCancel, Session, cancelled};
 
+/// Longest a checkout waits for an idle session to answer its validation ping.
+const VALIDATE_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct PoolInner {
     conn_str: String,
     autocommit: bool,
@@ -109,17 +112,29 @@ impl PoolInner {
                 session.close().await;
                 continue;
             }
-            if self.validate_after.is_some_and(|after| since.elapsed() >= after) && !session.ping().await {
-                session.close().await;
-                continue;
-            }
-            // The borrower may have changed these on the native side.
+            // The borrower may have changed these on the native side. Restored
+            // before the ping: in manual-commit mode it would open a
+            // transaction that checkin rolls back with the next borrower's work.
             session.autocommit = self.autocommit;
             session.timeout = self.timeout.load(Ordering::Relaxed);
+            if self.validate_after.is_some_and(|after| since.elapsed() >= after)
+                && !session.ping(cancel, VALIDATE_TIMEOUT).await
+            {
+                // Unanswered: a polite close could block on the same socket.
+                drop(session);
+                if cancel.is_cancelled() {
+                    return Err(cancelled());
+                }
+                continue;
+            }
             return Ok((session, permit));
         }
         let timeout = self.timeout.load(Ordering::Relaxed);
-        let session = open_session(&self.conn_str, self.autocommit, timeout).await?;
+        // Dropping the login abandons it and frees the permit with it.
+        let session = tokio::select! {
+            session = open_session(&self.conn_str, self.autocommit, timeout) => session?,
+            () = cancel.cancelled() => return Err(cancelled()),
+        };
         Ok((session, permit))
     }
 

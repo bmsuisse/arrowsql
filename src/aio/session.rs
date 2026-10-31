@@ -178,9 +178,12 @@ impl Session {
 
     /// Whether the server still answers on this session (pool checkout
     /// validation); the reset flag, if pending, rides on this request.
-    pub async fn ping(&mut self) -> bool {
-        let cancel = OpCancel::new();
-        self.query(Command::Batch("SELECT 1".into()), 1, &cancel).await.is_ok() && self.is_open()
+    ///
+    /// Bounded by `limit` and by `cancel`: a half-open socket never answers,
+    /// and the caller holds a pool permit while it waits.
+    pub async fn ping(&mut self, cancel: &OpCancel, limit: std::time::Duration) -> bool {
+        let probe = self.query(Command::Batch("SELECT 1".into()), 1, cancel);
+        matches!(tokio::time::timeout(limit, probe).await, Ok(Ok(_))) && self.is_open()
     }
 
     pub fn is_open(&self) -> bool {

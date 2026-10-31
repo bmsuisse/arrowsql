@@ -19,6 +19,7 @@ mod exec;
 mod odbc;
 mod wire;
 
+use crate::runtime::Lockable;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
@@ -61,6 +62,11 @@ pub struct StmtShared {
     /// An execution is between publishing its cancel handle and finishing;
     /// `_cancel` must reach it even while it still waits for the wire.
     executing: AtomicBool,
+    /// A `fetchall` is running. Between its batches the statement lock is
+    /// free while the rows are converted to Python objects; a `_cancel` in
+    /// that gap must still arm the cancellation, or the next batch would
+    /// never notice it.
+    fetching_all: AtomicBool,
 }
 
 impl StmtShared {
@@ -72,6 +78,7 @@ impl StmtShared {
             query_timeout: AtomicU32::new(0),
             cancel: Mutex::new(None),
             executing: AtomicBool::new(false),
+            fetching_all: AtomicBool::new(false),
         })
     }
 
@@ -89,6 +96,7 @@ impl StmtShared {
         // (which holds the state lock). Arming the handle of an idle
         // statement would instead fail a later, unrelated read on its batch.
         if !self.executing.load(Ordering::Acquire)
+            && !self.fetching_all.load(Ordering::Acquire)
             && let Some(idle) = self.state.try_lock()
         {
             drop(idle);
@@ -97,6 +105,22 @@ impl StmtShared {
         if let Some(cancel) = self.cancel.lock().as_ref() {
             cancel.cancel();
         }
+    }
+}
+
+/// Marks `stmt` as running a `fetchall` until dropped.
+pub(crate) struct FetchingAll<'a>(&'a StmtShared);
+
+impl<'a> FetchingAll<'a> {
+    pub(crate) fn enter(stmt: &'a StmtShared) -> Self {
+        stmt.fetching_all.store(true, Ordering::Release);
+        Self(stmt)
+    }
+}
+
+impl Drop for FetchingAll<'_> {
+    fn drop(&mut self) {
+        self.0.fetching_all.store(false, Ordering::Release);
     }
 }
 
@@ -122,9 +146,9 @@ fn close_cursor(py: Python<'_>, stmt: &Arc<StmtShared>, free: bool) -> bool {
     // otherwise the slot lock below would wait for the statement to finish.
     stmt.cancel_execution();
     py.detach(|| {
-        let mut slot = stmt.conn.slot.lock();
+        let mut slot = stmt.conn.slot.lock_checked();
         wire::discard_if_owner(&mut slot, stmt.id);
-        let mut state = stmt.state.lock();
+        let mut state = stmt.state.lock_checked();
         let was_freed = state.is_freed();
         state.reset_results();
         if free {
@@ -157,7 +181,7 @@ impl SqlHandle {
 pub fn not_implemented(handle: &Bound<'_, PyAny>, function: &str) -> i16 {
     if let Ok(stmt) = stmt_of(handle) {
         without_gil(|| {
-            let mut state = stmt.state.lock();
+            let mut state = stmt.state.lock_checked();
             state.diag.clear();
             state.diag.push(DiagRecord::not_implemented(function));
         });
@@ -188,7 +212,7 @@ pub fn map_columns(
     f: impl FnOnce(&Arc<Vec<ColumnMetadata>>) -> Arc<Vec<ColumnMetadata>> + Send,
 ) {
     without_gil(|| {
-        let mut state = stmt.state.lock();
+        let mut state = stmt.state.lock_checked();
         state.map_columns(f);
     });
 }
