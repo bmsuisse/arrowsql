@@ -33,6 +33,11 @@ encoding_rs = "0.8"
 # BulkLoadRow is an async_trait; implemented in src/bulk/.
 async-trait = "0.1"
 
+# Windows: in-tree Schannel TLS (msodbcsql's stack) instead of rustls, which fails the
+# handshake with SQL Server's self-generated certificate on Windows.
+[target.'cfg(windows)'.dependencies]
+mssql-tds = { git = "https://github.com/microsoft/mssql-rs", rev = "6b6b48ecbbbdad297039d1641e2be4775eed998b", default-features = false, features = ["gssapi", "rustls-tls", "tls-schannel-direct-on-windows"] }
+
 [profile.dev]
 opt-level = 1
 
