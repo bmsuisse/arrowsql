@@ -85,6 +85,41 @@ impl RowBuffer {
         &self.arena[span.start..span.start + span.len]
     }
 
+    /// Pad the text of fixed-width char/nchar columns (`(column, chars)`) with
+    /// spaces up to their declared width, as msodbcsql does. SQL Server sends
+    /// a shorter value when ANSI_PADDING was OFF at CREATE TABLE time.
+    pub fn pad_fixed_text(&mut self, ncols: usize, widths: &[(usize, usize)]) {
+        if ncols == 0 {
+            return;
+        }
+        for row in 0..self.rows {
+            for &(col, width) in widths {
+                let index = row * ncols + col;
+                let (span, wide) = match self.cells.get(index) {
+                    Some(Cell::Utf8(span)) => (*span, false),
+                    Some(Cell::Utf16(span)) => (*span, true),
+                    _ => continue,
+                };
+                let bytes = &self.arena[span.start..span.start + span.len];
+                let chars = match (wide, bytes.is_ascii()) {
+                    (true, _) => bytes.len() / 2,
+                    (false, true) => bytes.len(),
+                    (false, false) => String::from_utf8_lossy(bytes).chars().count(),
+                };
+                if chars >= width {
+                    continue;
+                }
+                let start = self.arena.len();
+                self.arena.extend_from_within(span.start..span.start + span.len);
+                for _ in chars..width {
+                    self.arena.extend_from_slice(if wide { b" \0" } else { b" " });
+                }
+                let padded = Span { start, len: self.arena.len() - start };
+                self.cells[index] = if wide { Cell::Utf16(padded) } else { Cell::Utf8(padded) };
+            }
+        }
+    }
+
     /// Text value of a cell, for small internal queries (not the hot path).
     pub fn text(&self, cell: &Cell) -> Option<String> {
         match cell {

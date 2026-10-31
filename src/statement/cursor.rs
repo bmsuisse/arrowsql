@@ -340,8 +340,16 @@ fn deliver(state: &mut StmtState, client: Option<&mut SyncClient>, n: usize, pla
     {
         read_for_fetch(client, state, n, plan);
     }
-    let rows = state.take_pending(n);
+    let mut rows = state.take_pending(n);
     let ncols = state.ncols();
+    if rows.rows > 0
+        && let Some(columns) = state.columns.as_ref()
+    {
+        let widths = describe::fixed_text_widths(columns);
+        if !widths.is_empty() {
+            rows.pad_fixed_text(ncols, &widths);
+        }
+    }
     let has_lob = state.columns.as_ref().is_some_and(|cols| cols.iter().any(describe::is_lob));
     let info = state.diag.clone();
     let ret = if rows.rows > 0 {

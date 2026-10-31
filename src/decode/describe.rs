@@ -116,6 +116,19 @@ pub fn odbc_sql_type(meta: &ColumnMetadata) -> i16 {
     }
 }
 
+/// `(column, width in characters)` of the fixed-width char/nchar columns.
+pub fn fixed_text_widths(columns: &[ColumnMetadata]) -> Vec<(usize, usize)> {
+    columns
+        .iter()
+        .enumerate()
+        .filter_map(|(i, meta)| match meta.data_type {
+            TdsDataType::BigChar | TdsDataType::Char if !meta.is_plp() => Some((i, meta.type_info.length)),
+            TdsDataType::NChar if !meta.is_plp() => Some((i, meta.type_info.length / 2)),
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn column_size(meta: &ColumnMetadata) -> u64 {
     if meta.data_type == TdsDataType::Udt && meta.type_info.length != usize::from(u16::MAX) {
         return meta.type_info.length as u64;

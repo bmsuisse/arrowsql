@@ -10,7 +10,7 @@ Upstream ODBC driver is ground truth.
 """
 
 import pytest
-from mssql_python import Error, ProgrammingError, connect
+from mssql_python import DataError, Error, ProgrammingError, connect
 
 
 def test_parameter_type_error_does_not_affect_next_execute(cursor):
@@ -55,14 +55,11 @@ def test_repeated_execution_with_fresh_values_stays_correct(cursor):
         assert cursor.fetchone()[0] == 2 * i
 
 
-@pytest.mark.upstream_bug(
-    reason="Python ints 0..255 bind as tinyint, so SELECT ? + ? with [200, 200] overflows "
-    "instead of returning 400 (int semantics, as pyodbc binds SQL_INTEGER)"
-)
-@pytest.mark.xfail(strict=True, reason="upstream bug")
-def test_small_int_parameters_do_not_bind_as_tinyint_in_arithmetic(cursor):
-    cursor.execute("SELECT ? + ?", [200, 200])
-    assert cursor.fetchone()[0] == 400
+def test_small_int_parameters_bind_as_tinyint_in_arithmetic(cursor):
+    # Ints 0..255 bind as tinyint by design (upstream test_023 test_map_sql_type_detection pins
+    # SQL_TINYINT), so ? + ? overflows tinyint exactly as it does on upstream.
+    with pytest.raises(DataError, match="tinyint"):
+        cursor.execute("SELECT ? + ?", [200, 200])
 
 
 @pytest.mark.parametrize("sql_type", ["varchar(max)", "nvarchar(max)"])
