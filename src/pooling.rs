@@ -206,7 +206,8 @@ pub fn evict_with_token(lease: &Lease, token: &str) {
 /// Return a session to its pool. Gives it back when it cannot be pooled
 /// (pooling disabled, new generation, dead session, open batch); the caller
 /// then closes it, and `lease` frees the slot on drop.
-pub fn checkin(mut lease: Lease, entry: IdleClient) -> Option<SyncClient> {
+pub fn checkin(mut lease: Lease, mut entry: IdleClient) -> Option<SyncClient> {
+    verify_alive(&mut entry.client);
     let mut manager = MANAGER.lock();
     let poolable = manager.accepting
         && manager.generation == lease.generation
@@ -219,6 +220,23 @@ pub fn checkin(mut lease: Lease, entry: IdleClient) -> Option<SyncClient> {
     pool.idle.push(Idle { entry, since: Instant::now() });
     lease.occupies_slot = false;
     None
+}
+
+/// Send one trivial request before a session is kept idle. A session the
+/// server ended while it sat in the caller's hands (KILL, network loss) looks
+/// healthy until something is sent on it; without this it would be pooled and
+/// fail the next borrower. Failure marks the session dead, so `checkin`
+/// refuses it. The request is a SET, which never opens an implicit
+/// transaction (a SELECT would, under IMPLICIT_TRANSACTIONS). Runs outside
+/// the pool lock.
+fn verify_alive(client: &mut SyncClient) {
+    if client.is_connection_dead() || client.has_open_batch() {
+        return;
+    }
+    let _ = client.block_on(|c| async move {
+        c.execute("SET NOEXEC OFF".to_string(), ()).await?;
+        c.close_query().await
+    });
 }
 
 /// Close sessions politely (outside any lock).

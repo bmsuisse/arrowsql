@@ -82,15 +82,22 @@ pub struct ConnOptions {
     pub login_timeout: Option<u32>,
 }
 
+/// Error text for a connection string without a server keyword.
+pub const MISSING_SERVER: &str = "Neither DSN nor SERVER keyword supplied";
+
 pub fn build_context(
     conn_str: &str,
     access_token: Option<String>,
 ) -> Result<(ClientContext, ConnOptions), String> {
     let map = parse(conn_str);
     let server = first(&map, &["server", "address", "addr", "data source"])
-        .unwrap_or("localhost")
+        .ok_or_else(|| MISSING_SERVER.to_string())?
         .to_string();
     let mut ctx = ClientContext::with_data_source(&server);
+    // A session the server ended (KILL, network loss) is reported to the
+    // caller, not reconnected behind its back: upstream does the same.
+    // Session recovery is only requested when ConnectRetryCount says so.
+    ctx.connect_retry_count = 0;
     let mut opts = ConnOptions::default();
 
     if let Some(uid) = first(&map, &["uid", "user id", "user"]) {

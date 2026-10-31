@@ -81,7 +81,21 @@ pub fn sqlstate_for_server_error(number: u32, class: i32) -> &'static str {
     }
 }
 
+/// Server error raised to a request that was running when its session was
+/// KILLed. The server then closes the connection, so the driver reports it
+/// as a driver error, the way msodbcsql does.
+const SESSION_KILLED_ERROR: u32 = 596;
+const SESSION_KILLED_MESSAGE: &str =
+    "Unspecified error occurred on SQL Server. Connection may have been terminated by the server.";
+
 fn server_record(number: u32, class: i32, message: &str) -> DiagRecord {
+    if number == SESSION_KILLED_ERROR {
+        return DiagRecord::new(
+            "HY000",
+            i32::try_from(number).unwrap_or(i32::MAX),
+            format!("{DRIVER_PREFIX}{SESSION_KILLED_MESSAGE}"),
+        );
+    }
     DiagRecord::new(
         sqlstate_for_server_error(number, class),
         i32::try_from(number).unwrap_or(i32::MAX),
@@ -126,6 +140,28 @@ pub fn records_for_error(err: &TdsError, default_state: &str) -> Vec<DiagRecord>
             vec![DiagRecord::driver(state, format!("Communication link failure: {err}"))]
         }
         _ => vec![DiagRecord::driver(default_state, err.to_string())],
+    }
+}
+
+/// Records for a failure while logging in. Server errors raised by the login
+/// carry SQLSTATE 28000 whatever their number (msodbcsql reports a database
+/// that cannot be opened as "Invalid authorization specification"); other
+/// failures keep the connect default `08001`.
+pub fn login_records_for_error(err: &TdsError) -> Vec<DiagRecord> {
+    match err {
+        TdsError::SqlServerError { diagnostics } if !diagnostics.errors.is_empty() => {
+            let mut out: Vec<DiagRecord> = diagnostics
+                .errors
+                .iter()
+                .map(|e| {
+                    let message = format!("{DRIVER_PREFIX}{SERVER_SUBSOURCE}{}", e.message);
+                    DiagRecord::new("28000", i32::try_from(e.number).unwrap_or(i32::MAX), message)
+                })
+                .collect();
+            out.extend(info_records(&diagnostics.info_messages));
+            out
+        }
+        _ => records_for_error(err, "08001"),
     }
 }
 
