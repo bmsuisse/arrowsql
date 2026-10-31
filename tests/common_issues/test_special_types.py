@@ -19,6 +19,7 @@ import decimal
 import uuid
 
 import pytest
+from mssql_python import connect
 from mssql_python.exceptions import IntegrityError, ProgrammingError
 
 # Serialized geography::Point(47.6, -122.3, 4326), as SQL Server stores it.
@@ -38,13 +39,6 @@ UPSTREAM_SQL_VARIANT_TEXT_REASON = (
     "text follows a row whose value has a different length: N'nvarchar' comes back "
     "as 'ar' and N'hello world' as 'helloworld' (single-row reads are correct)"
 )
-
-UPSTREAM_TEMP_TABLE_LOST_REASON = (
-    "upstream drops the session's temp tables when a parameterized statement fails "
-    "(same SPID, the table is gone: 'Invalid object name'). Raw T-SQL keeps the "
-    "temp table after the same failure."
-)
-
 
 def _one(cursor):
     row = cursor.fetchone()
@@ -110,9 +104,10 @@ def test_xml_malformed_param_raises_programming_error(cursor):
         cursor.fetchall()
 
 
-@pytest.mark.upstream_bug(reason=UPSTREAM_TEMP_TABLE_LOST_REASON)
-@pytest.mark.xfail(strict=True, reason="upstream bug")
-def test_failed_xml_param_statement_keeps_session_temp_table(cursor):
+def test_failed_xml_param_statement_keeps_session_temp_table(conn_str):
+    # The server rolls back an open transaction on an XML parse error, raw T-SQL included, and the
+    # #temp table creation with it; with autocommit there is no transaction to lose it.
+    cursor = connect(conn_str, autocommit=True).cursor()
     cursor.execute("CREATE TABLE #xml_keep (id INT, doc XML NULL)")
     cursor.execute("INSERT INTO #xml_keep (id, doc) VALUES (1, NULL)")
     with pytest.raises(ProgrammingError):

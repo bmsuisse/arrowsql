@@ -258,3 +258,10 @@ and now uses about 1.3 us (measured with the native calls stubbed).
   the per-loop hub is given a `weakref.ref` of its loop so closed loops are
   collected; `fetchall()` keeps fetching until the result is done, so an error
   after some rows is raised instead of returning a truncated list.
+
+## executemany with mixed value kinds (last 13, RUST-PORT)
+
+- `cursor.py` `executemany`: a column that mixes kinds of values (numbers, text,
+  binary, other types), e.g. `[(1, 42), (2, "x")]` into a SQL_VARIANT column,
+  runs row by row like the DAE fallback instead of binding one type inferred
+  from the first row; `rowcount` is the total. New helper `_column_mixes_kinds`.

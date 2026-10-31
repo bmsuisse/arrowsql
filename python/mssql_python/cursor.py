@@ -2510,6 +2510,24 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
 
         return columnwise, row_count
 
+    @staticmethod
+    def _column_mixes_kinds(column):
+        """RUST-PORT: True when a column holds values of different kinds (numbers,
+        text, binary, other types), which one declared parameter type cannot carry."""
+        kinds = set()
+        for v in map(type, column):
+            if v is type(None):
+                continue
+            if v in (int, float, bool, decimal.Decimal):
+                kinds.add(int)
+            elif v in (bytes, bytearray):
+                kinds.add(bytes)
+            else:
+                kinds.add(v)
+            if len(kinds) > 1:
+                return True
+        return False
+
     def _compute_column_type(self, column):
         """
         Determine representative value and integer min/max for a column.
@@ -2710,6 +2728,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         param_info = ddbc_bindings.ParamInfo
         parameters_type = []
         any_dae = False
+        any_mixed = False
 
         # Check if we have explicit input sizes set
         if self._inputsizes:
@@ -2807,6 +2826,10 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                         if hasattr(seq_of_parameters, "__getitem__")
                         else []
                     )
+                    # RUST-PORT: one declaration serves every row, so a column that mixes
+                    # value kinds (int, str, bytes, ...), e.g. into SQL_VARIANT, runs row by row.
+                    if self._column_mixes_kinds(column):
+                        any_mixed = True
                     sample_value, min_val, max_val, max_decimal_len = self._compute_column_type(
                         column
                     )
@@ -2877,18 +2900,22 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 if paraminfo.isDAE:
                     any_dae = True
 
-        if any_dae:
+        if any_dae or any_mixed:
             logger.debug(
                 "DAE parameters detected. Falling back to row-by-row execution with streaming.",
             )
             input_sizes = self._inputsizes
+            total = 0
             try:
                 for row in seq_of_parameters:
                     # execute() consumes overrides; every streamed row needs them.
                     self._inputsizes = input_sizes
                     self.execute(operation, row)
+                    total += max(self.rowcount, 0)
             finally:
                 self._reset_inputsizes()
+            if any_mixed and not any_dae:
+                self.rowcount = total  # RUST-PORT: executemany reports the total
             return
 
         # Process parameters into column-wise format with possible type conversions

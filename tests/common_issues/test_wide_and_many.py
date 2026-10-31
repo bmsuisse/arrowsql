@@ -140,9 +140,11 @@ def test_2097_qmark_parameters_roundtrip_exactly(cursor):
     assert tuple(row) == tuple(values)
 
 
-def test_2098_qmark_parameters_raise_programming_error_and_connection_survives(conn):
+def test_2101_qmark_parameters_raise_and_connection_survives(conn):
     cursor = conn.cursor()
-    values = list(range(MAX_OK_PARAMS + 1))
+    # 2098 is msodbcsql's own cap (it adds handle parameters); the port talks TDS directly and
+    # the server accepts it, so only 2101 must fail. Either way the connection stays usable.
+    values = list(range(2101))
     with pytest.raises(ProgrammingError):
         cursor.execute("SELECT " + ", ".join("?" for _ in values), values)
     cursor.execute("SELECT ?", [5])
