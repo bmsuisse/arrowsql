@@ -12,6 +12,7 @@ use mssql_tds::connection::tds_client::{
 };
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::error::Error as TdsError;
+use mssql_tds::message::transaction_management::TransactionIsolationLevel;
 use mssql_tds::message::parameters::rpc_parameters::{RpcParameter, StatusFlags};
 
 use super::StmtShared;
@@ -52,6 +53,9 @@ pub struct Exclusive<'a> {
     pub state: &'a mut StmtState,
     pub cancel: &'a Arc<StmtCancel>,
     pub timeout: u32,
+    /// The open transaction was begun by the driver for this statement and
+    /// holds nothing of the caller's yet.
+    pub fresh_txn: bool,
 }
 
 fn options(timeout: u32, cancel: &StmtCancel) -> ExecuteOptions<'_> {
@@ -89,12 +93,30 @@ pub(crate) fn with_exclusive_wire(
         state.diag.push(DiagRecord::driver("08003", "Connection is closed"));
         return SQL_ERROR;
     };
+    if !conn.autocommit()
+        && conn.take_failed()
+        && !client.has_active_transaction()
+        && xact_abort_is_on(client, timeout, &cancel)
+    {
+        conn.mark_txn_aborted();
+    }
     if let Err(records) = prepare_session(conn, client, timeout, &cancel) {
         state.diag.extend(records);
         return SQL_ERROR;
     }
 
-    let ret = body(&mut Exclusive { conn, client, state: &mut state, cancel: &cancel, timeout });
+    let ret = body(&mut Exclusive {
+        conn,
+        client,
+        state: &mut state,
+        cancel: &cancel,
+        timeout,
+        fresh_txn: conn.take_txn_untouched(),
+    });
+    // The server may still be sending the rollback; the next statement checks.
+    if ret == SQL_ERROR && !conn.autocommit() {
+        conn.mark_failed();
+    }
     if state.on_wire {
         *owner = Some((stmt.id, Arc::downgrade(stmt)));
     }
@@ -125,6 +147,29 @@ fn recover(client: &mut SyncClient) {
     let _ = client.take_info_messages();
 }
 
+/// Whether the session has XACT_ABORT on. Asked only after a failed statement
+/// took the transaction with it: with XACT_ABORT the caller asked for
+/// abort-everything, so writes must not silently run outside their
+/// transaction. Other failures (e.g. a conversion error) roll back too, but
+/// msodbcsql silently starts a new transaction.
+fn xact_abort_is_on(client: &mut SyncClient, timeout: u32, cancel: &StmtCancel) -> bool {
+    // @@OPTIONS bit 16384 is XACT_ABORT; a server error answers "yes".
+    const PROBE: &str = "IF (@@OPTIONS & 16384) = 16384 RAISERROR('xact_abort', 16, 1)";
+    let opts = options(timeout, cancel);
+    let result = client.block_on(|c| async move {
+        c.execute(PROBE.to_string(), opts).await?;
+        c.close_query().await
+    });
+    let _ = client.take_info_messages();
+    match result {
+        Err(TdsError::SqlServerError { .. }) => {
+            recover(client);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Apply deferred session settings and, in manual-commit mode, make sure a
 /// transaction is open before the next statement.
 fn prepare_session(
@@ -133,23 +178,26 @@ fn prepare_session(
     timeout: u32,
     cancel: &StmtCancel,
 ) -> Result<(), Vec<DiagRecord>> {
-    // Manual-commit mode uses SET IMPLICIT_TRANSACTIONS so the server opens
-    // a transaction with the next statement: no BEGIN round trip per
-    // transaction. The SET is sent once per mode change.
     let pending = conn.pending_session();
-    let mut statements: Vec<String> = pending.sql();
-    let want_implicit = !conn.autocommit();
-    if conn.implicit_transactions() != want_implicit {
-        let set = if want_implicit { "SET IMPLICIT_TRANSACTIONS ON" } else { "SET IMPLICIT_TRANSACTIONS OFF" };
-        statements.insert(0, set.to_string());
-    }
-    if statements.is_empty() {
+    let statements: Vec<String> = pending.sql();
+    // Manual-commit mode opens the transaction with a TDS transaction-manager
+    // request before the statement, like msodbcsql, so @@TRANCOUNT is already
+    // 1 inside the first statement (SET IMPLICIT_TRANSACTIONS would not
+    // open one for a bare SELECT) and a user COMMIT leaves a fresh one behind.
+    let begin = !conn.autocommit() && !client.has_active_transaction();
+    if statements.is_empty() && !begin {
         return Ok(());
     }
-    let opts = options(timeout, cancel);
+    let (exec_opts, begin_opts) = (options(timeout, cancel), options(timeout, cancel));
     let result = client.block_on(|c| async move {
-        c.execute(statements.join("; "), opts).await?;
-        c.close_query().await
+        if !statements.is_empty() {
+            c.execute(statements.join("; "), exec_opts).await?;
+            c.close_query().await?;
+        }
+        if begin {
+            c.begin_transaction_with_options(TransactionIsolationLevel::NoChange, None, begin_opts).await?;
+        }
+        Ok(())
     });
     let _ = client.take_info_messages();
     if let Err(err) = result {
@@ -158,7 +206,7 @@ fn prepare_session(
     }
     // Cleared only now: a failed attempt must be retried by the next statement.
     conn.clear_applied_session(&pending);
-    conn.set_implicit_transactions(want_implicit);
+    conn.set_txn_untouched(begin);
     Ok(())
 }
 
@@ -266,12 +314,38 @@ fn describe_row(rows: &RowBuffer, row: &[Cell]) -> Option<DescribedParam> {
     })
 }
 
+/// Statements that change data or schema, judged by their first keyword.
+fn is_write(sql: &str) -> bool {
+    let word = sql.trim_start().split(|c: char| !c.is_ascii_alphabetic()).next().unwrap_or("");
+    ["INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE", "CREATE", "ALTER", "DROP", "EXEC", "EXECUTE", "BULK"]
+        .iter()
+        .any(|w| word.eq_ignore_ascii_case(w))
+}
+
+/// Rejects a write issued after the server aborted the caller's transaction
+/// (XACT_ABORT), like go-mssqldb: it would run outside that transaction and a
+/// later commit() would persist it. The caller's rollback() clears the state.
+fn reject_write_after_abort(ex: &mut Exclusive<'_>, sql: &str) -> bool {
+    if !is_write(sql) || !ex.conn.take_txn_aborted() {
+        return false;
+    }
+    ex.state.diag.push(DiagRecord::driver(
+        "25000",
+        "The server rolled back the transaction after an error; the statement was not run. Call rollback() to continue.",
+    ));
+    true
+}
+
 /// Run one command and leave its first result current.
 pub fn execute_command(stmt: &Arc<StmtShared>, command: Command) -> SqlReturn {
     with_exclusive_wire(stmt, |ex| run_command(ex, command))
 }
 
 fn run_command(ex: &mut Exclusive<'_>, command: Command) -> SqlReturn {
+    let (Command::Batch(sql) | Command::Parameterized(sql, _) | Command::Typed(sql, _)) = &command;
+    if reject_write_after_abort(ex, sql) {
+        return SQL_ERROR;
+    }
     let batch_mode = BatchErrorMode::Continue;
     let result = match command {
         Command::Batch(sql) => {

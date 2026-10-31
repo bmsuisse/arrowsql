@@ -62,6 +62,12 @@ attributes; pre-#581 pickles (4 reduce args) still load.
 `python/mssql_python` plus upstream's compiled C++ binding. `scripts/test_overlay.sh
 <db-id> <pytest args>` runs pytest on it against a private database.
 
+## Lock timeout class (`exceptions.py`, RUST-PORT)
+
+Error 1222 raises `LockTimeoutError(OperationalError, ProgrammingError)`: PEP 249
+says operational, upstream says `ProgrammingError` (SQLSTATE 42000, unchanged).
+Both `except` clauses keep working.
+
 ## Native Arrow API (docs/ARROW_PLAN.md)
 
 - `cursor.py`: new methods `fetchall_arrow(batch_size)`, `fetchmany_arrow(size,

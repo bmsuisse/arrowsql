@@ -47,8 +47,13 @@ impl PendingSession {
 pub struct ConnShared {
     pub slot: Mutex<Slot>,
     autocommit: AtomicBool,
-    /// Server-side IMPLICIT_TRANSACTIONS state last sent on this session.
-    implicit_txn: AtomicBool,
+    /// The last statement failed; if it also took the transaction with it the
+    /// next statement may have to be rejected (see `exec::rejects_after_abort`).
+    /// The open transaction was begun by the driver and ran nothing yet.
+    txn_untouched: AtomicBool,
+    last_failed: AtomicBool,
+    /// XACT_ABORT rolled the caller's transaction back and no statement told them yet.
+    txn_aborted: AtomicBool,
     connection_timeout: AtomicU32,
     pending_session: Mutex<PendingSession>,
     /// sp_describe_undeclared_parameters results per SQL text.
@@ -60,7 +65,9 @@ impl ConnShared {
         Arc::new(Self {
             slot: Mutex::new(Slot { client: Some(client), owner: None }),
             autocommit: AtomicBool::new(attrs.autocommit),
-            implicit_txn: AtomicBool::new(false),
+            txn_untouched: AtomicBool::new(false),
+            last_failed: AtomicBool::new(false),
+            txn_aborted: AtomicBool::new(false),
             connection_timeout: AtomicU32::new(attrs.connection_timeout),
             pending_session: Mutex::new(attrs.pending.clone()),
             param_types: Mutex::new(HashMap::new()),
@@ -71,12 +78,30 @@ impl ConnShared {
         self.autocommit.load(Ordering::Acquire)
     }
 
-    pub fn implicit_transactions(&self) -> bool {
-        self.implicit_txn.load(Ordering::Acquire)
+    pub fn mark_failed(&self) {
+        self.last_failed.store(true, Ordering::Release);
     }
 
-    pub fn set_implicit_transactions(&self, on: bool) {
-        self.implicit_txn.store(on, Ordering::Release);
+    pub fn set_txn_untouched(&self, untouched: bool) {
+        self.txn_untouched.store(untouched, Ordering::Release);
+    }
+
+    /// Whether the open transaction is still the driver's empty one; the
+    /// caller is about to use it.
+    pub fn take_txn_untouched(&self) -> bool {
+        self.txn_untouched.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn mark_txn_aborted(&self) {
+        self.txn_aborted.store(true, Ordering::Release);
+    }
+
+    pub fn take_txn_aborted(&self) -> bool {
+        self.txn_aborted.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn take_failed(&self) -> bool {
+        self.last_failed.swap(false, Ordering::AcqRel)
     }
 
     pub fn cached_param_types(&self, sql: &str) -> Option<Vec<DescribedParam>> {
@@ -296,6 +321,22 @@ impl Connection {
         })
     }
 
+    /// Commit or roll back. The next transaction begins with the next
+    /// statement, not here: system-versioned tables stamp rows with the
+    /// transaction's start time (upstream starts it at commit and gets that wrong).
+    fn end_transaction(&self, py: Python<'_>, commit: bool) -> PyResult<()> {
+        self.shared.take_failed();
+        self.shared.take_txn_aborted();
+        self.client_op(py, move |client| {
+            if !client.has_active_transaction() {
+                return Ok(());
+            }
+            client.block_on(|c| async move {
+                if commit { c.commit_transaction(None, None).await } else { c.rollback_transaction(None, None).await }
+            })
+        })
+    }
+
     fn run_session_sql(&self, py: Python<'_>, sql: String) -> PyResult<()> {
         self.client_op(py, move |client| {
             client.block_on(|c| async move {
@@ -479,29 +520,17 @@ impl Connection {
     }
 
     fn commit(&self, py: Python<'_>) -> PyResult<()> {
-        self.client_op(py, |client| {
-            if client.has_active_transaction() {
-                client.block_on(|c| c.commit_transaction(None, None))
-            } else {
-                Ok(())
-            }
-        })
+        self.end_transaction(py, true)
     }
 
     fn rollback(&self, py: Python<'_>) -> PyResult<()> {
-        self.client_op(py, |client| {
-            if client.has_active_transaction() {
-                client.block_on(|c| c.rollback_transaction(None, None))
-            } else {
-                Ok(())
-            }
-        })
+        self.end_transaction(py, false)
     }
 
     fn set_autocommit(&self, py: Python<'_>, enable: bool) -> PyResult<()> {
         if enable && !self.shared.autocommit() {
             // ODBC: switching to autocommit commits the open transaction.
-            self.commit(py)?;
+            self.end_transaction(py, true)?;
         }
         self.shared.autocommit.store(enable, Ordering::Release);
         Ok(())
@@ -527,7 +556,9 @@ impl Connection {
             }
             SQL_ATTR_TXN_ISOLATION => {
                 let level = value.extract::<i64>().map_err(|_| fail("Invalid attribute value"))?;
-                let sql = isolation_sql(level).ok_or_else(|| fail("Invalid attribute value"))?;
+                // Upstream's message carries no "invalid", which would make it an InterfaceError.
+                let sql = isolation_sql(level)
+                    .ok_or_else(|| PyRuntimeError::new_err(format!("Failed to set connection attribute {attribute}")))?;
                 self.run_session_sql(py, sql.to_string())?;
                 self.shared.supersede_isolation();
                 Ok(())
