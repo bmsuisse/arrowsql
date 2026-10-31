@@ -137,6 +137,13 @@ The Rust side already reads a `None` entry as "no hint" (`params::parse_hint`).
   would otherwise deadlock on the connection's wire.
 - Timeout errors read "Bulk copy timeout: the operation timed out after N seconds".
 
+## Failed execute clears the description (`cursor.py`, RUST-PORT)
+
+- `Cursor.execute` sets `self.description = None` before running the statement.
+  PEP 249 requires the description to describe the last operation, so a failed
+  execute must not keep the previous statement's columns (upstream keeps them;
+  `tests/common_issues/test_rs_description_types.py`).
+
 ## Packaging (docs/PACKAGING.md)
 
 - `cursor.py` `_bulkcopy_import_core`: the `mssql_py_core` import failure

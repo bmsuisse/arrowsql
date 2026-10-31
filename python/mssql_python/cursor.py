@@ -1833,6 +1833,9 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         logger.debug("Executing query: %s", operation)
 
         self._check_closed()  # Check if the cursor is closed
+        # RUST-PORT: a failing execute must not leave the previous statement's
+        # description visible (PEP 249); success repopulates it below.
+        self.description = None
         if reset_cursor:
             if self.hstmt:
                 self._soft_reset_cursor()
