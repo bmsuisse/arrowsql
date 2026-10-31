@@ -123,7 +123,7 @@ class AsyncCursor:
         return self._conn
 
     def _install(self, result) -> None:
-        _, batch, done, rowcount, messages = result
+        shape, batch, done, rowcount, messages = result
         self._batch = batch
         self._rows = []
         self._pos = 0
