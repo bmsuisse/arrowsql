@@ -28,6 +28,9 @@ class ParameterStyleMismatchError(ProgrammingError, TypeError):  # type: ignore[
     pass
 
 
+_CLOSERS = {"'": "'", '"': '"', "[": "]"}
+
+
 def _skip_quoted_context(sql: str, i: int, length: int) -> int:
     """
     If position i starts a SQL quoted context, skip past it and return the new position.
@@ -74,44 +77,19 @@ def _skip_quoted_context(sql: str, i: int, length: int) -> int:
                 i += 1
         return min(i, length)  # already past final */, or at end if unterminated
 
-    # Single-quoted string literal: skip to closing '
-    # Handles escaped quotes ('') inside strings
-    if ch == "'":
+    # Quoted literal / identifier: skip to the closing delimiter; a doubled
+    # delimiter ('' "" ]]) is an escape inside it.
+    close = _CLOSERS.get(ch)
+    if close:
         i += 1
-        while i < length:
-            if sql[i] == "'":
-                if i + 1 < length and sql[i + 1] == "'":
-                    i += 2  # skip escaped quote
-                    continue
-                break
-            i += 1
-        return min(i + 1, length)  # skip closing quote
-
-    # Double-quoted identifier: skip to closing "
-    # Handles escaped quotes ("") inside identifiers
-    if ch == '"':
-        i += 1
-        while i < length:
-            if sql[i] == '"':
-                if i + 1 < length and sql[i + 1] == '"':
-                    i += 2  # skip escaped quote
-                    continue
-                break
-            i += 1
-        return min(i + 1, length)  # skip closing quote
-
-    # Bracketed identifier: skip to closing ]
-    # Handles escaped brackets (]]) inside identifiers
-    if ch == "[":
-        i += 1
-        while i < length:
-            if sql[i] == "]":
-                if i + 1 < length and sql[i + 1] == "]":
-                    i += 2  # skip escaped bracket
-                    continue
-                break
-            i += 1
-        return min(i + 1, length)  # skip closing bracket
+        while True:
+            i = sql.find(close, i)
+            if i == -1:
+                return length
+            if i + 1 < length and sql[i + 1] == close:
+                i += 2
+                continue
+            return i + 1
 
     return -1
 
@@ -336,11 +314,9 @@ def convert_pyformat_to_qmark(sql: str, param_dict: Dict[str, Any]) -> Tuple[str
 
     # Replace %(name)s with ? using simple string replacement
     # We replace each unique parameter name to avoid issues with overlapping names
-    rewritten_sql = escaped_sql
-    unique_params = set(param_names)
     logger.debug(
         "convert_pyformat_to_qmark: Replacing %d unique parameter placeholders with ?",
-        len(unique_params),
+        len(set(param_names)),
     )
 
     # RUST-PORT: rewrite by scanned position so a %(name)s inside a string
