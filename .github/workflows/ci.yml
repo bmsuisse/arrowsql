@@ -102,7 +102,13 @@ jobs:
         run: |
           python -m venv .venv
           . .venv/bin/activate
-          pip install -r requirements-dev.txt
+          pip install "maturin>=1.9,<2.0" pytest pytest-timeout pytest-asyncio psutil
+          # Optional test dependencies come from wheels only: new interpreters
+          # (3.15, 3.15t) may lack some, and the tests that need them skip.
+          grep -vE '^(#|$|maturin|pytest|psutil)' requirements-dev.txt | while read -r req; do
+            pip install --only-binary=:all: "$req" \
+              || echo "::warning::no wheel for $req on Python ${{ matrix.python }}; tests that need it are skipped"
+          done
           maturin develop
       - name: Create the test database
         run: |

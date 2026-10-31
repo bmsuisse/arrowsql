@@ -28,8 +28,9 @@ import decimal
 import struct
 import uuid
 
-import pyarrow as pa
 import pytest
+
+pa = pytest.importorskip("pyarrow")
 
 # Columns that come back as large_string (upstream text mapping for every
 # character type, regardless of declared length).

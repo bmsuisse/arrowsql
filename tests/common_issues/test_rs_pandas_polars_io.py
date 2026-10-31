@@ -38,9 +38,10 @@ import math
 import uuid
 import warnings
 
-import pandas as pd
-import polars as pl
 import pytest
+
+pd = pytest.importorskip("pandas")
+pl = pytest.importorskip("polars")
 from mssql_python.exceptions import OperationalError
 
 GUID_TEXT = "6F9619FF-8B86-D011-B42D-00C04FC964FF"
