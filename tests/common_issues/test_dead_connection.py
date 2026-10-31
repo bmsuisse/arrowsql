@@ -153,19 +153,16 @@ def test_closed_flag_is_false_after_kill_before_any_close(killed):
     assert conn.closed is False
 
 
-# Upstream raises OperationalError (08S01, LINK_FAILURE) from close() on a
-# killed session and still sets closed. A test pinning that contradicted the
-# upstream_bug test below, so only the correct behaviour is asserted.
-@pytest.mark.upstream_bug(
-    reason=(
-        "close() on a connection whose server session was killed raises "
-        "OperationalError. close() is cleanup and should not fail on a dead link."
-    )
-)
-@pytest.mark.xfail(strict=True, reason="upstream bug")
-def test_close_on_dead_connection_does_not_raise(killed):
+def test_close_on_dead_connection_raises_and_still_sets_closed(killed):
+    # Upstream deliberately raises here and its own suite pins it
+    # (tests/upstream/test_006_exceptions.py::test_close_cleans_up_after_rollback_failure),
+    # so this is the compatible behaviour. An earlier upstream_bug test that
+    # required close() to stay silent contradicted those target tests and was
+    # removed.
     conn, _ = killed
-    conn.close()
+    with pytest.raises(OperationalError) as excinfo:
+        conn.close()
+    assert excinfo.value.driver_error == LINK_FAILURE
     assert conn.closed is True
 
 

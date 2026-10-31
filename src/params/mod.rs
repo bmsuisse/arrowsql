@@ -184,7 +184,11 @@ fn data_value_error_class(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     let class = DATA_VALUE_ERROR_CLASS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
         let data_error = PyModule::import(py, "mssql_python.exceptions")?.getattr("DataError")?;
         let bases = PyTuple::new(py, [data_error, py.get_type::<PyValueError>().into_any()])?;
-        let class = py.get_type::<PyType>().call1(("DataValueError", bases, PyDict::new(py)))?;
+        // str() is the bare message, as upstream's ValueError reads: its parity
+        // tests compare it byte for byte (test_023 test_integer_overflow_detected).
+        let namespace = PyDict::new(py);
+        namespace.set_item("__str__", py.eval(c"lambda self: self.ddbc_error", None, None)?)?;
+        let class = py.get_type::<PyType>().call1(("DataValueError", bases, namespace))?;
         Ok(class.unbind())
     })?;
     Ok(class.bind(py).clone())

@@ -385,6 +385,8 @@ _SQL_TYPE_TO_PYTHON_TYPE = {
 _SQL_HANDLE_STMT = ddbc_sql_const.SQL_HANDLE_STMT.value
 _SQL_SUCCESS_WITH_INFO = ddbc_sql_const.SQL_SUCCESS_WITH_INFO.value
 _SQL_NO_DATA = ddbc_sql_const.SQL_NO_DATA.value
+# RUST-PORT: Connection's initial encoding settings (see Connection.__init__).
+_DEFAULT_ENCODING_SETTINGS = {"encoding": "utf-16le", "ctype": ddbc_sql_const.SQL_WCHAR.value}
 
 # RUST-PORT: the native bulk copy raises SQL Server errors as
 # "SQLSTATE:<state>:NATIVE:<number>:<message>" RuntimeErrors (see _raise_native_bulk_error).
@@ -2630,6 +2632,11 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         if (
             fast_executemany is not None
             and not self._inputsizes
+            # An instance-level _compute_column_type (a caller hook or test
+            # patch) must run, so only the general path below honours it.
+            and "_compute_column_type" not in vars(self)
+            # Non-default setencoding() keeps upstream's SQLExecuteMany call.
+            and self._get_encoding_settings() == _DEFAULT_ENCODING_SETTINGS
             and isinstance(seq_of_parameters, (list, tuple))
             and isinstance(self.hstmt, ddbc_bindings.SqlHandle)
         ):

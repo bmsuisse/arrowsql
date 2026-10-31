@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::runtime::SyncClient;
+use mssql_tds::connection::tds_client::StatementResult;
 use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -352,13 +353,13 @@ impl Connection {
     /// connection was already closed.
     fn take_client(&self, transaction_already_rolled_back: bool, pooled: bool) -> PyResult<Option<SyncClient>> {
         let mut slot = self.shared.slot.lock();
-        let Some(client) = slot.client.as_ref() else {
+        if slot.client.is_none() {
             self.closed.store(true, Ordering::Release);
             return Ok(None);
-        };
-        // Like SQLDisconnect: a plain disconnect refuses to drop an open
-        // transaction. The connection stays usable so the caller can end it.
-        if !pooled && !transaction_already_rolled_back && client.has_active_transaction() {
+        }
+        // Like SQLDisconnect: a plain disconnect refuses to drop a transaction
+        // that holds work. The connection stays usable so the caller can end it.
+        if !pooled && !transaction_already_rolled_back && open_transaction_has_work(&mut slot) {
             return Err(driver_error("25000", "Invalid transaction state"));
         }
         crate::statement::discard_all(&mut slot);
@@ -383,6 +384,40 @@ impl Connection {
         }
         Ok(())
     }
+}
+
+/// Whether the open manual-commit transaction has logged any work.
+///
+/// Manual-commit mode opens a transaction before the first statement, so
+/// even a bare `SELECT 1` leaves one open, yet msodbcsql disconnects cleanly
+/// after it and fails with 25000 only once something was written. The
+/// transaction's log record count tells the two apart. Only the raw binding
+/// reaches this: `Connection.close()` in Python rolls back before closing.
+/// If the check itself fails, the transaction is treated as holding work.
+fn open_transaction_has_work(slot: &mut Slot) -> bool {
+    const LOG_RECORDS_SQL: &str = "SELECT CAST(ISNULL(SUM(database_transaction_log_record_count), 0) \
+         AS nvarchar(20)) FROM sys.dm_tran_database_transactions \
+         WHERE transaction_id = CURRENT_TRANSACTION_ID()";
+    if !slot.client.as_ref().is_some_and(|c| c.has_active_transaction()) {
+        return false;
+    }
+    crate::statement::free_for_connection(slot);
+    let Some(client) = slot.client.as_mut() else {
+        return false;
+    };
+    let mut rows = crate::decode::RowBuffer::new();
+    let sink = &mut rows;
+    let outcome = client.block_on(|c| async move {
+        if c.execute(LOG_RECORDS_SQL.to_string(), ()).await? == StatementResult::Rows {
+            while c.next_row_into(sink).await? {}
+        }
+        c.close_query().await
+    });
+    let _ = client.take_info_messages();
+    if outcome.is_err() {
+        return true;
+    }
+    rows.cells.first().and_then(|cell| rows.text(cell)).is_none_or(|count| count != "0")
 }
 
 /// End the caller's work on a session that is about to be pooled.

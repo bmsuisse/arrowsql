@@ -186,11 +186,11 @@ The Rust side already reads a `None` entry as "no hint" (`params::parse_hint`).
 - The diagnostics / rowcount / description tail of `executemany` moved to
   `Cursor._finish_executemany` so both paths share it.
 
-## Close on a dead connection
+## executemany fast path guards (wave-D integration)
 
-- `connection.py` `Connection.close`: a rollback that fails with SQLSTATE
-  `08S01` (the session was killed or the link dropped) is not re-raised from
-  `close()`. The server already ended that transaction, and close() is
-  cleanup. Upstream raises `OperationalError` here
-  (tests/common_issues/test_dead_connection.py marks it upstream_bug). An
-  explicit `rollback()` after a kill still raises.
+- `cursor.py` `executemany`: the native `SQLExecuteManyRows` fast path is
+  skipped when the cursor carries an instance-level `_compute_column_type`
+  (caller hook or test patch) or when `setencoding()` changed the encoding
+  settings from the default. Both cases keep upstream's general path through
+  `SQLExecuteMany`, which upstream tests pin (test_025_profiler,
+  test_013_encoding_decoding). Binding behaviour is the same either way.
