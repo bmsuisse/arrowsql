@@ -8,6 +8,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
@@ -130,6 +131,8 @@ pub struct Session {
     owner_rows: bool,
     cursors: HashMap<u64, CursorState>,
     param_types: HashMap<String, Vec<(String, String)>>,
+    /// When the TDS login finished (pool `max_lifetime`).
+    born: Instant,
 }
 
 async fn read_rows<W: mssql_tds::datatypes::row_writer::RowWriter + Send>(
@@ -165,7 +168,19 @@ impl Session {
             owner_rows: false,
             cursors: HashMap::new(),
             param_types: HashMap::new(),
+            born: Instant::now(),
         }
+    }
+
+    pub fn age(&self) -> Duration {
+        self.born.elapsed()
+    }
+
+    /// Whether the server still answers on this session (pool checkout
+    /// validation); the reset flag, if pending, rides on this request.
+    pub async fn ping(&mut self) -> bool {
+        let cancel = OpCancel::new();
+        self.query(Command::Batch("SELECT 1".into()), 1, &cancel).await.is_ok() && self.is_open()
     }
 
     pub fn is_open(&self) -> bool {

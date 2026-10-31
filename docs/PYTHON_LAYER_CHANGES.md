@@ -265,3 +265,25 @@ and now uses about 1.3 us (measured with the native calls stubbed).
   binary, other types), e.g. `[(1, 42), (2, "x")]` into a SQL_VARIANT column,
   runs row by row like the DAE fallback instead of binding one type inferred
   from the first row; `rowcount` is the total. New helper `_column_mixes_kinds`.
+
+## Cancel, Ctrl-C and aio pool semantics (A3/A4, RUST-PORT)
+
+- `cursor.py` `Cursor.cancel()` (new, pyodbc-compatible): cancels the statement
+  being executed or fetched, from another thread; a no-op when idle or closed.
+  The cancelled call raises `OperationalError` (HY008).
+- Ctrl-C (`KeyboardInterrupt`) during `execute`, `executemany`, `fetch*`,
+  `nextset` and the catalog calls cancels the statement on the server and is
+  raised within ~100 ms, leaving the connection usable. Native only
+  (`src/runtime.rs`); no Python-layer change.
+- `aio.py` `_Acquire.__aexit__`: leaving `async with pool.acquire()` now does
+  what `AsyncConnection.__aexit__` does (commit on a clean exit, roll back on
+  an exception, with `autocommit=False`), then returns the session. Before, it
+  only closed the session, which rolled back.
+- `aio.py` `connect` / `create_pool` are cancellable (`asyncio.wait_for`
+  abandons the TDS login) and `create_pool` takes
+  `max_inactive_connection_lifetime` (300 s), `max_lifetime`,
+  `acquire_timeout` and `validate_after` (30 s); `Pool.acquire(timeout=)` and
+  `Pool.acquire_timeout` raise `asyncio.TimeoutError` on expiry. A session idle
+  for `validate_after` is pinged (`SELECT 1`) before it is handed out.
+- `aio.py`: on platforms without the native hub (Windows) `connect` and
+  `create_pool` raise `NotSupportedError` instead of `AttributeError`.

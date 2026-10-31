@@ -23,7 +23,7 @@ use crate::params::py_types::py_to_sql_type;
 use super::convert::row_batch_of;
 use super::hub::{Hub, Outcome, QueryMode, to_exception};
 use super::pool::PoolInner;
-use super::session::{Command, Diag, OpCancel, Session};
+use super::session::{Command, Diag, OpCancel, Session, cancelled};
 
 /// Rows `execute` reads ahead by default.
 pub const DEFAULT_PREFETCH: usize = 512;
@@ -402,16 +402,39 @@ pub fn connect<'py>(
     autocommit: bool,
     timeout: u32,
     tuple_rows: bool,
-) -> PyResult<Bound<'py, PyAny>> {
+) -> PyResult<(Bound<'py, PyAny>, u64, AioOpening)> {
     // Validate the connection string now so syntax errors raise at the call.
     crate::connstr::build_context(&conn_str, None)
         .map_err(|msg| to_exception(py, &[DiagRecord::driver("HY000", msg)]))?;
-    let (future, _) = spawn_op(py, hub, false, None, move |_| async move {
-        match open_session(&conn_str, autocommit, timeout).await {
+    let opening = Arc::new(Mutex::new(HashMap::new()));
+    let (future, id) = spawn_op(py, hub, false, Some(&opening), move |cancel| async move {
+        // Dropping the open future abandons the login and closes its socket.
+        let opened = tokio::select! {
+            opened = open_session(&conn_str, autocommit, timeout) => opened,
+            () = cancel.cancelled() => Err(cancelled()),
+        };
+        match opened {
             Ok(session) => Outcome::Connection(ConnCore::new(session, tuple_rows, None)),
             Err(records) => Outcome::Error(records),
         }
     })?;
-    Ok(future)
+    Ok((future, id, AioOpening { cancels: opening }))
+}
+
+/// The pending `aio_connect` / `aio_create_pool` request: cancelling it
+/// abandons the login, so `asyncio.wait_for(connect(...))` stops the TDS open.
+#[pyclass(name = "AioOpening", module = "ddbc_bindings", frozen)]
+pub struct AioOpening {
+    pub(super) cancels: Arc<CancelMap>,
+}
+
+#[pymethods]
+impl AioOpening {
+    /// Cancel request `id` (a no-op once it finished).
+    fn cancel(&self, id: u64) {
+        if let Some(cancel) = self.cancels.lock().get(&id) {
+            cancel.cancel();
+        }
+    }
 }
 

@@ -15,7 +15,8 @@ results come back to the event loop through one completion hub per loop.
 Cancelling the awaiting task (``task.cancel()``, ``asyncio.wait_for``
 timeouts) cancels the query on the server too. See docs/ASYNC.md.
 
-Unix only (the hub needs ``loop.add_reader``).
+Unix only (the hub needs ``loop.add_reader``): on other platforms the module
+imports, but ``connect`` and ``create_pool`` raise ``NotSupportedError``.
 """
 
 import asyncio
@@ -58,7 +59,17 @@ class _Shape:
         )
 
 
+def _require_native() -> None:
+    # RUST-PORT: the native hub is compiled for Unix only (src/lib.rs).
+    if not hasattr(_core, "AioHub"):
+        from mssql_python.exceptions import NotSupportedError
+
+        message = "mssql_python.aio is only available on Unix platforms (Linux, macOS)"
+        raise NotSupportedError(driver_error=message, ddbc_error=message)
+
+
 def _hub():
+    _require_native()
     loop = asyncio.get_running_loop()
     hub = _hubs.get(loop)
     if hub is None:
@@ -318,36 +329,74 @@ class AsyncConnection:
             await self.close()
 
 
+_POOL_TIMEOUT_TEXT = "Timed out waiting for a connection from the pool"
+
+
+async def _pool_wait(pool, op):
+    """`_wait` that raises asyncio.TimeoutError when the pool's acquire timeout expires."""
+    try:
+        return await _wait(pool, op)
+    except Exception as exc:
+        if _POOL_TIMEOUT_TEXT in str(exc):
+            raise asyncio.TimeoutError(_POOL_TIMEOUT_TEXT) from exc
+        raise
+
+
 class _Acquire:
-    def __init__(self, pool: "Pool"):
+    def __init__(self, pool: "Pool", timeout: Optional[float] = None):
         self._pool = pool
+        self._timeout = timeout
         self._conn: Optional[AsyncConnection] = None
 
     def __await__(self):
         return self._acquire().__await__()
 
     async def _acquire(self) -> AsyncConnection:
-        native = await _wait(self._pool._p, self._pool._p.acquire(_hub()))
+        native = await _pool_wait(
+            self._pool._p, self._pool._p.acquire(_hub(), self._timeout)
+        )
         return AsyncConnection(native)
 
     async def __aenter__(self) -> AsyncConnection:
         self._conn = await self._acquire()
         return self._conn
 
-    async def __aexit__(self, *exc) -> None:
-        if self._conn is not None:
-            await self._conn.close()
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        # Same as leaving ``async with connect(...)``: a pool created with
+        # autocommit=False commits on a clean exit and rolls back on an
+        # exception, then the session goes back to the pool.
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            await conn.__aexit__(exc_type, exc, tb)
 
 
 class Pool:
-    """A pool of sessions; the fetch/execute shortcuts use one session per call."""
+    """A pool of sessions; the fetch/execute shortcuts use one session per call.
+
+    With ``autocommit=False``, leaving ``async with pool.acquire()`` commits on
+    a clean exit and rolls back on an exception (like ``AsyncConnection``);
+    closing a connection obtained with ``await pool.acquire()`` rolls back.
+    """
 
     def __init__(self, native):
         self._p = native
 
-    def acquire(self) -> _Acquire:
-        """``async with pool.acquire() as conn`` (or ``conn = await pool.acquire()``)."""
-        return _Acquire(self)
+    def acquire(self, *, timeout: Optional[float] = None) -> _Acquire:
+        """``async with pool.acquire() as conn`` (or ``conn = await pool.acquire()``).
+
+        ``timeout`` (seconds, default: the pool's ``acquire_timeout``) bounds the
+        wait for a free session, including opening a new one; on expiry
+        ``asyncio.TimeoutError`` is raised."""
+        return _Acquire(self, timeout)
+
+    @property
+    def acquire_timeout(self) -> float:
+        """Default seconds ``acquire`` and the fetch/execute shortcuts wait (0 = unbounded)."""
+        return self._p.acquire_timeout
+
+    @acquire_timeout.setter
+    def acquire_timeout(self, value: float) -> None:
+        self._p.acquire_timeout = value
 
     async def fetch(self, operation: str, *parameters: Any) -> list:
         return await self._query(operation, parameters, 0)
@@ -364,7 +413,7 @@ class Pool:
 
     async def _query(self, operation, parameters, mode):
         params = _params(parameters) if parameters else None
-        return await _wait(self._p, self._p.query(_hub(), operation, params, mode))
+        return await _pool_wait(self._p, self._p.query(_hub(), operation, params, mode))
 
     async def close(self) -> None:
         await _wait(self._p, self._p.close(_hub()))
@@ -396,8 +445,13 @@ async def connect(
     tuple_rows: bool = False,
 ) -> AsyncConnection:
     """Open a connection. ``timeout`` is the per-query timeout in seconds
-    (0 = none); ``tuple_rows=True`` returns plain tuples instead of Row objects."""
-    native = await _core.aio_connect(_hub(), connection_str, autocommit, timeout, tuple_rows)
+    (0 = none); ``tuple_rows=True`` returns plain tuples instead of Row objects.
+
+    Cancelling the awaiting task (``asyncio.wait_for``) abandons the login."""
+    future, request, opening = _core.aio_connect(
+        _hub(), connection_str, autocommit, timeout, tuple_rows
+    )
+    native = await _wait(opening, (future, request))
     return AsyncConnection(native)
 
 
@@ -410,16 +464,45 @@ async def create_pool(
     *,
     tuple_rows: bool = False,
     reset: bool = True,
+    max_inactive_connection_lifetime: float = 300.0,
+    max_lifetime: float = 0.0,
+    acquire_timeout: float = 0.0,
+    validate_after: float = 30.0,
 ) -> Pool:
     """Open ``min_size`` sessions now; up to ``max_size`` on demand.
 
     ``reset=True`` resets each session's state (temp tables, SET options,
     open transactions are rolled back regardless) before it is reused, via the
     TDS reset flag on the next request; ``reset=False`` skips the server-side
-    reset for pools whose queries leave no session state behind."""
-    native = await _core.aio_create_pool(
-        _hub(), connection_str, min_size, max_size, autocommit, timeout, tuple_rows, reset
+    reset for pools whose queries leave no session state behind.
+
+    Lifetimes are in seconds, 0 turns a limit off (asyncpg-style):
+
+    * ``max_inactive_connection_lifetime``: idle sessions older than this are
+      closed (checked when sessions are returned or handed out).
+    * ``max_lifetime``: sessions older than this are closed when returned and
+      never handed out again.
+    * ``acquire_timeout``: default wait for a free session in ``pool.acquire()``
+      and the shortcuts; ``asyncio.TimeoutError`` on expiry.
+    * ``validate_after``: a session idle at least this long is checked with a
+      ``SELECT 1`` before it is handed out; a dead one is replaced.
+
+    Cancelling the awaiting task abandons the sessions still being opened."""
+    future, request, opening = _core.aio_create_pool(
+        _hub(),
+        connection_str,
+        min_size,
+        max_size,
+        autocommit,
+        timeout,
+        tuple_rows,
+        reset,
+        max_inactive_connection_lifetime,
+        max_lifetime,
+        acquire_timeout,
+        validate_after,
     )
+    native = await _wait(opening, (future, request))
     return Pool(native)
 
 
