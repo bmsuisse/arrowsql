@@ -165,3 +165,31 @@ def test_lone_surrogate_text_does_not_disturb_neighbours(cursor):
     except UnicodeDecodeError:
         return  # single-row fetches decode strictly
     assert single[1] == "plain"
+
+
+def test_padded_char_column_with_fetchone_and_fetchmany(cursor):
+    """ANSI_PADDING OFF stores a nullable char(n) trimmed; the driver pads it on fetch."""
+    cursor.execute("SET ANSI_PADDING OFF")
+    try:
+        cursor.execute("CREATE TABLE #p (id INT, c CHAR(12) NULL, v NVARCHAR(30), d DECIMAL(10, 2))")
+    finally:
+        cursor.execute("SET ANSI_PADDING ON")
+    n = 3000
+    rows = [(i, None if i % 50 == 0 else "x" * (i % 9), f"text {i}", Decimal(i) / 4) for i in range(n)]
+    cursor.executemany("INSERT INTO #p VALUES (?, ?, ?, ?)", rows)
+    expected = [(i, None if c is None else c.ljust(12), v, d) for i, c, v, d in rows]
+
+    cursor.execute("SELECT id, c, v, d FROM #p ORDER BY id")
+    got = [tuple(cursor.fetchone()) for _ in range(5)]
+    got.extend(tuple(r) for r in cursor.fetchmany(7))
+    got.append(tuple(cursor.fetchone()))
+    while True:
+        row = cursor.fetchone()
+        if row is None:
+            break
+        got.append(tuple(row))
+    assert got == expected
+
+    cursor.execute("SELECT id, c, v, d FROM #p ORDER BY id")
+    assert [tuple(r) for r in cursor.fetchmany(1000)] == expected[:1000]
+    assert [tuple(r) for r in cursor.fetchall()] == expected[1000:]

@@ -47,21 +47,33 @@ impl DecimalCache {
     /// A new reference to the cached Decimal for `parts`, building and
     /// caching it on a miss.
     fn get(&mut self, py: Python<'_>, parts: &DecimalParts, rows: usize) -> PyResult<*mut ffi::PyObject> {
+        if let Some(hit) = self.lookup(py, parts, rows) {
+            return Ok(hit);
+        }
+        let value = numeric::decimal_object(py, parts)?;
+        self.store(parts, &value);
+        Ok(value.into_ptr())
+    }
+
+    /// A new reference to the cached Decimal for `parts`, if present. Never
+    /// calls into Python beyond a refcount increment.
+    fn lookup(&mut self, py: Python<'_>, parts: &DecimalParts, rows: usize) -> Option<*mut ffi::PyObject> {
         if self.slots.is_empty() {
             self.init(rows);
         }
         let (magnitude, scale, positive) = (parts.magnitude(), parts.scale, parts.is_positive);
-        let index = self.index(magnitude, scale, positive);
-        if let Some(slot) = &self.slots[index]
-            && slot.magnitude == magnitude
-            && slot.scale == scale
-            && slot.positive == positive
-        {
-            return Ok(slot.value.clone_ref(py).into_ptr());
+        let slot = self.slots[self.index(magnitude, scale, positive)].as_ref()?;
+        (slot.magnitude == magnitude && slot.scale == scale && slot.positive == positive)
+            .then(|| slot.value.clone_ref(py).into_ptr())
+    }
+
+    fn store(&mut self, parts: &DecimalParts, value: &Bound<'_, PyAny>) {
+        if self.slots.is_empty() {
+            return;
         }
-        let value = numeric::decimal_object(py, parts)?;
+        let (magnitude, scale, positive) = (parts.magnitude(), parts.scale, parts.is_positive);
+        let index = self.index(magnitude, scale, positive);
         self.slots[index] = Some(DecimalSlot { magnitude, scale, positive, value: value.clone().unbind() });
-        Ok(value.into_ptr())
     }
 
     fn index(&self, magnitude: u128, scale: u8, positive: bool) -> usize {
@@ -151,7 +163,22 @@ impl<'a> Converter<'a> {
     ) -> PyResult<*mut ffi::PyObject> {
         match self.decimals.get_mut(col) {
             Some(cache) => cache.get(py, parts, self.rows),
-            None => SINGLE_ROW_DECIMALS.with(|cache| cache.borrow_mut().get(py, parts, SINGLE_ROW_SLOTS)),
+            None => {
+                // Building a Decimal runs Python code (a GC finalizer may re-enter
+                // fetchone on this thread), so the cache is never borrowed across it.
+                let hit = SINGLE_ROW_DECIMALS
+                    .with(|cache| cache.try_borrow_mut().ok().and_then(|mut c| c.lookup(py, parts, SINGLE_ROW_SLOTS)));
+                if let Some(hit) = hit {
+                    return Ok(hit);
+                }
+                let value = numeric::decimal_object(py, parts)?;
+                SINGLE_ROW_DECIMALS.with(|cache| {
+                    if let Ok(mut cache) = cache.try_borrow_mut() {
+                        cache.store(parts, &value);
+                    }
+                });
+                Ok(value.into_ptr())
+            }
         }
     }
 

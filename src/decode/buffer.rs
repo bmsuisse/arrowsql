@@ -107,6 +107,18 @@ impl RowBuffer {
         self.rows = 0;
     }
 
+    /// Like [`clear`](Self::clear) for a buffer that will sit idle: a large
+    /// allocation is freed instead of kept at its high-water mark.
+    pub fn clear_and_trim(&mut self) {
+        const KEEP_CELLS: usize = 16 * 1024;
+        const KEEP_ARENA: usize = 1 << 20;
+        if self.cells.capacity() > KEEP_CELLS || self.arena.capacity() > KEEP_ARENA {
+            *self = RowBuffer::new();
+        } else {
+            self.clear();
+        }
+    }
+
     /// Approximate heap use; fetch loops cap batches on it.
     pub fn byte_size(&self) -> usize {
         self.cells.len() * std::mem::size_of::<Cell>() + self.arena.len()
@@ -196,16 +208,19 @@ impl RowBuffer {
 
     /// Copy rows `[from, from+count)` of an `ncols`-wide buffer into a new one.
     ///
-    /// Rows are written in order, so the spans of a row range sit in one
-    /// contiguous arena stretch: it is copied once and the spans rebased,
-    /// instead of one arena push per text cell.
+    /// Rows are written in order, so the spans of a row range normally sit in
+    /// one contiguous arena stretch: it is copied once and the spans rebased,
+    /// instead of one arena push per text cell. Padded copies of fixed-width
+    /// text (`pad_fixed_text`) live at the arena tail, which stretches that
+    /// range over most of the arena; then each span is copied on its own.
     pub fn slice_rows(&self, ncols: usize, from: usize, count: usize) -> RowBuffer {
         let src = &self.cells[from * ncols..(from + count) * ncols];
-        let (mut lo, mut hi) = (usize::MAX, 0usize);
+        let (mut lo, mut hi, mut used) = (usize::MAX, 0usize, 0usize);
         for cell in src {
             if let Cell::Utf8(s) | Cell::Utf16(s) | Cell::Bytes(s) = cell {
                 lo = lo.min(s.start);
                 hi = hi.max(s.start + s.len);
+                used += s.len;
             }
         }
         let mut out = RowBuffer::new();
@@ -214,17 +229,36 @@ impl RowBuffer {
         {
             (out.cells, out.arena) = (cells, arena);
         }
-        if lo < hi {
-            out.arena.extend_from_slice(&self.arena[lo..hi]);
-        }
         out.cells.reserve(src.len());
-        let rebase = |s: &Span| Span { start: s.start - lo, len: s.len };
-        out.cells.extend(src.iter().map(|cell| match cell {
-            Cell::Utf8(s) => Cell::Utf8(rebase(s)),
-            Cell::Utf16(s) => Cell::Utf16(rebase(s)),
-            Cell::Bytes(s) => Cell::Bytes(rebase(s)),
-            other => other.clone(),
-        }));
+        if lo < hi && hi - lo > used.saturating_mul(2) + 256 {
+            out.arena.reserve(used);
+            let mut copy = |s: &Span| {
+                let start = out.arena.len();
+                out.arena.extend_from_slice(&self.arena[s.start..s.start + s.len]);
+                Span { start, len: s.len }
+            };
+            let cells: Vec<Cell> = src
+                .iter()
+                .map(|cell| match cell {
+                    Cell::Utf8(s) => Cell::Utf8(copy(s)),
+                    Cell::Utf16(s) => Cell::Utf16(copy(s)),
+                    Cell::Bytes(s) => Cell::Bytes(copy(s)),
+                    other => other.clone(),
+                })
+                .collect();
+            out.cells.extend(cells);
+        } else {
+            if lo < hi {
+                out.arena.extend_from_slice(&self.arena[lo..hi]);
+            }
+            let rebase = |s: &Span| Span { start: s.start - lo, len: s.len };
+            out.cells.extend(src.iter().map(|cell| match cell {
+                Cell::Utf8(s) => Cell::Utf8(rebase(s)),
+                Cell::Utf16(s) => Cell::Utf16(rebase(s)),
+                Cell::Bytes(s) => Cell::Bytes(rebase(s)),
+                other => other.clone(),
+            }));
+        }
         out.rows = count;
         out
     }
