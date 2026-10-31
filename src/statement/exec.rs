@@ -12,6 +12,7 @@ use mssql_tds::connection::tds_client::{
 };
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::error::Error as TdsError;
+use mssql_tds::message::transaction_management::TransactionIsolationLevel;
 use mssql_tds::message::parameters::rpc_parameters::{RpcParameter, StatusFlags};
 
 use super::StmtShared;
@@ -133,23 +134,26 @@ fn prepare_session(
     timeout: u32,
     cancel: &StmtCancel,
 ) -> Result<(), Vec<DiagRecord>> {
-    // Manual-commit mode uses SET IMPLICIT_TRANSACTIONS so the server opens
-    // a transaction with the next statement: no BEGIN round trip per
-    // transaction. The SET is sent once per mode change.
     let pending = conn.pending_session();
-    let mut statements: Vec<String> = pending.sql();
-    let want_implicit = !conn.autocommit();
-    if conn.implicit_transactions() != want_implicit {
-        let set = if want_implicit { "SET IMPLICIT_TRANSACTIONS ON" } else { "SET IMPLICIT_TRANSACTIONS OFF" };
-        statements.insert(0, set.to_string());
-    }
-    if statements.is_empty() {
+    let statements: Vec<String> = pending.sql();
+    // Manual-commit mode opens the transaction with a TDS transaction-manager
+    // request before the statement, like msodbcsql, so @@TRANCOUNT is already
+    // 1 inside the first statement (SET IMPLICIT_TRANSACTIONS would not
+    // open one for a bare SELECT) and a user COMMIT leaves a fresh one behind.
+    let begin = !conn.autocommit() && !client.has_active_transaction();
+    if statements.is_empty() && !begin {
         return Ok(());
     }
-    let opts = options(timeout, cancel);
+    let (exec_opts, begin_opts) = (options(timeout, cancel), options(timeout, cancel));
     let result = client.block_on(|c| async move {
-        c.execute(statements.join("; "), opts).await?;
-        c.close_query().await
+        if !statements.is_empty() {
+            c.execute(statements.join("; "), exec_opts).await?;
+            c.close_query().await?;
+        }
+        if begin {
+            c.begin_transaction_with_options(TransactionIsolationLevel::NoChange, None, begin_opts).await?;
+        }
+        Ok(())
     });
     let _ = client.take_info_messages();
     if let Err(err) = result {
@@ -158,7 +162,6 @@ fn prepare_session(
     }
     // Cleared only now: a failed attempt must be retried by the next statement.
     conn.clear_applied_session(&pending);
-    conn.set_implicit_transactions(want_implicit);
     Ok(())
 }
 

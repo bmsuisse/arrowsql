@@ -47,8 +47,6 @@ impl PendingSession {
 pub struct ConnShared {
     pub slot: Mutex<Slot>,
     autocommit: AtomicBool,
-    /// Server-side IMPLICIT_TRANSACTIONS state last sent on this session.
-    implicit_txn: AtomicBool,
     connection_timeout: AtomicU32,
     pending_session: Mutex<PendingSession>,
     /// sp_describe_undeclared_parameters results per SQL text.
@@ -60,7 +58,6 @@ impl ConnShared {
         Arc::new(Self {
             slot: Mutex::new(Slot { client: Some(client), owner: None }),
             autocommit: AtomicBool::new(attrs.autocommit),
-            implicit_txn: AtomicBool::new(false),
             connection_timeout: AtomicU32::new(attrs.connection_timeout),
             pending_session: Mutex::new(attrs.pending.clone()),
             param_types: Mutex::new(HashMap::new()),
@@ -69,14 +66,6 @@ impl ConnShared {
 
     pub fn autocommit(&self) -> bool {
         self.autocommit.load(Ordering::Acquire)
-    }
-
-    pub fn implicit_transactions(&self) -> bool {
-        self.implicit_txn.load(Ordering::Acquire)
-    }
-
-    pub fn set_implicit_transactions(&self, on: bool) {
-        self.implicit_txn.store(on, Ordering::Release);
     }
 
     pub fn cached_param_types(&self, sql: &str) -> Option<Vec<DescribedParam>> {

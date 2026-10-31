@@ -14,6 +14,7 @@ use arrow_schema::SchemaRef;
 use mssql_tds::connection::tds_client::{ExecuteOptions, PreparedStatement, ResultSet, StatementResult, TdsClient};
 use mssql_tds::core::CancelHandle;
 use mssql_tds::datatypes::sqltypes::SqlType;
+use mssql_tds::message::transaction_management::TransactionIsolationLevel;
 use mssql_tds::message::parameters::rpc_parameters::{RpcParameter, StatusFlags};
 use mssql_tds::query::metadata::ColumnMetadata;
 
@@ -113,8 +114,6 @@ impl CursorState {
 pub struct Session {
     client: Option<TdsClient>,
     pub autocommit: bool,
-    /// IMPLICIT_TRANSACTIONS state last sent on this session.
-    implicit_txn: bool,
     pub timeout: u32,
     /// Cursor whose batch is live on the wire.
     owner: Option<u64>,
@@ -152,7 +151,6 @@ impl Session {
         Self {
             client: Some(client),
             autocommit,
-            implicit_txn: false,
             timeout,
             owner: None,
             owner_rows: false,
@@ -179,7 +177,6 @@ impl Session {
         if reset {
             // RESETCONNECTION rides on the next request: no extra round trip.
             client.prepare_reset_connection(false);
-            self.implicit_txn = false;
         }
         self.cursors.clear();
         Some(self)
@@ -217,22 +214,21 @@ impl Session {
         }
     }
 
+    /// Manual-commit mode opens the transaction before the statement, like msodbcsql.
     async fn prepare_session(&mut self) -> Result<(), Diag> {
-        let want = !self.autocommit;
-        if self.implicit_txn == want {
+        let client = self.client.as_mut().ok_or_else(closed)?;
+        if self.autocommit || client.has_active_transaction() {
             return Ok(());
         }
-        let sql = if want { "SET IMPLICIT_TRANSACTIONS ON" } else { "SET IMPLICIT_TRANSACTIONS OFF" };
-        let client = self.client.as_mut().ok_or_else(closed)?;
-        let result = async {
-            client.execute(sql.to_string(), ExecuteOptions::new().timeout_secs(self.timeout)).await?;
-            client.close_query().await
-        }
-        .await;
+        let result = client
+            .begin_transaction_with_options(
+                TransactionIsolationLevel::NoChange,
+                None,
+                ExecuteOptions::new().timeout_secs(self.timeout),
+            )
+            .await;
         let _ = client.take_info_messages();
-        result.map_err(|e| diag::records_for_error(&e, "HY000"))?;
-        self.implicit_txn = want;
-        Ok(())
+        result.map_err(|e| diag::records_for_error(&e, "HY000"))
     }
 
     /// Type untyped NULL parameters the way the server infers them (cached).
