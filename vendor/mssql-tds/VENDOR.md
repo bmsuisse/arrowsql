@@ -25,6 +25,22 @@ Local patches (search for `VENDOR PATCH`):
    Covered by tests/port/test_tls.py.
 3. `src/connection/tds_client.rs` `execute_sp_executesql`: build the parameter
    declaration from a reference instead of cloning every parameter.
+4. Client-side cost of many-parameter `sp_executesql` calls (multirow
+   INSERT ... VALUES, 1000 parameters):
+   - `src/connection/tds_client.rs`: `execute_sp_executesql_positional` (new)
+     takes unnamed parameters and declares/sends parameter `n` as `@Pn`
+     without allocating a name each; names are materialized when a parameter
+     is output, data-at-exec or Always Encrypted applies.
+   - `src/message/parameters/rpc_parameters.rs`: `write_plain_declaration`
+     (declaration text written straight into the list, no per-parameter
+     `String`) and `write_plain_value` (TYPE_INFO + value of non-NULL
+     bit/tinyint/smallint/int/bigint/float/decimal/numeric/datetime2(7) and
+     short UTF-16 nvarchar/ASCII varchar written straight into the packet
+     buffer; byte-identical to the general encoder, which remains the fallback).
+   - `src/io/packet_writer.rs`: `try_write_parts` for the above.
+   - `src/datatypes/sql_string.rs` `from_utf8_string`: exact-capacity buffer,
+     ASCII fast path. `src/datatypes/sqltypes.rs`: `get_nullable_type` is
+     `pub(crate)`.
 
 To drop the vendored copy, delete this directory and the `[patch]` section
 in ../../Cargo.toml once the fix is in the pinned upstream rev.

@@ -321,10 +321,16 @@ impl SqlString {
 
     /// Creates a UTF-16LE–encoded `SqlString` from a Rust `String`.
     pub fn from_utf8_string(string: String) -> Self {
-        let utf16_bytes = string
-            .encode_utf16()
-            .flat_map(|f| f.to_le_bytes())
-            .collect::<Vec<u8>>();
+        let mut utf16_bytes = Vec::with_capacity(string.len() * 2);
+        if string.is_ascii() {
+            for byte in string.bytes() {
+                utf16_bytes.extend_from_slice(&[byte, 0]);
+            }
+        } else {
+            for unit in string.encode_utf16() {
+                utf16_bytes.extend_from_slice(&unit.to_le_bytes());
+            }
+        }
         SqlString::new(utf16_bytes, EncodingType::Utf16)
     }
 

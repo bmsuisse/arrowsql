@@ -20,6 +20,7 @@ use crate::message::bulk_load::{StreamingBulkLoadWriter, build_insert_bulk_comma
 use crate::message::messages::{PacketType, ResetConnectionMode};
 use crate::message::parameters::rpc_parameters::{
     RpcParameter, StatusFlags, StreamedSqlType, build_parameter_list_string,
+    build_positional_parameter_list_string,
 };
 use crate::message::rpc::{RpcProcs, RpcType, SqlRpc};
 use crate::message::transaction_management::{
@@ -1860,8 +1861,34 @@ impl TdsClient {
     pub async fn execute_sp_executesql<'a>(
         &mut self,
         sql: String,
+        named_params: Vec<RpcParameter>,
+        options: impl Into<ExecuteOptions<'a>>,
+    ) -> TdsResult<StatementResult> {
+        self.execute_sp_executesql_impl(sql, named_params, options, false)
+            .await
+    }
+
+    /// [`execute_sp_executesql`](Self::execute_sp_executesql) for parameters
+    /// built without names: parameter `n` (1-based) is declared and, where the
+    /// server needs a name, sent as `@Pn`. Skips allocating a name per
+    /// parameter in the common by-position case.
+    #[instrument(skip(self, params, options), level = "info")]
+    pub async fn execute_sp_executesql_positional<'a>(
+        &mut self,
+        sql: String,
+        params: Vec<RpcParameter>,
+        options: impl Into<ExecuteOptions<'a>>,
+    ) -> TdsResult<StatementResult> {
+        self.execute_sp_executesql_impl(sql, params, options, true)
+            .await
+    }
+
+    async fn execute_sp_executesql_impl<'a>(
+        &mut self,
+        sql: String,
         mut named_params: Vec<RpcParameter>,
         options: impl Into<ExecuteOptions<'a>>,
+        mut auto_named: bool,
     ) -> TdsResult<StatementResult> {
         let ExecuteOptions {
             timeout: timeout_sec,
@@ -1877,9 +1904,25 @@ impl TdsClient {
         };
         RpcParameter::reject_data_at_exec(named_params.iter())?;
 
+        // Names are only needed on the wire when a parameter is sent by name.
+        if auto_named
+            && (self.should_encrypt_parameters()
+                || named_params
+                    .iter()
+                    .any(|p| p.is_output() || p.is_data_at_exec()))
+        {
+            for (index, parameter) in named_params.iter_mut().enumerate() {
+                parameter.name = Some(format!("@P{}", index + 1));
+            }
+            auto_named = false;
+        }
         let declaration_params = &named_params;
-        let mut params_list_as_string = String::new();
-        build_parameter_list_string(declaration_params, &mut params_list_as_string)?;
+        let mut params_list_as_string = String::with_capacity(declaration_params.len() * 24);
+        if auto_named {
+            build_positional_parameter_list_string(declaration_params, &mut params_list_as_string)?;
+        } else {
+            build_parameter_list_string(declaration_params, &mut params_list_as_string)?;
+        }
 
         // Always Encrypted: when the connection enabled column encryption and the
         // server acknowledged the feature, ask the server which parameters need
@@ -1916,7 +1959,6 @@ impl TdsClient {
         let message = packet_writer.suspend();
         drop(rpc);
         self.finish_send(serialize_result, message).await?;
-
         self.position_on_first_result().await
     }
 
