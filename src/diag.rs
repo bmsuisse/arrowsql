@@ -11,6 +11,7 @@
 //! microsoft/mssql-rs `mssql-odbc/src/api/sqlstate.rs` (MIT), which mirrors
 //! msodbcsql.
 
+use pyo3::prelude::*;
 use mssql_tds::error::{Error as TdsError, SqlInfoMessage};
 
 /// Prefix msodbcsql puts on every message; kept so message text matches
@@ -79,6 +80,14 @@ pub fn sqlstate_for_server_error(number: u32, class: i32) -> &'static str {
         Err(_) if class > 10 => "42000",
         Err(_) => "01000",
     }
+}
+
+/// Python-visible `sqlstate_for_server_error(number, severity=None)`; no
+/// severity means the most severe tier (HY000) for unmapped numbers.
+#[pyfunction]
+#[pyo3(name = "sqlstate_for_server_error", signature = (number, severity=None))]
+pub fn sqlstate_for_server_error_py(number: u32, severity: Option<i32>) -> &'static str {
+    sqlstate_for_server_error(number, severity.unwrap_or(i32::MAX))
 }
 
 /// Server error raised to a request that was running when its session was

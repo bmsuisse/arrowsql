@@ -64,6 +64,7 @@ from arrowsql.constants import (
     _KEY_PWD,
     _KEY_TRUSTED_CONNECTION,
     _AuthInternal,
+    SQL_WMETADATA,
 )
 
 if TYPE_CHECKING:
@@ -89,8 +90,6 @@ class TokenProvider(Protocol):
         ...
 
 
-# Add SQL_WMETADATA constant for metadata decoding configuration
-SQL_WMETADATA: int = -99  # Special flag for column name decoding
 INFO_TYPE_STRING_THRESHOLD: int = 10000  # Legacy fallback for unlisted information types
 
 # ODBC integers have fixed widths and native byte order; handles are pointer-sized.
@@ -269,9 +268,7 @@ def _raise_connection_error(e: RuntimeError) -> None:
     ) from None
 
 
-def _validate_utf16_wchar_compatibility(
-    encoding: str, wchar_type: int, context: str = "SQL_WCHAR"
-) -> None:
+def _validate_utf16_wchar_compatibility(encoding: str, context: str = "SQL_WCHAR") -> None:
     """
     Validates UTF-16 encoding compatibility with SQL_WCHAR.
 
@@ -279,7 +276,6 @@ def _validate_utf16_wchar_compatibility(
 
     Args:
         encoding: The encoding string (already normalized to lowercase)
-        wchar_type: The SQL_WCHAR constant value to check against
         context: Context string for error messages ('SQL_WCHAR', 'SQL_WCHAR ctype', etc.)
 
     Raises:
@@ -329,8 +325,6 @@ def _validate_encoding(encoding: str) -> bool:
         bool: True if encoding is valid, False otherwise.
 
     Note:
-        Uses LRU cache to avoid repeated expensive codecs.lookup() calls.
-        Cache size is limited to 128 entries which should cover most use cases.
         Also validates that encoding name only contains safe characters.
     """
     # Basic security checks - prevent obvious attacks
@@ -378,20 +372,6 @@ class Connection:
             # Multiple operations...
         finally:
             conn.close()
-
-    Methods:
-        __init__(database: str) -> None:
-        connect_to_db() -> None:
-        cursor() -> Cursor:
-        commit() -> None:
-        rollback() -> None:
-        close() -> None:
-        __enter__() -> Connection:
-        __exit__() -> None:
-        setencoding(encoding=None, ctype=None) -> None:
-        setdecoding(sqltype, encoding=None, ctype=None) -> None:
-        getdecoding(sqltype) -> dict:
-        set_attr(attribute, value) -> None:
     """
 
     # DB-API 2.0 Exception attributes
@@ -617,18 +597,8 @@ class Connection:
         # Windows where the driver returns raw bytes in the server's native
         # code page (e.g. CP-1252) that may fail to decode as UTF-8.
         self._decoding_settings = {
-            _SQL_CHAR: {
-                "encoding": "utf-16le",
-                "ctype": _SQL_WCHAR,
-            },
-            _SQL_WCHAR: {
-                "encoding": "utf-16le",
-                "ctype": _SQL_WCHAR,
-            },
-            SQL_WMETADATA: {
-                "encoding": "utf-16le",
-                "ctype": _SQL_WCHAR,
-            },
+            sqltype: {"encoding": "utf-16le", "ctype": _SQL_WCHAR}
+            for sqltype in (_SQL_CHAR, _SQL_WCHAR, SQL_WMETADATA)
         }
 
         # Custom token_provider= parameter — takes priority, mutually exclusive
@@ -1305,10 +1275,7 @@ class Connection:
         )
         if self._closed:
             logger.debug("setencoding: Connection is closed")
-            raise InterfaceError(
-                driver_error="Connection is closed",
-                ddbc_error="Connection is closed",
-            )
+        self._check_open()
 
         # Set default encoding if not provided
         if encoding is None:
@@ -1330,10 +1297,6 @@ class Connection:
         # Normalize encoding to casefold for more robust Unicode handling
         encoding = encoding.casefold()
         logger.debug("setencoding: Encoding normalized to %s", encoding)
-
-        # Early validation if ctype is already specified as SQL_WCHAR
-        if ctype == ConstantsDDBC.SQL_WCHAR.value:
-            _validate_utf16_wchar_compatibility(encoding, ctype, "SQL_WCHAR")
 
         # Set default ctype based on encoding if not provided
         if ctype is None:
@@ -1362,7 +1325,7 @@ class Connection:
 
         # Final validation: SQL_WCHAR ctype only supports UTF-16 encodings (without BOM)
         if ctype == ConstantsDDBC.SQL_WCHAR.value:
-            _validate_utf16_wchar_compatibility(encoding, ctype, "SQL_WCHAR")
+            _validate_utf16_wchar_compatibility(encoding, "SQL_WCHAR")
 
         if encoding != "utf-16le" or ctype != ConstantsDDBC.SQL_WCHAR.value:
             warnings.warn(
@@ -1409,11 +1372,7 @@ class Connection:
             This method is thread-safe and can be called from multiple threads concurrently.
             Returns a copy of the settings to prevent external modification.
         """
-        if self._closed:
-            raise InterfaceError(
-                driver_error="Connection is closed",
-                ddbc_error="Connection is closed",
-            )
+        self._check_open()
 
         # Thread-safe read with lock to prevent race conditions
         with self._encoding_lock:
@@ -1465,11 +1424,7 @@ class Connection:
             cnxn.setdecoding(mssql_python.SQL_WCHAR, encoding='utf-16le',
                            ctype=mssql_python.SQL_WCHAR)
         """
-        if self._closed:
-            raise InterfaceError(
-                driver_error="Connection is closed",
-                ddbc_error="Connection is closed",
-            )
+        self._check_open()
 
         # Validate sqltype
         valid_sqltypes = [
@@ -1517,7 +1472,7 @@ class Connection:
 
         # Validate SQL_WCHAR encoding compatibility
         if sqltype == ConstantsDDBC.SQL_WCHAR.value:
-            _validate_utf16_wchar_compatibility(encoding, sqltype, "SQL_WCHAR sqltype")
+            _validate_utf16_wchar_compatibility(encoding, "SQL_WCHAR sqltype")
 
         # SQL_WMETADATA can use any valid encoding (UTF-8, UTF-16, etc.)
         # No restriction needed here - let users configure as needed
@@ -1546,7 +1501,7 @@ class Connection:
 
         # Validate SQL_WCHAR ctype encoding compatibility
         if ctype == ConstantsDDBC.SQL_WCHAR.value:
-            _validate_utf16_wchar_compatibility(encoding, ctype, "SQL_WCHAR ctype")
+            _validate_utf16_wchar_compatibility(encoding, "SQL_WCHAR ctype")
 
         # Store the decoding settings for the specified sqltype (thread-safe with lock)
         with self._encoding_lock:
@@ -1590,11 +1545,7 @@ class Connection:
             This method is thread-safe and can be called from multiple threads concurrently.
             Returns a copy of the settings to prevent external modification.
         """
-        if self._closed:
-            raise InterfaceError(
-                driver_error="Connection is closed",
-                ddbc_error="Connection is closed",
-            )
+        self._check_open()
 
         # Validate sqltype
         valid_sqltypes = [
@@ -1658,8 +1609,7 @@ class Connection:
 
         if not is_valid:
             # Use the already sanitized values for logging
-            logger.debug(
-                "warning",
+            logger.warning(
                 f"Invalid attribute or value: {sanitized_attr}={sanitized_val}, {error_message}",
             )
             raise ProgrammingError(
@@ -1707,8 +1657,7 @@ class Connection:
                 self._searchescape = escape_char
             except Exception as e:
                 # Log the exception for debugging, but do not expose sensitive info
-                logger.debug(
-                    "warning",
+                logger.warning(
                     "Failed to retrieve search escape character, using default '\\'. "
                     "Exception: %s",
                     type(e).__name__,
@@ -1904,11 +1853,6 @@ class Connection:
         """
         cursor = self.cursor()
         try:
-            # Add the cursor to our tracking set BEFORE execution
-            # This ensures it's tracked even if execution fails
-            self._track_cursor(cursor)
-
-            # Now execute the query
             cursor.execute(sql, *args)
             return cursor
         except Exception:
@@ -2030,12 +1974,10 @@ class Connection:
                     # Close the cursor regardless of whether it's reused or new
                     cursor.close()
                     logger.debug(
-                        "debug",
                         "Automatically closed cursor after batch execution error",
                     )
                 except Exception as close_err:
-                    logger.debug(
-                        "warning",
+                    logger.warning(
                         f"Error closing cursor after execution failure: {close_err}",
                     )
             # Re-raise the original exception
@@ -2271,7 +2213,6 @@ class Connection:
         if getattr(self, "_cursors", None):
             # Convert to list to avoid modification during iteration
             cursors_to_close = list(self._cursors)
-            close_errors = []
 
             for cursor in cursors_to_close:
                 try:
@@ -2279,16 +2220,7 @@ class Connection:
                         cursor.close()
                 except Exception as e:  # pylint: disable=broad-exception-caught
                     # Collect errors but continue closing other cursors
-                    close_errors.append(f"Error closing cursor: {e}")
                     logger.warning(f"Error closing cursor: {e}")
-
-            # If there were errors closing cursors, log them but continue
-            if close_errors:
-                logger.debug(
-                    "warning",
-                    "Encountered %d errors while closing cursors",
-                    len(close_errors),
-                )
 
             # Clear the cursor set explicitly to release any internal
             # references
@@ -2336,6 +2268,13 @@ class Connection:
 
         if logger._cached_level <= logging.INFO:
             logger.info("Connection closed successfully.")
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise InterfaceError(
+                driver_error="Connection is closed",
+                ddbc_error="Connection is closed",
+            )
 
     def _track_cursor(self, cursor: Cursor) -> None:
         """Remember `cursor` so close() closes it too."""
