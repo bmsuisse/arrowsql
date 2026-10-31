@@ -120,7 +120,10 @@ pub fn build_rpc_params(
         }
         let sql_type = match hint {
             Some(hint) => py_to_sql_type_with_hint(&value, hint, codec),
-            None => py_to_sql_type(&value),
+            None => match crate::statement::batch_rpc::fast_param_cell(&value) {
+                Some(cell) => Ok(cell),
+                None => py_to_sql_type(&value),
+            },
         }
         .map_err(|e| conversion_error(&e))?;
         types.push(sql_type);

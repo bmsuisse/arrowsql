@@ -12,7 +12,7 @@
 //! GIL released (`py.detach`). Python objects are built from a detached
 //! `RowBuffer` after the locks are dropped.
 
-mod batch_rpc;
+pub(crate) mod batch_rpc;
 mod cancel;
 mod cursor;
 mod exec;

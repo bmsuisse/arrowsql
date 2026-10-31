@@ -17,6 +17,7 @@ use std::mem::{Discriminant, discriminant};
 use mssql_tds::datatypes::decoder::DecimalParts;
 use mssql_tds::datatypes::sqltypes::SqlType;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use mssql_tds::datatypes::column_values::{SqlDateTime2, SqlTime};
 use pyo3::types::{PyDateAccess, PyDateTime, PyList, PyTimeAccess, PyTuple, PyType, PyTzInfoAccess};
 
@@ -80,6 +81,73 @@ fn datetime_cell(value: &Bound<'_, PyAny>, datetime_type: &Bound<'_, PyType>) ->
     if !value.get_type().is(datetime_type) {
         return None;
     }
+    naive_datetime_cell(value)
+}
+
+/// Fast conversion for single-statement parameter binding of the two types
+/// whose general path is slow (naive `datetime.datetime`, `decimal.Decimal`).
+/// The result is exactly what `py_to_sql_type` returns; `None` hands the value
+/// to it (other types, subclasses, aware datetimes, exponent notation).
+pub(crate) fn fast_param_cell(value: &Bound<'_, PyAny>) -> Option<SqlType> {
+    static TYPES: PyOnceLock<(Py<PyType>, Py<PyType>)> = PyOnceLock::new();
+    let py = value.py();
+    let (datetime_type, decimal_type) = TYPES
+        .get_or_try_init(py, || -> PyResult<_> {
+            let datetime = py.import("datetime")?.getattr("datetime")?.cast_into::<PyType>()?.unbind();
+            let decimal = py.import("decimal")?.getattr("Decimal")?.cast_into::<PyType>()?.unbind();
+            Ok((datetime, decimal))
+        })
+        .ok()?;
+    let ty = value.get_type();
+    if ty.is(datetime_type.bind(py)) {
+        naive_datetime_cell(value)
+    } else if ty.is(decimal_type.bind(py)) {
+        inferred_decimal_cell(value)
+    } else {
+        None
+    }
+}
+
+/// A `Decimal` in plain notation as NUMERIC(p, s) with the precision and scale
+/// `py_to_sql_type` infers: the coefficient's digit count (at least the scale),
+/// and the number of fraction digits.
+fn inferred_decimal_cell(value: &Bound<'_, PyAny>) -> Option<SqlType> {
+    let text = value.str().ok()?;
+    let text = text.to_str().ok()?;
+    let unsigned = text.strip_prefix('-');
+    let (mut magnitude, mut scale, mut coefficient_digits) = (0u128, 0usize, 0usize);
+    let (mut seen_point, mut digit_count) = (false, 0usize);
+    for byte in unsigned.unwrap_or(text).bytes() {
+        match byte {
+            b'0'..=b'9' => {
+                digit_count += 1;
+                if digit_count > MAX_DECIMAL_DIGITS {
+                    return None;
+                }
+                magnitude = magnitude * 10 + u128::from(byte - b'0');
+                if magnitude != 0 {
+                    coefficient_digits += 1;
+                }
+                if seen_point {
+                    scale += 1;
+                }
+            }
+            b'.' if !seen_point => seen_point = true,
+            _ => return None,
+        }
+    }
+    if digit_count == 0 {
+        return None;
+    }
+    let precision = coefficient_digits.max(1).max(scale);
+    if precision > MAX_DECIMAL_DIGITS {
+        return None;
+    }
+    // `Decimal('-0.0')` keeps its sign, as `DecimalParts::from_string` does.
+    Some(SqlType::Numeric(Some(DecimalParts::new(unsigned.is_none(), precision as u8, scale as u8, magnitude))))
+}
+
+fn naive_datetime_cell(value: &Bound<'_, PyAny>) -> Option<SqlType> {
     let dt = value.cast::<PyDateTime>().ok()?;
     if dt.get_tzinfo().is_some() {
         return None;
