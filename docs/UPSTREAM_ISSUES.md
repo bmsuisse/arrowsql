@@ -9,16 +9,18 @@ Legend. Category: bug / feat / perf / docs / pkg. Class: (a) free from rewrite, 
 the local SQL Server 2022 container. Links: https://github.com/microsoft/mssql-python/issues/N
 
 Caveats: issue bodies were read via `gh`; Rust-side claims about `mssql-tds` come from a quick grep of the
-pinned checkout, not from running code. The Rust crate here is currently a stub (`src/lib.rs`), so every
-"(c)" item is blocked on the core landing. "Free" items are expected, not verified: each needs a regression
-test once the core runs. Strictly-S real fixes number fewer than 15, so the table below also includes
+pinned checkout, not from running code. The Rust core has since landed (`src/`), so "(c)" items are no longer
+blocked on it; see "Status update" below for what is done. "Free" items are expected, not verified: each needs a
+regression test. Strictly-S real fixes number fewer than 15, so the table below also includes
 "S: verify and add regression test" and a few cheap M items, labelled as such.
 
-## In progress
+## Status update
 
-| # | Title | Note |
+| # | Title | Status |
 |---|---|---|
-| [581](https://github.com/microsoft/mssql-python/issues/581) | Expose SQLSTATE / native error number on exceptions | Being implemented here. Unblocks #682 (retry classification). |
+| [581](https://github.com/microsoft/mssql-python/issues/581) | Expose SQLSTATE / native error number on exceptions | Done: `sqlstate` and `native_error` on every exception (`tests/common_issues/test_issue_581_sqlstate.py`). Unblocks #682 (retry classification). |
+| [492](https://github.com/microsoft/mssql-python/issues/492) | bulkcopy fails for `#temp` tables | Done: native bulk copy runs on the cursor's own connection, so session-scoped `#temp` tables are visible. |
+| [874](https://github.com/microsoft/mssql-python/issues/874) | `async-preview` extra pin | The extra pinned `mssql-python-rs==0.3.0`; upstream's issue asks for 0.4.0, the current PyPI release (verified 2026-10-31). The extra now pins `==0.4.0` in `pyproject.toml`; `requirements-dev.txt` still installs 0.3.0 and has not been re-run against 0.4.0. |
 
 ## Low-hanging fruit (ranked)
 
@@ -79,7 +81,7 @@ Ranking: real S fixes with clear spec first, then verify-only S, then cheap M.
 
 ## Notes on coverage
 
-Remaining unclassified-by-name items were handled above: #581 in progress; every one of the 34 open
+Remaining unclassified-by-name items were handled above: #581, #492 and #874 are covered in the status table; every one of the 34 open
 issues appears in exactly one section (some are cross-listed from "Fixed for free" to the ranked table
 when we should still add a test). Not checked: whether any upstream branch (not PR) addresses #24, #174,
 #850; run `gh pr list -R microsoft/mssql-python --search "<n>"` before starting.

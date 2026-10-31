@@ -5,7 +5,7 @@ core replaced by Rust: a PyO3 extension over Microsoft's native TDS crate
 [`mssql-tds`](https://github.com/microsoft/mssql-rs). No ODBC driver, no
 unixODBC, same Python API (`import mssql_python`).
 
-Status: work in progress. The upstream Python layer is vendored unchanged
+Status: work in progress (alpha, not yet on PyPI). The upstream Python layer is vendored unchanged
 where possible, and the upstream test suite is the compatibility bar.
 
 ## What it adds
@@ -32,6 +32,7 @@ Same API as mssql-python (DB-API 2.0, `?` parameters):
 ```python
 import mssql_python
 
+# TrustServerCertificate=yes is for local testing only, see "Security note"
 conn_str = "Server=localhost,1433;Database=nyctaxi;Uid=sa;Pwd=...;Encrypt=yes;TrustServerCertificate=yes"
 
 with mssql_python.connect(conn_str) as conn:
@@ -106,6 +107,66 @@ try:
 except mssql_python.IntegrityError as exc:
     print(exc.sqlstate, exc.native_error)  # '23000' 2627
 ```
+
+## Support
+
+### Platforms and Python versions
+
+Honest status: **only Linux x86_64 (glibc) is built and tested by hand so far**
+(CPython 3.13, plus a free-threaded build). CI (`.github/workflows/ci.yml`) runs the
+test suites on Linux x86_64 against SQL Server 2022. The wheel workflow
+(`.github/workflows/wheels.yml`) is new and builds the matrix below as workflow
+artifacts; nothing has been published to PyPI and no wheel other than Linux
+x86_64 has been run against a database.
+
+| platform | wheel built by CI | tested against SQL Server | notes |
+|---|---|---|---|
+| Linux x86_64, glibc (manylinux_2_28) | yes | yes (CI + local) | reference platform |
+| Linux aarch64, glibc | yes | no | built natively on an arm runner; never imported |
+| Linux musl (x86_64, aarch64) | yes | no | |
+| macOS x86_64 / arm64 | yes | no | arm64 wheel gets an import smoke test in CI, x86_64 is never imported; `aio` should work (Unix) |
+| Windows x64 | yes | no | `aio` is not available (needs `loop.add_reader`); wheel gets an import smoke test in CI |
+
+Python: CPython 3.10 to 3.14 and free-threaded 3.14t are built; 3.13 is the version
+the suites run on. PyPy and 32-bit platforms are not supported.
+
+### Connection string
+
+Parsed natively (`src/connstr.rs`) and by the vendored Python layer.
+
+| keyword | status |
+|---|---|
+| `Server` / `Address` / `Data Source`, `Database`, `Uid`, `Pwd`, `APP`, `WSID`, `Language` | supported |
+| `Encrypt` (`yes`/`no`/`strict`), `TrustServerCertificate`, `HostNameInCertificate`, `ServerCertificate` | supported (rustls; TLS 1.2 / 1.3). `Encrypt=strict` is implemented but not verifiable against the local SQL Server 2022 container |
+| `ConnectRetryCount`, `ConnectRetryInterval`, `MultiSubnetFailover`, `ApplicationIntent`, `PacketSize`, `Connection Timeout` | supported |
+| `Trusted_Connection=yes` / `Integrated Security=sspi` | Kerberos via GSSAPI (library loaded at runtime) on Unix, SSPI on Windows; not tested here |
+| `Authentication=ActiveDirectoryDefault`, `ActiveDirectoryInteractive`, `ActiveDirectoryDeviceCode`, `ActiveDirectoryMSI`, `ActiveDirectoryServicePrincipal` | acquired in Python with `azure-identity` (the `[azure]` extra) and passed as an access token; not tested against Entra ID here |
+| `token_provider=` / `attrs_before={1256: ...}` (access token) | supported |
+| `Authentication=ActiveDirectoryPassword`, `SqlPassword`, `ActiveDirectoryIntegrated`, NTLM (`DOMAIN\user`) | not supported |
+| Always Encrypted (`ColumnEncryption`) | not supported |
+
+### Environment variables
+
+| variable | effect |
+|---|---|
+| `MSSQL_RS_BUSY_POLL` | `0`, `off` or `false` disables the short busy poll for the first response byte (default on, at most `min(cpus / 4, 2)` spinning threads; it trades a little CPU for lower latency on very short round trips) |
+| `MSSQL_RS_MULTISUBNET_FAILOVER_DEFAULT` | `true` / `false`: deployment-wide default for `MultiSubnetFailover` when the connection string does not set it |
+| `MSSQL_PYTHON_NATIVE_PROVIDER` | upstream's ODBC provider selector; has no effect on the Rust path |
+| `DB_CONNECTION_STRING` | used by the test suites and benchmarks only, never by the library |
+
+### Do not install both packages
+
+The import name is `mssql_python`, the same as Microsoft's
+[mssql-python](https://github.com/microsoft/mssql-python). Installing both into one
+environment makes them overwrite each other's files. Use one or the other, in a
+separate virtual environment.
+
+### Security note
+
+The quick-start connection strings above use `TrustServerCertificate=yes`, which
+switches certificate validation off. That is for **local testing against a
+container only**. For anything else use a certificate the client trusts (or
+`ServerCertificate=` / `HostNameInCertificate=`) and keep `Encrypt=yes`.
 
 ## Benchmarks
 
@@ -183,6 +244,7 @@ Methodology, profiles and the compression findings are in
 ## Install
 
 ```bash
+# not on PyPI yet; wheels are CI artifacts (see Support)
 pip install mssql-python-rs-port              # zero required dependencies
 pip install 'mssql-python-rs-port[arrow]'     # + pyarrow for arrow() / bulkcopy_arrow
 pip install 'mssql-python-rs-port[azure]'     # + azure-identity credentials
@@ -199,7 +261,7 @@ source scripts/env.sh my-id      # private database per run
 cd tests/upstream && ../../.venv/bin/python -m pytest -q
 ```
 
-Test scope and the upstream baseline: [docs/TEST_SCOPE.md](docs/TEST_SCOPE.md).
+CI runs the same suites on every push; `scripts/check_upstream_baseline.py` checks the upstream results against the baseline. Test scope and the upstream baseline: [docs/TEST_SCOPE.md](docs/TEST_SCOPE.md).
 NYC taxi benchmark data: `scripts/load_taxi.py`.
 
 ## Docs

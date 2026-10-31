@@ -1,0 +1,172 @@
+name: Wheels
+
+# Builds wheels and an sdist and uploads them as workflow artifacts only.
+# Nothing is published to PyPI from here (see the commented-out job at the end).
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/wheels.yml"
+      - "pyproject.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "src/**"
+      - "vendor/**"
+      - "python/**"
+  workflow_dispatch:
+
+concurrency:
+  group: wheels-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Interpreters: CPython 3.10 to 3.14 plus free-threaded 3.14t. maturin picks them up
+# with --find-interpreter (the manylinux/musllinux containers ship all of them;
+# the macOS and Windows jobs install them with setup-python).
+
+jobs:
+  linux:
+    name: ${{ matrix.target }} (${{ matrix.manylinux }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, manylinux: "2_28" }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, manylinux: "2_28" }
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, manylinux: musllinux_1_2 }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, manylinux: musllinux_1_2 }
+    steps:
+      - uses: actions/checkout@v4
+      # No `-z pack-relative-relocs` here: it is only added by scripts/build.sh --release
+      # (glibc >= 2.36), which would break manylinux_2_28.
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          rust-toolchain: stable
+          args: --release --out dist --find-interpreter
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  macos:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15-intel, target: x86_64-apple-darwin }
+          - { runner: macos-14, target: aarch64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+            3.14t
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          rust-toolchain: stable
+          args: --release --out dist --find-interpreter
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  windows:
+    name: x86_64-pc-windows-msvc
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+            3.14t
+          architecture: x64
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64-pc-windows-msvc
+          rust-toolchain: stable
+          args: --release --out dist --find-interpreter
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  smoke:
+    name: import smoke test (${{ matrix.os }})
+    needs: [linux, macos, windows]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: Install the matching wheel and import it
+        shell: bash
+        run: |
+          python -m pip install --no-index --find-links dist mssql-python-rs-port
+          cd "$RUNNER_TEMP"
+          python -c "import mssql_python, mssql_python.ddbc_bindings as d; print(mssql_python.__version__, d.__version__, d.__rust_port__)"
+
+  # Publishing is deliberately disabled. To enable it: create the project on PyPI,
+  # add this repository as a trusted publisher (workflow wheels.yml, environment
+  # pypi), uncomment this job, and review the artifacts of a tag build first.
+  #
+  # publish:
+  #   name: Publish to PyPI
+  #   if: startsWith(github.ref, 'refs/tags/v')
+  #   needs: [linux, macos, windows, sdist, smoke]
+  #   runs-on: ubuntu-latest
+  #   environment: pypi
+  #   permissions:
+  #     id-token: write   # trusted publishing, no API token
+  #   steps:
+  #     - uses: actions/download-artifact@v4
+  #       with:
+  #         path: dist
+  #         merge-multiple: true
+  #     - uses: pypa/gh-action-pypi-publish@release/v1

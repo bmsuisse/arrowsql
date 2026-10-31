@@ -1,6 +1,6 @@
 # Benchmark results
 
-Run `2026-10-30T19:11:20+0000` on `aiworkstation` (24 cores, 9077 MB available), git `747eddd` (worktree-agent-a05db7240431a8470), quick mode.  
+Run `2026-10-30T19:11:20+0000` on a 24-core dev workstation (9077 MB available), commit `747eddd`, quick mode.  
 SQL Server: Microsoft SQL Server 2022 (RTM-CU27-GDR) (KB5126934) - 16.0.4305.5 (X64) .  
 Load average at start: 20.5 / 51.3 / 198.7.
 

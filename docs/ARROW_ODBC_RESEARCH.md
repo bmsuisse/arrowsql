@@ -10,7 +10,7 @@ Sources (shallow clones, read locally):
 | pacman82/arrow-odbc-py | `f29dc49` | pins `arrow-odbc = "26"` (Cargo.lock: 26.0.3) |
 | pacman82/odbc2parquet | `adbf154` | CLI, uses `odbc-api` 29, `parquet` 60 |
 
-Local clones are in `/tmp/claude-1006/-home-dominikaiuser-devops/029c60c3-79eb-4b6a-aa39-a1c105102018/scratchpad/ref/`. Paths below are relative to those clones.
+Paths below are relative to local clones of the reference projects (not tracked).
 
 Our side references are relative to `~/devops/mssql-python-rs`.
 
