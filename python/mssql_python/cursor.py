@@ -492,9 +492,8 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             ]
         ] = None
         self.rowcount: int = -1
-        self.arraysize: int = (
-            1  # Default number of rows to fetch at a time is 1, user can change it
-        )
+        # Default number of rows to fetch at a time is 1, user can change it
+        self.arraysize = 1
         self.buffer_length: int = 1024  # Default buffer length for string data
         self._result_set_empty: bool = False  # Add this initialization
         self.last_executed_stmt: str = ""  # Stores the last statement executed by this cursor
@@ -1173,6 +1172,21 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 self.last_executed_stmt = ""
                 return
         self._clear_rownumber()
+
+    # RUST-PORT: upstream stores whatever is assigned, so None, "" or b"1234"
+    # is accepted and a later fetchmany() fails. DB-API needs an int >= 0.
+    @property
+    def arraysize(self) -> int:
+        """Rows fetched per ``fetchmany()`` call when no size is given."""
+        return self._arraysize
+
+    @arraysize.setter
+    def arraysize(self, value: int) -> None:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"arraysize must be an int, not {type(value).__name__}")
+        if value < 0:
+            raise ValueError("arraysize must not be negative")
+        self._arraysize = value
 
     def close(self) -> None:
         """

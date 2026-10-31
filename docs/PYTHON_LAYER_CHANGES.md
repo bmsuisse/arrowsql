@@ -126,3 +126,10 @@ converter map is still keyed on the converter generation.
 - `pyproject.toml`: no required dependencies. `async-preview`, `arrow` and
   `azure` are optional extras. No Python-layer code changed for them: the
   imports were already lazy.
+
+## Result sets and arraysize (RUST-PORT)
+
+- `cursor.py` `Cursor.arraysize` is a property (`RUST-PORT`). Upstream stores
+  any value, so `None`, `""` or `b"1234"` are accepted and a later
+  `fetchmany()` fails. Setting a non-int raises `TypeError`, a negative int
+  raises `ValueError`, and the last valid value is kept.
