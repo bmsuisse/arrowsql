@@ -2514,19 +2514,19 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
     def _column_mixes_kinds(column):
         """RUST-PORT: True when a column holds values of different kinds (numbers,
         text, binary, other types), which one declared parameter type cannot carry."""
+        types = set(map(type, column))  # one C-level pass; the hot path is a single type
+        types.discard(type(None))
+        if len(types) <= 1:
+            return False
         kinds = set()
-        for v in map(type, column):
-            if v is type(None):
-                continue
+        for v in types:
             if v in (int, float, bool, decimal.Decimal):
                 kinds.add(int)
             elif v in (bytes, bytearray):
                 kinds.add(bytes)
             else:
                 kinds.add(v)
-            if len(kinds) > 1:
-                return True
-        return False
+        return len(kinds) > 1
 
     def _compute_column_type(self, column):
         """

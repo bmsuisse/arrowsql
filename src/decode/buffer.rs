@@ -100,12 +100,14 @@ impl RowBuffer {
                     Some(Cell::Utf16(span)) => (*span, true),
                     _ => continue,
                 };
+                // char(n) counts bytes in the column's code page, which a decoded
+                // non-ASCII value no longer shows (UTF-8 and DBCS collations), so only
+                // ASCII values are padded; nchar(n) counts UTF-16 units, always exact.
                 let bytes = &self.arena[span.start..span.start + span.len];
-                let chars = match (wide, bytes.is_ascii()) {
-                    (true, _) => bytes.len() / 2,
-                    (false, true) => bytes.len(),
-                    (false, false) => String::from_utf8_lossy(bytes).chars().count(),
-                };
+                if !wide && !bytes.is_ascii() {
+                    continue;
+                }
+                let chars = if wide { bytes.len() / 2 } else { bytes.len() };
                 if chars >= width {
                     continue;
                 }
