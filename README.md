@@ -18,9 +18,13 @@ where possible, and the upstream test suite is the compatibility bar.
   `arrow_stream()` return objects that DuckDB, polars and pyarrow read
   directly via the Arrow PyCapsule interface.
 - Partitioned parallel reads: `arrowsql.read_arrow(conn_str, query,
-  partition_on=, partitions=)`.
+  partition_on=, partitions=)`. Slices are equal-width in the key (skewed
+  keys are not rebalanced) and the partitions are not one snapshot.
 - Native bulk copy (rows and Arrow) and parallel loads with
-  `arrowsql.write_arrow(conn_str, table, source, workers=N)`.
+  `arrowsql.write_arrow(conn_str, table, source, workers=N)` and
+  `arrowsql.write_rows(conn_str, table, rows, workers=N)` (heap: TABLOCK;
+  clustered columnstore: no TABLOCK, batches of at least 102,400 rows; other
+  indexed targets use one worker).
 - Native asyncio: `arrowsql.aio` with a built-in pool.
 - Free-threaded CPython (3.15t) support; zero required dependencies.
 - `sqlstate` and `native_error` on every exception
