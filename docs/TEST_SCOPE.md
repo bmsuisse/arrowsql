@@ -14,9 +14,8 @@ for a native-TDS Rust core are excluded, each with a reason, in
 tests/upstream_excluded.txt (every entry needs a one-line justification). Entries
 start with INAPPLICABLE (ODBC/C++/upstream-CI internals) or GAP (a real behavioural
 difference). Some entries are not baseline targets at all; they record why the test
-fails on the port so it is not mistaken for a regression. Current GAP entries: pool
-checkout validation timeout (GH #854) and pooled `SQL_ATTR_CONNECTION_TIMEOUT`
-restore.
+fails on the port so it is not mistaken for a regression. Current GAP entry: pool
+checkout validation timeout (GH #854).
 
 `scripts/check_upstream_baseline.py` runs the suite, skips the excluded entries and
 fails if any baseline test did not pass. CI runs it.
