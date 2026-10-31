@@ -445,7 +445,8 @@ pub(crate) fn narrow_codec(settings: &Bound<'_, PyAny>) -> PyResult<Option<Strin
     let Ok(settings) = settings.cast::<PyDict>() else {
         return Ok(None);
     };
-    let (Some(ctype), Some(encoding)) = (settings.get_item("ctype")?, settings.get_item("encoding")?)
+    let (Some(ctype), Some(encoding)) =
+        (settings.get_item("ctype")?, settings.get_item("encoding")?)
     else {
         return Ok(None);
     };
@@ -715,7 +716,11 @@ fn hinted_string(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<Sq
 /// Binds narrow text as the bytes `codec` produces. The bytes go to the wire
 /// unchanged, as a `SQL_C_CHAR` buffer does, so they are not re-encoded for the
 /// column collation.
-fn hinted_encoded_text(py_obj: &Bound<'_, PyAny>, hint: ParameterHint, codec: &str) -> TdsResult<SqlType> {
+fn hinted_encoded_text(
+    py_obj: &Bound<'_, PyAny>,
+    hint: ParameterHint,
+    codec: &str,
+) -> TdsResult<SqlType> {
     let bytes = py_obj
         .call_method1("encode", (codec, "strict"))
         .and_then(|encoded| encoded.extract::<Vec<u8>>())
