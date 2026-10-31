@@ -23,8 +23,10 @@ use crate::consts::*;
 use crate::statement;
 use render::{ColumnInfo, Format, Limits, Table};
 
-/// Rows decoded per fetch while the head is being filled.
-const CHUNK_ROWS: usize = 256;
+/// Rows decoded per fetch while the head is being filled: the first chunk is
+/// small so a tight byte budget decodes few surplus rows, then it doubles.
+const FIRST_CHUNK_ROWS: usize = 32;
+const MAX_CHUNK_ROWS: usize = 256;
 /// Smallest byte budget worth starting another result set with.
 const MIN_TABLE_BYTES: usize = 256;
 /// Kept free after the first part for the "N parts omitted" note.
@@ -178,11 +180,13 @@ impl AgentRender {
                     }
                 }
             };
+            let mut chunk = FIRST_CHUNK_ROWS;
             loop {
                 if deadline.is_some_and(|d| Instant::now() >= d) {
                     return Err(None);
                 }
-                let want = table.want(CHUNK_ROWS);
+                let want = table.want(chunk);
+                chunk = (chunk * 2).min(MAX_CHUNK_ROWS);
                 if want == 0 {
                     // Head full: one more row proves the result is larger; only
                     // exhaustion proves an exact total.

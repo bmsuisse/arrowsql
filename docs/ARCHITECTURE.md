@@ -59,6 +59,9 @@ decode/buffer.rs RowBuffer (GIL-free) ──► decode/python.rs (GIL held) ─�
 | `arrow/sink.rs` | `ArrowSink`: `RowWriter` decoding TDS rows into Arrow buffers |
 | `arrow/export.rs` | PyCapsule export, `ArrowTable`, pipelined `ArrowStream` |
 | `arrow/mod.rs` | `DDBCSQLFetchArrowBatch`, `DDBCArrowFetchTable`, `DDBCArrowStream` |
+| `agent/mod.rs` | `AgentRender` pyclass: one statement's bounded text output (result sets, rows affected, messages) under one byte ceiling; chunked Arrow fetch with the GIL released |
+| `agent/render.rs` | `Table`: typed TSV / Markdown header, escaping, cell clipping, head/tail sample, footer |
+| `agent/sqltype.rs`, `agent/fmt.rs` | SQL type names for the header; date / time / decimal / hex text (also used by `arrow/sink.rs` for `sql_variant`) |
 | `bulk/mod.rs` | `DDBCBulkCopyArrow` / `DDBCBulkCopyRows`: bulk load on the cursor's own connection (`with_exclusive_wire`), `BulkUnsupported`, result dict |
 | `bulk/settings.rs` | bulk options, `column_mappings` parsing, source -> destination column mapping |
 | `bulk/arrow_source.rs` | Arrow PyCapsule (`__arrow_c_stream__` / `__arrow_c_array__`) -> record batch stream |
@@ -201,6 +204,38 @@ splits a query on an integer column and reads the ranges over separate
 connections from plain threads; decode is GIL-free so they run in
 parallel. `ArrowTable.concat` joins the parts. One TDS session is capped by
 SQL Server's serialization rate, so this is the only way past it.
+
+## Agent mode
+
+`arrowsql.agent` (`python/arrowsql/agent.py`) returns a bounded, typed text
+preview of a statement, or a JSON error, as one string (README, "Agent mode").
+Python only drives `execute` / `nextset` and classifies exceptions;
+everything that touches rows is Rust (`src/agent/`):
+
+```
+cursor.execute(sql)  ->  AgentRender.result_set(hstmt)
+   chunks of 32 -> 256 rows: ArrowSink + fetch_into (GIL released)
+   -> render::Table formats each chunk into the output String
+   -> stop when the head is full; fetch 1 more row to prove "more"
+```
+
+- No Python row objects, no `arrow_cast`: columns are the `ArrowSink` arrays
+  (`Plan::for_display`, which also admits `sql_variant` as text; the sink
+  writes variant dates, decimals and binary as text), formatted by
+  `agent/fmt.rs`. This keeps the wheel unchanged in size (no new dependency).
+- The byte ceiling covers header, escaping, footer and the "parts omitted"
+  note. A row that does not fit is dropped whole; the footer reserve is the
+  length of the worst-case footer, computed, not guessed.
+- Fetching is lazy: a capped preview decodes at most the rows it shows plus a
+  small chunk and one look-ahead row, and later result sets stay unread after
+  a truncated one. `exhausted` is the only thing that lets the footer say
+  `total_rows=` instead of `total_rows>=`. `tail_rows` opts into reading the
+  whole result to keep its last rows (a ring of zero-copy batch slices, formatted
+  only at the end).
+- Errors are raised by `check_error` as usual, so a failure after earlier rows
+  produces JSON and never a success footer. `error_json` maps SQL Server
+  error numbers (then SQLSTATE) to a category and a recovery hint; it never runs
+  SQL.
 
 ## Bulk copy
 
