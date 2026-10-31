@@ -294,9 +294,8 @@ raise `InterfaceError` naming the `[azure]` extra. Direct users of the binding
 (aio) get a `RuntimeError` for every Entra mode, never a SQL login.
 
 `ServerSPN`, `KeepAlive`, `KeepAliveInterval` and `IpAddressPreference` are now
-applied by `src/connstr.rs`. KeepAlive values are milliseconds, must be
-positive integers, and are rounded up to whole seconds (the OS option has
-second granularity). `IpAddressPreference` accepts IPv4First, IPv6First and
+applied by `src/connstr.rs`. KeepAlive and KeepAliveInterval are seconds, as
+ODBC defines them (defaults 30 and 1), and must be positive integers. `IpAddressPreference` accepts IPv4First, IPv6First and
 UsePlatformDefault.
 
 ## Cancel, Ctrl-C and aio pool semantics (A3/A4, RUST-PORT)

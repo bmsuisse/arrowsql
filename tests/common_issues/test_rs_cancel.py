@@ -202,8 +202,9 @@ def test_other_thread_can_read_cursor_metadata_while_main_waits(conn):
     watchdog = _later(20, lambda: os._exit(71))
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
+        # Only the execute is raced: the probe's streams discard the result they
+        # export, so the main thread must not fetch from it afterwards.
         cur.execute("WAITFOR DELAY '00:00:03'; SELECT 7")
-        assert cur.fetchone()[0] == 7
     finally:
         signal.signal(signal.SIGINT, previous)
         watchdog.cancel()
@@ -230,3 +231,36 @@ def test_cancel_during_fetchall_lands_at_any_point(conn):
         watchdog.cancel()
         cur.close()
     _assert_usable(conn)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+def test_ctrl_c_works_in_a_child_forked_from_a_worker_thread(conn_str):
+    """A worker thread that already ran a query cached 'not the main thread';
+    after fork() it is the child's main thread and must be watched again."""
+    outcome = {}
+
+    def worker():
+        conn = mssql_python.connect(conn_str)
+        conn.cursor().execute("WAITFOR DELAY '00:00:00.3'")  # long enough for a signal check: caches the role
+        conn.close()
+        pid = os.fork()
+        if pid == 0:
+            code = 1
+            try:
+                signal.signal(signal.SIGINT, signal.default_int_handler)
+                child = mssql_python.connect(conn_str)
+                _sigint_after(0.5)
+                start = time.monotonic()
+                try:
+                    child.cursor().execute(LONG_WAIT)
+                except KeyboardInterrupt:
+                    code = 0 if time.monotonic() - start < 10 else 2
+            finally:
+                os._exit(code)
+        outcome["status"] = os.waitpid(pid, 0)[1]
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(60)
+    assert not thread.is_alive()
+    assert os.waitstatus_to_exitcode(outcome["status"]) == 0

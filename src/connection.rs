@@ -288,7 +288,9 @@ impl mssql_tds::connection::client_context::EntraIdTokenFactory for PyTokenFacto
     ) -> mssql_tds::core::TdsResult<Vec<u8>> {
         let factory = self.0.clone();
         // The callable does network I/O under the GIL: keep it off the reactor.
-        let outcome = tokio::task::spawn_blocking(move || {
+        // On the shared runtime, not the connection's own: when the login times
+        // out that runtime is dropped, and dropping waits for blocking tasks.
+        let outcome = crate::runtime::runtime().spawn_blocking(move || {
             Python::attach(|py| -> PyResult<Vec<u8>> {
                 factory.bind(py).call1((spn, sts_url, format!("{auth_method:?}")))?.extract()
             })

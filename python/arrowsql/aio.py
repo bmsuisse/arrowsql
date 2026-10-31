@@ -448,8 +448,9 @@ async def connect(
     (0 = none); ``tuple_rows=True`` returns plain tuples instead of Row objects.
 
     Cancelling the awaiting task (``asyncio.wait_for``) abandons the login."""
+    hub = _hub()  # first: it reports an unsupported platform before the native symbol is looked up
     future, request, opening = _core.aio_connect(
-        _hub(), connection_str, autocommit, timeout, tuple_rows
+        hub, connection_str, autocommit, timeout, tuple_rows
     )
     native = await _wait(opening, (future, request))
     return AsyncConnection(native)
@@ -488,8 +489,9 @@ async def create_pool(
       ``SELECT 1`` before it is handed out; a dead one is replaced.
 
     Cancelling the awaiting task abandons the sessions still being opened."""
+    hub = _hub()  # first: it reports an unsupported platform before the native symbol is looked up
     future, request, opening = _core.aio_create_pool(
-        _hub(),
+        hub,
         connection_str,
         min_size,
         max_size,

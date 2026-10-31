@@ -236,15 +236,17 @@ pub fn build_context_with(
     if let Some(spn) = first(&map, &["serverspn"]).filter(|v| !v.is_empty()) {
         ctx.server_spn = Some(spn.to_string());
     }
-    // ODBC: both are positive millisecond counts. TCP_KEEPIDLE/TCP_KEEPINTVL
-    // take whole seconds (a sub-second value truncates to 0 and the socket
-    // setup fails with EINVAL), so round up to the next second.
-    let round_up_secs = |ms: u32| ms.div_ceil(1000).saturating_mul(1000);
+    // ODBC defines both in seconds (defaults 30 and 1); the context takes
+    // milliseconds. A value too large to convert is rejected.
+    let to_ms = |secs: u32, name: &str| {
+        secs.checked_mul(1000)
+            .ok_or_else(|| format!("Invalid value specified for connection string attribute '{name}': {secs}"))
+    };
     if let Some(n) = positive_u32(&map, "keepalive", "KeepAlive")? {
-        ctx.keep_alive_in_ms = round_up_secs(n);
+        ctx.keep_alive_in_ms = to_ms(n, "KeepAlive")?;
     }
     if let Some(n) = positive_u32(&map, "keepaliveinterval", "KeepAliveInterval")? {
-        ctx.keep_alive_interval_in_ms = round_up_secs(n);
+        ctx.keep_alive_interval_in_ms = to_ms(n, "KeepAliveInterval")?;
     }
     if let Some(pref) = first(&map, &["ipaddresspreference"]) {
         ctx.ipaddress_preference = match pref.to_ascii_lowercase().as_str() {
@@ -352,13 +354,14 @@ mod tests {
     #[test]
     fn network_keywords_are_applied_and_validated() {
         let (ctx, _) = build_context(
-            "Server=h;ServerSPN=MSSQLSvc/h:1433;KeepAlive=5000;KeepAliveInterval=250;IpAddressPreference=IPv6First",
+            "Server=h;ServerSPN=MSSQLSvc/h:1433;KeepAlive=30;KeepAliveInterval=5;IpAddressPreference=IPv6First",
             None,
         )
         .unwrap();
         assert_eq!(ctx.server_spn.as_deref(), Some("MSSQLSvc/h:1433"));
-        assert_eq!(ctx.keep_alive_in_ms, 5000);
-        assert_eq!(ctx.keep_alive_interval_in_ms, 1000, "rounded up to whole seconds");
+        assert_eq!(ctx.keep_alive_in_ms, 30_000, "KeepAlive is in seconds");
+        assert_eq!(ctx.keep_alive_interval_in_ms, 5_000);
+        assert!(build_context("Server=h;KeepAlive=4294967295", None).is_err(), "overflow is rejected");
         assert!(ctx.ipaddress_preference == IPAddressPreference::IPv6First);
         for bad in ["KeepAlive=0", "KeepAlive=x", "KeepAliveInterval=-1", "IpAddressPreference=none"] {
             assert!(build_context(&format!("Server=h;{bad}"), None).is_err(), "{bad}");
