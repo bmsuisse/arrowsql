@@ -415,50 +415,50 @@ class Connection:
 
     _decoding_generation: int = 0
 
-        # Auth type for acquiring fresh tokens at bulk copy time.
-        # We intentionally do NOT cache the token — a fresh one is acquired
-        # each time bulkcopy() is called to avoid expired-token errors.
+    # Auth type for acquiring fresh tokens at bulk copy time.
+    # We intentionally do NOT cache the token — a fresh one is acquired
+    # each time bulkcopy() is called to avoid expired-token errors.
     _auth_type: Optional[str] = None
 
-        # Credential constructor kwargs (e.g. user-assigned MSI client_id)
-        # captured at __init__ time before remove_sensitive_params strips UID
-        # from self.connection_str. bulkcopy() re-uses these when acquiring a
-        # fresh token; re-parsing self.connection_str at that point would miss
-        # them because UID is already gone.
+    # Credential constructor kwargs (e.g. user-assigned MSI client_id)
+    # captured at __init__ time before remove_sensitive_params strips UID
+    # from self.connection_str. bulkcopy() re-uses these when acquiring a
+    # fresh token; re-parsing self.connection_str at that point would miss
+    # them because UID is already gone.
     _credential_kwargs: Optional[Dict[str, str]] = None
 
-        # User-supplied token provider for custom Entra ID authentication.
-        # Stored so bulk copy can call .get_token() for a fresh JWT later.
+    # User-supplied token provider for custom Entra ID authentication.
+    # Stored so bulk copy can call .get_token() for a fresh JWT later.
     _token_provider: Optional["TokenProvider"] = None
 
-        # POSIX timestamp (seconds) at which the current access token expires,
-        # captured from the credential's AccessToken result. None when unknown.
-        # The token is a pre-connect ODBC attribute and cannot be refreshed on
-        # a live connection — this is exposed for diagnostics/logging only.
-        # A custom token_provider may report a float POSIX timestamp, so the
-        # hint is Optional[float] (int is accepted under the numeric tower).
+    # POSIX timestamp (seconds) at which the current access token expires,
+    # captured from the credential's AccessToken result. None when unknown.
+    # The token is a pre-connect ODBC attribute and cannot be refreshed on
+    # a live connection — this is exposed for diagnostics/logging only.
+    # A custom token_provider may report a float POSIX timestamp, so the
+    # hint is Optional[float] (int is accepted under the numeric tower).
     _token_expires_on: Optional[float] = None
 
-        # Composite, identity-aware pool key. Empty means "key the native pool
-        # on the connection string" (legacy behavior, used for non-token auth).
-        # For Entra access-token auth it is set to connStr + identity so that
-        # distinct identities never share a pooled connection.
+    # Composite, identity-aware pool key. Empty means "key the native pool
+    # on the connection string" (legacy behavior, used for non-token auth).
+    # For Entra access-token auth it is set to connStr + identity so that
+    # distinct identities never share a pooled connection.
     _pool_key: str = ""
 
-        # Optional deferred-attrs callback handed to the native layer. When set,
-        # native invokes it *only* when it actually opens a physical connection
-        # (a pool miss or a non-pooled connect), so a same-identity pool hit
-        # skips token acquisition entirely. None means "no deferred
-        # token" — the token (if any) is already in self._attrs_before.
-        #
-        # NOTE: This is an internal, private callback and is intentionally NOT
-        # the public ``token_provider=`` credential parameter. It returns the
-        # full connect-attrs dict lazily; hence the distinct name
-        # ``_token_factory``.
+    # Optional deferred-attrs callback handed to the native layer. When set,
+    # native invokes it *only* when it actually opens a physical connection
+    # (a pool miss or a non-pooled connect), so a same-identity pool hit
+    # skips token acquisition entirely. None means "no deferred
+    # token" — the token (if any) is already in self._attrs_before.
+    #
+    # NOTE: This is an internal, private callback and is intentionally NOT
+    # the public ``token_provider=`` credential parameter. It returns the
+    # full connect-attrs dict lazily; hence the distinct name
+    # ``_token_factory``.
     _token_factory: Optional[Callable[..., Any]] = None
 
-        # RUST-PORT: (spn, sts_url, auth_method) -> JWT callable for the
-        # federated Entra flows the native login drives itself.
+    # RUST-PORT: (spn, sts_url, auth_method) -> JWT callable for the
+    # federated Entra flows the native login drives itself.
     _fedauth_factory: Optional[Callable[..., Any]] = None
 
     # Cursors created by cursor() (weak references: a cursor nobody holds
@@ -469,7 +469,6 @@ class Connection:
     _converters_generation: int = 0
 
     _searchescape: Optional[str] = None
-
 
     def __init__(
         self,
