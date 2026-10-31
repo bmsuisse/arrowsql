@@ -344,8 +344,10 @@ impl Connection {
 
 /// End the caller's work on a session that is about to be pooled.
 fn sanitise(client: &mut SyncClient, transaction_already_rolled_back: bool) -> PyResult<()> {
+    // A dead session has nothing left to clean up. Closing it is not a
+    // failure: `checkin` refuses it and the caller discards it.
     if client.is_connection_dead() {
-        return Err(driver_error("08S01", "Communication link failure"));
+        return Ok(());
     }
     if !transaction_already_rolled_back && client.has_active_transaction() {
         client.block_on(|c| c.rollback_transaction(None, None)).map_err(|e| tds_error(&e, "HY000"))?;
@@ -408,15 +410,17 @@ fn expiry_is_safe(expiry: i64) -> bool {
 }
 
 fn connect(py: Python<'_>, conn_str: &str, attrs: &ConnAttrs, token: Option<String>, expiry: i64) -> PyResult<Session> {
-    let (mut context, opts) = crate::connstr::build_context(conn_str, token.clone())
-        .map_err(|msg| driver_error("HY000", msg))?;
+    let (mut context, opts) = crate::connstr::build_context(conn_str, token.clone()).map_err(|msg| {
+        let state = if msg == crate::connstr::MISSING_SERVER { "08001" } else { "HY000" };
+        driver_error(state, msg)
+    })?;
     if let Some(timeout) = attrs.login_timeout.or(opts.login_timeout) {
         context.connect_timeout = timeout;
     }
     let datasource = context.data_source.clone();
     let client = py
         .detach(|| SyncClient::connect(context, &datasource))
-        .map_err(|e| tds_error(&e, "08001"))?;
+        .map_err(|e| runtime_error(&diag::login_records_for_error(&e)))?;
     Ok(Session { client, token, token_expiry: expiry, reused: false })
 }
 
