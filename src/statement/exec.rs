@@ -384,7 +384,7 @@ fn apply_result(ex: &mut Exclusive<'_>, result: Result<StatementResult, TdsError
     let Exclusive { client, state, .. } = ex;
     match result {
         Ok(StatementResult::Rows) => {
-            state.columns = Some(Arc::new(client.get_metadata().clone()));
+            state.columns = Some(state.columns_of_current(client));
             state.result_done = false;
             state.on_wire = true;
             SQL_SUCCESS

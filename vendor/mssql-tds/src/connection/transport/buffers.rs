@@ -24,6 +24,8 @@ pub(crate) struct TdsReadBuffer {
     /// this to fail a short read instead of blocking on a socket that will stay
     /// silent.
     pub(crate) end_of_message: bool,
+    /// RUST-PORT: packets framed so far; tells whether a parse had to refill.
+    pub(crate) packets_read: u64,
 }
 
 impl TdsReadBuffer {
@@ -37,6 +39,7 @@ impl TdsReadBuffer {
             pending_bytes: 0,
             pending_bytes_offset: 0,
             end_of_message: false,
+            packets_read: 0,
         }
     }
 
@@ -208,6 +211,7 @@ impl TdsReadBuffer {
     }
 
     pub(crate) fn remove_header_from_packet(&mut self, new_packet_size: usize) {
+        self.packets_read = self.packets_read.wrapping_add(1);
         self.working_buffer.copy_within(
             self.buffer_length + 8..self.buffer_length + new_packet_size,
             self.buffer_length,

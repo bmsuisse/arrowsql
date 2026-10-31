@@ -62,5 +62,16 @@ Local patches (search for `VENDOR PATCH`):
    `MSSQL_RS_BUSY_POLL=0` turns it off. Costs CPU: a short round trip keeps
    one core busy while it waits.
 
+7. Parsed COLMETADATA reuse (marked `RUST-PORT`): `receive_token_internal`
+   (`src/io/token_stream.rs`) asks the reader for a cached token before parsing
+   a COLMETADATA payload (no Always Encrypted); `NetworkTransport`
+   (`take_cached_colmetadata`, `begin_colmetadata`, `end_colmetadata`) keeps the
+   last token with the wire bytes it was parsed from and serves a
+   byte-identical payload without parsing (only when the token was read from one
+   buffer: `TdsReadBuffer::packets_read`). `Tokens::ColMetadata` now carries an
+   `Arc<ColMetadataToken>` (every consumer wrapped it in one anyway), and
+   `tds_client.rs` adds `MetadataHandle` / `TdsClient::metadata_handle` so the
+   port can recognise an unchanged result shape by identity.
+
 To drop the vendored copy, delete this directory and the `[patch]` section
 in ../../Cargo.toml once the fix is in the pinned upstream rev.

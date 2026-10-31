@@ -101,6 +101,30 @@ macro_rules! define_tds_packet_reader {
                 None
             }
 
+            /// RUST-PORT: a COLMETADATA payload (the token type byte is already
+            /// consumed) byte-identical to the previously parsed one is consumed
+            /// and its parsed token returned. Readers without a cache return
+            /// `None`.
+            #[allow(private_interfaces)]
+            fn take_cached_colmetadata(
+                &mut self,
+            ) -> Option<std::sync::Arc<crate::token::tokens::ColMetadataToken>> {
+                None
+            }
+
+            /// RUST-PORT: about to parse a COLMETADATA payload that the cache
+            /// did not have; remember where it starts.
+            fn begin_colmetadata(&mut self) {}
+
+            /// RUST-PORT: that parse finished (`None` when it failed); remember
+            /// the token if it was read from already buffered bytes.
+            #[allow(private_interfaces)]
+            fn end_colmetadata(
+                &mut self,
+                _token: Option<&std::sync::Arc<crate::token::tokens::ColMetadataToken>>,
+            ) {
+            }
+
             fn read_byte(&mut self) -> impl Future<Output = TdsResult<u8>> + Send;
             fn read_int16_big_endian(&mut self) -> impl Future<Output = TdsResult<i16>> + Send;
             fn read_int32_big_endian(&mut self) -> impl Future<Output = TdsResult<i32>> + Send;

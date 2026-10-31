@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use mssql_tds::connection::tds_client::{ResultSet, StatementResult};
+use mssql_tds::connection::tds_client::{MetadataHandle, ResultSet, StatementResult};
 use mssql_tds::datatypes::row_writer::RowWriter;
 use mssql_tds::query::metadata::ColumnMetadata;
 
@@ -68,6 +68,8 @@ pub struct StmtState {
     pub generation: u64,
     /// What `DDBCSQLDescribeCol` last returned.
     pub(super) describe_cache: Option<describe::DescribeCache>,
+    /// The columns last taken from the client and the metadata they came from.
+    last_columns: Option<(MetadataHandle, Arc<Vec<ColumnMetadata>>)>,
 }
 
 impl StmtState {
@@ -85,6 +87,24 @@ impl StmtState {
 
     pub fn columns(&self) -> Option<Arc<Vec<ColumnMetadata>>> {
         self.columns.clone()
+    }
+
+    /// The column list of the client's current result, shared with the previous
+    /// one when the server sent the same metadata (a repeated query), so
+    /// neither the copy nor the per-column comparison in `DDBCSQLDescribeCol`
+    /// is repeated.
+    pub(super) fn columns_of_current(&mut self, client: &SyncClient) -> Arc<Vec<ColumnMetadata>> {
+        let Some(handle) = client.metadata_handle() else {
+            return Arc::new(client.get_metadata().clone());
+        };
+        if let Some((last, columns)) = &self.last_columns
+            && last.same_as(&handle)
+        {
+            return Arc::clone(columns);
+        }
+        let columns = Arc::new(handle.columns().clone());
+        self.last_columns = Some((handle, Arc::clone(&columns)));
+        columns
     }
 
     /// Nothing of this statement is on the wire or queued behind the current
@@ -459,7 +479,7 @@ fn install_queued(state: &mut StmtState, next: BufferedResult) -> SqlReturn {
 fn advance_on_wire(client: &mut SyncClient, state: &mut StmtState) -> SqlReturn {
     let mut ret = match client.block_on(|c| c.advance()) {
         Ok(StatementResult::Rows) => {
-            state.columns = Some(Arc::new(client.get_metadata().clone()));
+            state.columns = Some(state.columns_of_current(client));
             state.result_done = false;
             state.diag.extend(diag::info_records(&client.take_info_messages()));
             surface_first_row_error(client, state)

@@ -2208,7 +2208,7 @@ impl TdsClient {
                     }
                     self.last_rows_affected = -1;
                     return Ok(
-                        self.apply_result_boundary(ResultBoundaryKind::RowSet(Arc::new(metadata)))
+                        self.apply_result_boundary(ResultBoundaryKind::RowSet(metadata))
                     );
                 }
                 Tokens::Done(_) | Tokens::DoneProc(_) | Tokens::DoneInProc(_) => {}
@@ -2245,7 +2245,7 @@ impl TdsClient {
                 Tokens::ColMetadata(metadata) => {
                     has_result_set = true;
                     if self
-                        .drain_result_set_rows(Arc::new(metadata), &mut errors)
+                        .drain_result_set_rows(metadata, &mut errors)
                         .await?
                     {
                         results.push(PreparedBatchRowResult {
@@ -5340,7 +5340,7 @@ impl TdsClient {
                     // row-decoding path; the trailing DONE tells us whether the
                     // batch continues.
                     let batch_ended = self
-                        .drain_result_set_rows(Arc::new(colmetadata), &mut collected_errors)
+                        .drain_result_set_rows(colmetadata, &mut collected_errors)
                         .await?;
                     if batch_ended {
                         break;
@@ -5674,7 +5674,7 @@ impl TdsClient {
                     // before the COLMETADATA, and no enclosing DONEPROC flagged),
                     // so an error-flagged DONE from here on is unpaired.
                     self.statement_error_completion_pending = false;
-                    return Ok(ResultBoundaryKind::RowSet(Arc::new(md)));
+                    return Ok(ResultBoundaryKind::RowSet(md));
                 }
                 Tokens::DoneInProc(done) | Tokens::DoneProc(done) | Tokens::Done(done) => {
                     info!(
@@ -9485,6 +9485,29 @@ impl TdsClient {
     }
 }
 
+/// RUST-PORT: identity of a result set's column metadata. Two handles are
+/// [`same_as`](Self::same_as) when they came from one parsed (or cached)
+/// COLMETADATA token, so a caller can keep what it derived from the columns.
+#[derive(Clone)]
+pub struct MetadataHandle(Arc<ColMetadataToken>);
+
+impl MetadataHandle {
+    pub fn same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub fn columns(&self) -> &Vec<ColumnMetadata> {
+        &self.0.columns
+    }
+}
+
+impl TdsClient {
+    /// RUST-PORT: the current result set's metadata handle, if it has columns.
+    pub fn metadata_handle(&self) -> Option<MetadataHandle> {
+        self.current_metadata.as_ref().map(|m| MetadataHandle(Arc::clone(m)))
+    }
+}
+
 impl ResultSet for TdsClient {
     fn get_metadata(&self) -> &Vec<ColumnMetadata> {
         // If no metadata is available, return an empty vector
@@ -11182,14 +11205,14 @@ mod tests {
     }
 
     fn empty_col_metadata() -> Tokens {
-        Tokens::ColMetadata(ColMetadataToken::default())
+        Tokens::from(ColMetadataToken::default())
     }
 
     /// A COLMETADATA token for `n` nullable `int` columns, so tests can assert
     /// the client is positioned on a real row set rather than a 0-column one.
     fn int_col_metadata(n: usize) -> Tokens {
         let columns = crate::test_client_support::int_columns(n);
-        Tokens::ColMetadata(ColMetadataToken {
+        Tokens::from(ColMetadataToken {
             column_count: u16::try_from(columns.len()).unwrap_or(u16::MAX),
             columns,
             cek_table: Vec::new(),

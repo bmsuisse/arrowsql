@@ -1192,6 +1192,26 @@ struct AttentionDrainContext {
     column_encryption_supported: bool,
 }
 
+/// RUST-PORT: wire bytes after the COLMETADATA token type byte, and the token
+/// they parse to. Parsing is a pure function of those bytes (Always Encrypted
+/// is excluded), so a result of the same shape as the previous one reuses the
+/// token instead of parsing every column definition again.
+struct ColMetadataCache {
+    bytes: Vec<u8>,
+    token: Arc<ColMetadataToken>,
+}
+
+/// Longest COLMETADATA payload that is remembered.
+const COLMETADATA_CACHE_MAX_BYTES: usize = 4096;
+
+/// A COLMETADATA token about to be parsed (its type byte is consumed): packets
+/// framed so far, bytes buffered, and a copy of the start of the payload.
+struct ColMetadataMark {
+    packets_read: u64,
+    remaining: usize,
+    bytes: Vec<u8>,
+}
+
 pub(crate) struct NetworkTransport {
     encryption: Option<NegotiatedEncryptionSetting>,
     packet_size: u32,
@@ -1224,6 +1244,10 @@ pub(crate) struct NetworkTransport {
     data_classification_version: Option<DataClassificationVersion>,
     /// Tokens drained by the transport but still needed by client state handling.
     attention_settlement: Option<Box<AttentionSettlement>>,
+    /// RUST-PORT: the last COLMETADATA token and the wire bytes it came from.
+    colmetadata_cache: Option<ColMetadataCache>,
+    /// RUST-PORT: the COLMETADATA token being parsed, see `begin_colmetadata`.
+    colmetadata_mark: Option<ColMetadataMark>,
     /// RUST-PORT: socket descriptor for busy polling, `-1` when unavailable.
     raw_fd: i32,
     /// RUST-PORT: a request was sent and its first response byte has not been
@@ -1348,6 +1372,8 @@ impl NetworkTransport {
             column_encryption_supported: false,
             data_classification_version: None,
             attention_settlement: None,
+            colmetadata_cache: None,
+            colmetadata_mark: None,
             raw_fd: -1,
             awaiting_response: false,
             first_byte_wait_ns: busy_poll::INITIAL_WAIT_NS,
@@ -2099,7 +2125,7 @@ impl NetworkTransport {
     ) -> bool {
         match token {
             Tokens::ColMetadata(metadata) => {
-                context.metadata = Some(Arc::new(metadata));
+                context.metadata = Some(metadata);
                 false
             }
             Tokens::Row(_) => false,
@@ -2346,6 +2372,43 @@ impl TdsPacketReader for NetworkTransport {
     #[inline]
     fn buffered_slice(&self) -> &[u8] {
         self.tds_read_buffer.get_buffered_slice()
+    }
+
+    fn take_cached_colmetadata(&mut self) -> Option<Arc<ColMetadataToken>> {
+        let cache = self.colmetadata_cache.as_ref()?;
+        if !self.tds_read_buffer.get_buffered_slice().starts_with(&cache.bytes) {
+            return None;
+        }
+        let token = Arc::clone(&cache.token);
+        let len = cache.bytes.len();
+        self.tds_read_buffer.consume_bytes(len).ok()?;
+        Some(token)
+    }
+
+    fn begin_colmetadata(&mut self) {
+        let buffered = self.tds_read_buffer.get_buffered_slice();
+        let kept = buffered.len().min(COLMETADATA_CACHE_MAX_BYTES);
+        self.colmetadata_mark = Some(ColMetadataMark {
+            packets_read: self.tds_read_buffer.packets_read,
+            remaining: buffered.len(),
+            bytes: buffered[..kept].to_vec(),
+        });
+    }
+
+    fn end_colmetadata(&mut self, token: Option<&Arc<ColMetadataToken>>) {
+        let Some(mark) = self.colmetadata_mark.take() else { return };
+        let Some(token) = token else { return };
+        // Only a token read entirely from bytes that were already buffered.
+        if mark.packets_read != self.tds_read_buffer.packets_read {
+            return;
+        }
+        let consumed = mark.remaining.saturating_sub(self.tds_read_buffer.get_remaining_byte_count());
+        if consumed == 0 || consumed > mark.bytes.len() {
+            return;
+        }
+        let mut bytes = mark.bytes;
+        bytes.truncate(consumed);
+        self.colmetadata_cache = Some(ColMetadataCache { bytes, token: Arc::clone(token) });
     }
 
     fn negotiated_data_classification_version(&self) -> Option<DataClassificationVersion> {

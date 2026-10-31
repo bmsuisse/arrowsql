@@ -481,7 +481,7 @@ pub fn tds_client_from_int_rows_with_trailing_tokens(
     trailing_tokens: Vec<ScriptedToken>,
 ) -> TdsClient {
     let width = rows.first().map_or(0, Vec::len);
-    let metadata = Tokens::ColMetadata(ColMetadataToken {
+    let metadata = Tokens::from(ColMetadataToken {
         column_count: u16::try_from(width).unwrap_or(u16::MAX),
         columns: int_columns(width),
         cek_table: Vec::new(),
@@ -510,7 +510,7 @@ pub fn tds_client_from_partial_int_rows(
     buffered_prefix_columns: usize,
 ) -> TdsClient {
     let width = rows.first().map_or(0, Vec::len);
-    let metadata = Tokens::ColMetadata(ColMetadataToken {
+    let metadata = Tokens::from(ColMetadataToken {
         column_count: u16::try_from(width).unwrap_or(u16::MAX),
         columns: int_columns(width),
         cek_table: Vec::new(),
@@ -561,12 +561,12 @@ pub fn tds_client_from_tokens_in_transaction(
 
 /// An empty COLMETADATA token — a row-returning result set with zero columns.
 pub fn col_metadata_empty() -> ScriptedToken {
-    ScriptedToken(Tokens::ColMetadata(ColMetadataToken::default()))
+    ScriptedToken(Tokens::from(ColMetadataToken::default()))
 }
 
 /// A COLMETADATA token for the supplied columns.
 pub fn col_metadata(columns: Vec<ColumnMetadata>) -> ScriptedToken {
-    ScriptedToken(Tokens::ColMetadata(ColMetadataToken {
+    ScriptedToken(Tokens::from(ColMetadataToken {
         column_count: u16::try_from(columns.len()).unwrap_or(u16::MAX),
         columns,
         cek_table: Vec::new(),
@@ -654,7 +654,7 @@ pub fn mixed_lob_columns(prefix_columns: usize) -> Vec<ColumnMetadata> {
 pub fn tds_client_from_mixed_lob_prefix_rows(rows: Vec<Vec<i32>>) -> TdsClient {
     let prefix_columns = rows.first().map_or(0, Vec::len);
     let columns = mixed_lob_columns(prefix_columns);
-    let metadata = Tokens::ColMetadata(ColMetadataToken {
+    let metadata = Tokens::from(ColMetadataToken {
         column_count: u16::try_from(columns.len()).unwrap_or(u16::MAX),
         columns,
         cek_table: Vec::new(),
@@ -840,7 +840,7 @@ mod tests {
 
     #[test]
     fn buffered_rows_require_column_metadata_context() {
-        let metadata = Tokens::ColMetadata(ColMetadataToken::default());
+        let metadata = Tokens::from(ColMetadataToken::default());
         let mut transport = TokenReplayTransport::with_int_rows(metadata, vec![vec![1]], None);
 
         assert!(

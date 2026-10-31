@@ -511,6 +511,21 @@ pub(crate) async fn receive_token_internal<R: TdsPacketReader + Send + Sync>(
     let token_type_byte = reader.read_byte().await?;
     let token_type: TokenType = token_type_byte.try_into()?;
     log_received_token(&token_type, token_type_byte);
+    // RUST-PORT: a result of the same shape as the previous one repeats its
+    // COLMETADATA bytes; parsing is a pure function of them (Always Encrypted
+    // adds state, so it is excluded).
+    if matches!(token_type, TokenType::ColMetadata) && !context.is_column_encryption_supported() {
+        if let Some(cached) = reader.take_cached_colmetadata() {
+            return Ok(Tokens::ColMetadata(cached));
+        }
+        reader.begin_colmetadata();
+        let parsed = dispatch_token(reader, registry, token_type, context).await;
+        reader.end_colmetadata(match &parsed {
+            Ok(Tokens::ColMetadata(token)) => Some(token),
+            _ => None,
+        });
+        return parsed;
+    }
     dispatch_token(reader, registry, token_type, context).await
 }
 

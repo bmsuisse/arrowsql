@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use std::fmt::{self, Debug};
+use std::sync::Arc;
 
 use super::{
     fed_auth_info::{FedAuthInfoToken, SspiToken},
@@ -100,7 +101,7 @@ pub(crate) enum Tokens {
     SessionState(SessionStateToken),
     Sspi(SspiToken),
     Row(RowToken),
-    ColMetadata(ColMetadataToken),
+    ColMetadata(Arc<ColMetadataToken>),
     #[allow(dead_code)] // Metadata is read once it is attached to result sets.
     DataClassification(crate::token::data_classification::DataClassificationMetadata),
     Order(OrderToken),
@@ -127,7 +128,7 @@ pub enum Tokens {
     SessionState(SessionStateToken),
     Sspi(SspiToken),
     Row(RowToken),
-    ColMetadata(ColMetadataToken),
+    ColMetadata(Arc<ColMetadataToken>),
     /// Parsed `DATACLASSIFICATION` (0xA3) metadata.
     DataClassification(crate::token::data_classification::DataClassificationMetadata),
     Order(OrderToken),
@@ -155,7 +156,11 @@ impl_from_token!(FeatureExtAckToken, FeatureExtAck);
 impl_from_token!(FedAuthInfoToken, FedAuthInfo);
 impl_from_token!(SspiToken, Sspi);
 impl_from_token!(RowToken, Row);
-impl_from_token!(ColMetadataToken, ColMetadata);
+impl From<ColMetadataToken> for Tokens {
+    fn from(token: ColMetadataToken) -> Self {
+        Tokens::ColMetadata(Arc::new(token))
+    }
+}
 impl_from_token!(OrderToken, Order);
 impl_from_token!(ReturnStatusToken, ReturnStatus);
 impl_from_token!(ReturnValueToken, ReturnValue);
