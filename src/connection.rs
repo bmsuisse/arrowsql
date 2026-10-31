@@ -49,6 +49,8 @@ pub struct ConnShared {
     autocommit: AtomicBool,
     /// The last statement failed; if it also took the transaction with it the
     /// next statement may have to be rejected (see `exec::rejects_after_abort`).
+    /// The open transaction was begun by the driver and ran nothing yet.
+    txn_untouched: AtomicBool,
     last_failed: AtomicBool,
     /// XACT_ABORT rolled the caller's transaction back and no statement told them yet.
     txn_aborted: AtomicBool,
@@ -63,6 +65,7 @@ impl ConnShared {
         Arc::new(Self {
             slot: Mutex::new(Slot { client: Some(client), owner: None }),
             autocommit: AtomicBool::new(attrs.autocommit),
+            txn_untouched: AtomicBool::new(false),
             last_failed: AtomicBool::new(false),
             txn_aborted: AtomicBool::new(false),
             connection_timeout: AtomicU32::new(attrs.connection_timeout),
@@ -77,6 +80,16 @@ impl ConnShared {
 
     pub fn mark_failed(&self) {
         self.last_failed.store(true, Ordering::Release);
+    }
+
+    pub fn set_txn_untouched(&self, untouched: bool) {
+        self.txn_untouched.store(untouched, Ordering::Release);
+    }
+
+    /// Whether the open transaction is still the driver's empty one; the
+    /// caller is about to use it.
+    pub fn take_txn_untouched(&self) -> bool {
+        self.txn_untouched.swap(false, Ordering::AcqRel)
     }
 
     pub fn mark_txn_aborted(&self) {

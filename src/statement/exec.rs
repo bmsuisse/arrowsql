@@ -53,6 +53,9 @@ pub struct Exclusive<'a> {
     pub state: &'a mut StmtState,
     pub cancel: &'a Arc<StmtCancel>,
     pub timeout: u32,
+    /// The open transaction was begun by the driver for this statement and
+    /// holds nothing of the caller's yet.
+    pub fresh_txn: bool,
 }
 
 fn options(timeout: u32, cancel: &StmtCancel) -> ExecuteOptions<'_> {
@@ -102,7 +105,14 @@ pub(crate) fn with_exclusive_wire(
         return SQL_ERROR;
     }
 
-    let ret = body(&mut Exclusive { conn, client, state: &mut state, cancel: &cancel, timeout });
+    let ret = body(&mut Exclusive {
+        conn,
+        client,
+        state: &mut state,
+        cancel: &cancel,
+        timeout,
+        fresh_txn: conn.take_txn_untouched(),
+    });
     // The server may still be sending the rollback; the next statement checks.
     if ret == SQL_ERROR && !conn.autocommit() {
         conn.mark_failed();
@@ -196,6 +206,7 @@ fn prepare_session(
     }
     // Cleared only now: a failed attempt must be retried by the next statement.
     conn.clear_applied_session(&pending);
+    conn.set_txn_untouched(begin);
     Ok(())
 }
 
