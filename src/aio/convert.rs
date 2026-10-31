@@ -36,7 +36,7 @@ impl Shape {
     }
 }
 
-/// Values of one row as a list (`Row._values`) or a tuple.
+/// Values of one row as a list (`Row._row_values`) or a tuple.
 fn row_values(py: Python<'_>, buf: &RowBuffer, row: &[crate::decode::buffer::Cell], as_tuple: bool) -> PyResult<*mut ffi::PyObject> {
     unsafe {
         let n = row.len() as ffi::Py_ssize_t;
@@ -77,9 +77,9 @@ fn make_row(py: Python<'_>, row_type: &Bound<'_, PyType>, values: *mut ffi::PyOb
     };
     let none = py.None();
     let ptr = row.as_ptr();
-    set_slot(py, ptr, intern!(py, "_values"), values.as_ptr())?;
+    set_slot(py, ptr, intern!(py, "_row_values"), values.as_ptr())?;
     set_slot(py, ptr, intern!(py, "_column_map"), shape.column_map.as_ptr())?;
-    set_slot(py, ptr, intern!(py, "_cursor"), none.as_ptr())?;
+    set_slot(py, ptr, intern!(py, "_row_cursor"), none.as_ptr())?;
     set_slot(py, ptr, intern!(py, "_column_map_lower"), shape.column_map_lower.as_ptr())?;
     set_slot(py, ptr, intern!(py, "_column_names"), shape.column_names.as_ptr())?;
     Ok(row.into_ptr())
