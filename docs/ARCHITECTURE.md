@@ -238,6 +238,16 @@ prepared handle, 2000 rows per TDS request
 result sets of every chunk but the last are buffered; the last chunk's
 stream stays on the wire like an ordinary `execute`.
 
+Write-path fast cells (`statement/batch_rpc.rs`): naive `datetime.datetime`
+cells are read through the C-level accessors, and plain `Decimal` cells are
+parsed from `str()` without `BigDecimal`. `executemany` sends `sp_execute`
+parameters positionally (no per-row `@Pn` names). Single-statement binding
+(`params::build_rpc_params`) uses the same cells via `fast_param_cell`, which
+reproduces `py_to_sql_type`'s inferred type exactly
+(`tests/common_issues/test_rs_param_fast_cells.py`). The vendored
+`execute_sp_executesql` no longer clones every parameter to build the
+declaration string.
+
 ## Pooling
 
 `pooling.rs` keeps idle `TdsClient`s per (connection string, pool key). A
