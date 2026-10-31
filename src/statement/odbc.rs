@@ -49,8 +49,11 @@ fn with_state<R: Send>(py: Python<'_>, stmt: &StmtShared, f: impl FnOnce(&mut St
 }
 
 /// [`fetch`] that avoids releasing the GIL when no wire read is needed.
-fn fetch_with_gil(py: Python<'_>, stmt: &StmtShared, n: usize, plan: FetchPlan) -> Fetched {
-    fetch_buffered(stmt, n, plan).unwrap_or_else(|| py.detach(|| fetch(stmt, n, plan)))
+fn fetch_with_gil(py: Python<'_>, stmt: &StmtShared, n: usize, plan: FetchPlan) -> PyResult<Fetched> {
+    match fetch_buffered(stmt, n, plan) {
+        Some(fetched) => Ok(fetched),
+        None => crate::runtime::detach_interruptible(py, stmt, || fetch(stmt, n, plan)),
+    }
 }
 
 /// Replace the statement's diagnostics with one driver record.
@@ -69,7 +72,7 @@ pub fn exec_direct(py: Python<'_>, statement_handle: &Bound<'_, PyAny>, query: S
     let stmt = stmt_of(statement_handle)?;
     crate::logging::debug(py, "SQLExecDirect: executing batch");
     let query = crate::params::placeholders::translate_call_escape(&query).unwrap_or(query);
-    Ok(py.detach(|| execute_command(&stmt, Command::Batch(query))))
+    crate::runtime::detach_interruptible(py, &stmt, || execute_command(&stmt, Command::Batch(query)))
 }
 
 #[pyfunction]
@@ -102,7 +105,7 @@ pub fn execute(
     {
         list.set_item(0, true)?;
     }
-    Ok(py.detach(|| execute_command(&stmt, Command::Parameterized(sql, rpc_params))))
+    crate::runtime::detach_interruptible(py, &stmt, || execute_command(&stmt, Command::Parameterized(sql, rpc_params)))
 }
 
 /// Type hints from executemany's `paramInfos`. DECIMAL/NUMERIC columns are
@@ -200,7 +203,7 @@ pub fn execute_many(
     }
     let all_null = crate::params::batch::normalize(&mut rows, &nulls)
         .map_err(|e| crate::params::conversion_error(&e))?;
-    Ok(py.detach(|| execute_batch(&stmt, sql, rows, all_null)))
+    crate::runtime::detach_interruptible(py, &stmt, || execute_batch(&stmt, sql, rows, all_null))
 }
 
 #[pyfunction]
@@ -263,7 +266,7 @@ pub fn fetch_one(
     messages: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<i16> {
     let stmt = stmt_of(StatementHandle)?;
-    let fetched = fetch_with_gil(py, &stmt, 1, FetchPlan::Exact { readahead: FETCHONE_READAHEAD });
+    let fetched = fetch_with_gil(py, &stmt, 1, FetchPlan::Exact { readahead: FETCHONE_READAHEAD })?;
     append_messages(py, messages, &fetched.info)?;
     if fetched.rows.rows > 0 {
         pyconv::extend_with_row(py, &fetched.rows, &fetched.rows.cells[..fetched.ncols], row)?;
@@ -285,7 +288,7 @@ pub fn fetch_many(
     messages: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<i16> {
     let stmt = stmt_of(StatementHandle)?;
-    let fetched = fetch_with_gil(py, &stmt, fetchSize, FetchPlan::Exact { readahead: fetchSize });
+    let fetched = fetch_with_gil(py, &stmt, fetchSize, FetchPlan::Exact { readahead: fetchSize })?;
     append_messages(py, messages, &fetched.info)?;
     pyconv::append_rows(py, &fetched.rows, fetched.ncols, rows, bulk_utf16_errors(fetched.has_lob))?;
     // An empty fetchmany at end-of-data is a success with no rows upstream.
@@ -308,9 +311,15 @@ pub fn fetch_all(
     crate::logging::debug(py, "FetchAll: fetching remaining rows");
     let mut ret = SQL_SUCCESS;
     loop {
-        let fetched = py.detach(|| fetch(&stmt, FETCHALL_BATCH_ROWS, FetchPlan::Batch));
+        let fetched = crate::runtime::detach_interruptible(py, &stmt, || fetch(&stmt, FETCHALL_BATCH_ROWS, FetchPlan::Batch))?;
         append_messages(py, messages, &fetched.info)?;
         pyconv::append_rows(py, &fetched.rows, fetched.ncols, rows, bulk_utf16_errors(fetched.has_lob))?;
+        // Batches that finish within one signal slice never trip the wait's own
+        // check; Ctrl-C between them discards the rest of the result.
+        if let Err(interrupt) = py.check_signals() {
+            close_cursor(py, &stmt, false);
+            return Err(interrupt);
+        }
         match fetched.ret {
             SQL_NO_DATA => break,
             SQL_SUCCESS_WITH_INFO => ret = SQL_SUCCESS_WITH_INFO,
@@ -336,7 +345,7 @@ pub fn fetch_scroll(
     if FetchOrientation != SQL_FETCH_NEXT {
         return Ok(reject(py, &stmt, DiagRecord::driver("HY106", "Fetch type out of range")));
     }
-    let fetched = fetch_with_gil(py, &stmt, 1, FetchPlan::Exact { readahead: FETCHONE_READAHEAD });
+    let fetched = fetch_with_gil(py, &stmt, 1, FetchPlan::Exact { readahead: FETCHONE_READAHEAD })?;
     if fetched.rows.rows > 0 && row_data.is_empty() {
         pyconv::extend_with_row(py, &fetched.rows, &fetched.rows.cells[..fetched.ncols], row_data)?;
     }
@@ -347,7 +356,7 @@ pub fn fetch_scroll(
 #[pyo3(name = "DDBCSQLMoreResults")]
 pub fn more_results(py: Python<'_>, statement_handle: &Bound<'_, PyAny>) -> PyResult<i16> {
     let stmt = stmt_of(statement_handle)?;
-    Ok(py.detach(|| next_result(&stmt)))
+    crate::runtime::detach_interruptible(py, &stmt, || next_result(&stmt))
 }
 
 #[pyfunction]

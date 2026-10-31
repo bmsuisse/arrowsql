@@ -265,3 +265,58 @@ and now uses about 1.3 us (measured with the native calls stubbed).
   binary, other types), e.g. `[(1, 42), (2, "x")]` into a SQL_VARIANT column,
   runs row by row like the DAE fallback instead of binding one type inferred
   from the first row; `rowcount` is the total. New helper `_column_mixes_kinds`.
+
+## `Authentication=` handling (`_rust_auth.py`, `connection.py`, RUST-PORT)
+
+No ODBC driver interprets the connection string here, and upstream's `auth.py`
+returns `None` for the modes ODBC "handles natively" (ServicePrincipal, Windows
+Interactive) and does not know SqlPassword / ActiveDirectoryPassword /
+ActiveDirectoryIntegrated. Those used to fall through to a SQL login with the
+client id or UPN. `auth.py` is untouched (tests/upstream/test_008_auth.py pins
+its return values); the new module `_rust_auth.py` and a `RUST-PORT` branch in
+`Connection.__init__` add the behaviour, and `src/connstr.rs` refuses to build
+a SQL login for any `Authentication` value it does not map.
+
+| `Authentication=` | Behaviour |
+| --- | --- |
+| absent, `SqlPassword` | SQL login (`Trusted_Connection=yes` still selects GSSAPI/SSPI) |
+| `ActiveDirectoryServicePrincipal` | native FedAuth; `ServicePrincipalAuth` factory (azure-identity `ClientSecretCredential`) runs when the server names the tenant (UID = client id, PWD = secret) |
+| `ActiveDirectoryPassword` | native FedAuth; `_rust_auth.make_password_token_factory` (`UsernamePasswordCredential`, Azure CLI public client id, tenant from the STS URL). Fails for MFA accounts |
+| `ActiveDirectoryInteractive`, `DeviceCode`, `Default`, `MSI` | token acquired by azure-identity before connecting (unchanged); Windows Interactive now raises `InterfaceError` instead of a SQL login |
+| `ActiveDirectoryManagedIdentity` | alias of `ActiveDirectoryMSI` |
+| `ActiveDirectoryIntegrated`, `ActiveDirectoryWorkloadIdentity` | `InterfaceError`: mssql-tds has no token source for them. Use `Trusted_Connection=yes` (Kerberos/GSSAPI) or `token_provider=` |
+| anything else | `InterfaceError` ("Invalid value specified for connection string attribute 'Authentication'") |
+
+`ddbc_bindings.Connection` takes a new optional 6th argument `fedauth_factory`
+(`(spn, sts_url, auth_method) -> UTF-16LE JWT bytes`), called from a tokio
+blocking thread during login. Without azure-identity the two federated modes
+raise `InterfaceError` naming the `[azure]` extra. Direct users of the binding
+(aio) get a `RuntimeError` for every Entra mode, never a SQL login.
+
+`ServerSPN`, `KeepAlive`, `KeepAliveInterval` and `IpAddressPreference` are now
+applied by `src/connstr.rs`. KeepAlive values are milliseconds, must be
+positive integers, and are rounded up to whole seconds (the OS option has
+second granularity). `IpAddressPreference` accepts IPv4First, IPv6First and
+UsePlatformDefault.
+
+## Cancel, Ctrl-C and aio pool semantics (A3/A4, RUST-PORT)
+
+- `cursor.py` `Cursor.cancel()` (new, pyodbc-compatible): cancels the statement
+  being executed or fetched, from another thread; a no-op when idle or closed.
+  The cancelled call raises `OperationalError` (HY008).
+- Ctrl-C (`KeyboardInterrupt`) during `execute`, `executemany`, `fetch*`,
+  `nextset` and the catalog calls cancels the statement on the server and is
+  raised within ~100 ms, leaving the connection usable. Native only
+  (`src/runtime.rs`); no Python-layer change.
+- `aio.py` `_Acquire.__aexit__`: leaving `async with pool.acquire()` now does
+  what `AsyncConnection.__aexit__` does (commit on a clean exit, roll back on
+  an exception, with `autocommit=False`), then returns the session. Before, it
+  only closed the session, which rolled back.
+- `aio.py` `connect` / `create_pool` are cancellable (`asyncio.wait_for`
+  abandons the TDS login) and `create_pool` takes
+  `max_inactive_connection_lifetime` (300 s), `max_lifetime`,
+  `acquire_timeout` and `validate_after` (30 s); `Pool.acquire(timeout=)` and
+  `Pool.acquire_timeout` raise `asyncio.TimeoutError` on expiry. A session idle
+  for `validate_after` is pinged (`SELECT 1`) before it is handed out.
+- `aio.py`: on platforms without the native hub (Windows) `connect` and
+  `create_pool` raise `NotSupportedError` instead of `AttributeError`.

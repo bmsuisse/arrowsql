@@ -103,7 +103,7 @@ workloads.py      workload matrix           datasets.py   tables + wire-size est
 payload.py        bulk-write payloads       common.py     paths, connection info, sqlcmd helper
 drivers/          adapters + registry.py
 report.py         -> RESULTS.md, results/report.html
-results/          JSONL runs, datasets.json, report.html
+results/          local JSONL runs and report.html (untracked), datasets.json
 experiments/      other work (not part of this suite)
 upstream/         Microsoft's own benchmark scripts, kept for reference
 bench_taxi.py, compare.py   superseded by run.py (see below)

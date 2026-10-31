@@ -16,10 +16,13 @@ from typing import (
     Callable,
     Iterator,
     Iterable,
+    Protocol,
 )
 import datetime
 import logging
 import pyarrow
+from . import ddbc_bindings  # RUST-PORT: Arrow result types
+from . import aio as aio  # RUST-PORT: native asyncio
 
 # GLOBALS - DB-API 2.0 Required Module Globals
 # https://www.python.org/dev/peps/pep-0249/#module-interface
@@ -286,6 +289,16 @@ class _ArrowReader:
         use_internal_transaction: bool = False,
     ) -> Dict[str, Any]: ...
 
+    # --- RUST-PORT: native Arrow fetch (zero-dependency, Arrow PyCapsule interface) ---
+    def fetchall_arrow(self, batch_size: int = 65536) -> "ddbc_bindings.ArrowTable": ...
+    def fetchmany_arrow(
+        self, size: Optional[int] = None, batch_size: int = 65536
+    ) -> "ddbc_bindings.ArrowTable": ...
+    def arrow_stream(
+        self, batch_size: int = 65536, prefetch: int = 2
+    ) -> "ddbc_bindings.ArrowStream": ...
+    # --- end RUST-PORT ---
+
 # DB-API 2.0 Connection Object
 # https://www.python.org/dev/peps/pep-0249/#connection-objects
 class Connection:
@@ -479,3 +492,46 @@ SQL_SC_SQL92_FULL: int
 SQL_SQL92_ENTRY_SQL: int
 SQL_SQL92_INTERMEDIATE_SQL: int
 SQL_SQL92_FULL_SQL: int
+
+# ---------------------------------------------------------------------------
+# RUST-PORT: APIs that do not exist in upstream mssql-python.
+# Everything below is additive; upstream's declarations above are unchanged.
+# ---------------------------------------------------------------------------
+
+# Structural type for the token_provider= connect() keyword (also re-exported
+# from upstream's mssql_python.connection).
+class TokenProvider(Protocol):
+    def get_token(self, scope: str) -> Any: ...
+
+# Partitioned parallel Arrow read. With partition_on (an integer column) and
+# partitions > 1, the range is split and read over one connection each.
+def read_arrow(
+    connection_str: str,
+    query: str,
+    partition_on: Optional[str] = None,
+    partitions: int = 1,
+    batch_size: int = 65536,
+    **connect_kwargs: Any,
+) -> "ddbc_bindings.ArrowTable": ...
+
+# Parallel Arrow bulk load. Returns rows_copied, batch_count, elapsed_time,
+# rows_per_second and workers.
+def write_arrow(
+    connection_str: str,
+    table: str,
+    source: Any,
+    workers: int = 4,
+    batch_size: int = 0,
+    table_lock: bool = True,
+    timeout: int = 30,
+    column_mappings: Optional[List[Any]] = None,
+    keep_identity: bool = False,
+    check_constraints: bool = False,
+    keep_nulls: bool = False,
+    fire_triggers: bool = False,
+    **connect_kwargs: Any,
+) -> Dict[str, Any]: ...
+
+# connect() also accepts token_provider=<TokenProvider> and auth=<str> through
+# its **kwargs. Native asyncio lives in the mssql_python.aio module
+# (connect, create_pool, AsyncConnection, AsyncCursor, Pool); Unix only.

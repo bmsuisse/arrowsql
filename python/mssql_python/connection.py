@@ -44,6 +44,7 @@ from mssql_python.exceptions import (
     NotSupportedError,
     sqlstate_to_exception,
 )
+from mssql_python import _rust_auth
 from mssql_python.auth import (
     extract_auth_type,
     process_auth_parameters,
@@ -590,6 +591,9 @@ class Connection:
         # full connect-attrs dict lazily; hence the distinct name
         # ``_token_factory``.
         self._token_factory = None
+        # RUST-PORT: (spn, sts_url, auth_method) -> JWT callable for the
+        # federated Entra flows the native login drives itself.
+        self._fedauth_factory = None
 
         # Custom token_provider= parameter — takes priority, mutually exclusive
         # with Authentication= in the connection string.
@@ -599,7 +603,14 @@ class Connection:
         # Handle Entra ID authentication if specified.
         # The parsed dict is used directly — no re-parsing of the connection string.
         elif _KEY_AUTHENTICATION in parsed_params:
+            # RUST-PORT: the native core has no ODBC driver to interpret
+            # Authentication=. Validate the value, and build the federated token
+            # factory for ServicePrincipal / ActiveDirectoryPassword (the native
+            # login calls it once the server names the tenant). See _rust_auth.
+            self._fedauth_factory = _rust_auth.prepare(parsed_params)
             auth_type = process_auth_parameters(parsed_params)
+            if not auth_type and self._fedauth_factory is None:
+                _rust_auth.reject_unhandled(parsed_params)
 
             if auth_type:
                 # Capture credential kwargs (e.g. user-assigned MSI client_id)
@@ -879,6 +890,7 @@ class Connection:
                 native_attrs,
                 self._pool_key,
                 self._token_factory,
+                self._fedauth_factory,
             )
             if self._conn.get_autocommit() != autocommit:
                 self.setautocommit(autocommit)

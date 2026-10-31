@@ -1263,6 +1263,17 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         self._clear_rownumber()
         self.closed = True
 
+    def cancel(self) -> None:
+        """
+        RUST-PORT: cancel the statement this cursor is executing or fetching
+        (pyodbc ``Cursor.cancel``, ODBC ``SQLCancel``). Safe to call from
+        another thread; the cancelled call raises ``OperationalError``
+        (HY008). A no-op when the cursor is idle or closed.
+        """
+        hstmt = self.hstmt
+        if hstmt is not None and not self.closed:
+            hstmt._cancel()  # pylint: disable=protected-access
+
     def _check_closed(self) -> None:
         """
         Check if the cursor is closed and raise an exception if it is.
@@ -3785,7 +3796,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             raise ImportError(
                 "Bulk copy requires the mssql_py_core library for this source, which is "
                 "not installed. Install the optional extra: "
-                "pip install 'mssql-python-rs-port[async-preview]'"
+                "pip install 'arrowsql[async-preview]'"
             ) from exc
 
     @classmethod

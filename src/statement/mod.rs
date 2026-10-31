@@ -168,7 +168,7 @@ pub fn not_implemented(handle: &Bound<'_, PyAny>, function: &str) -> i16 {
 /// Run `sql` as a metadata query on this statement (catalog functions).
 pub fn exec_catalog_query(py: Python<'_>, handle: &Bound<'_, PyAny>, sql: String) -> PyResult<i16> {
     let stmt = stmt_of(handle)?;
-    Ok(py.detach(|| execute_command(&stmt, Command::Batch(sql))))
+    crate::runtime::detach_interruptible(py, &stmt, || execute_command(&stmt, Command::Batch(sql)))
 }
 
 /// Run an RPC-parameterized metadata query on this statement.
@@ -179,7 +179,7 @@ pub fn exec_catalog_rpc(
     params: Vec<RpcParameter>,
 ) -> PyResult<i16> {
     let stmt = stmt_of(handle)?;
-    Ok(py.detach(|| execute_command(&stmt, Command::Typed(sql, params))))
+    crate::runtime::detach_interruptible(py, &stmt, || execute_command(&stmt, Command::Typed(sql, params)))
 }
 
 /// Replace the current result's column metadata (catalog column renames).

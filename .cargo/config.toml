@@ -1,4 +1,7 @@
-# Size flags for the release cdylib (lld, the default linker since Rust 1.90):
-# identical-code folding and packed (RELR) relative relocations. DT_RELR needs glibc >= 2.36 at load time.
+# Size flag for the release cdylib on x86_64 glibc Linux (lld, the default linker
+# since Rust 1.90): identical-code folding.
+# `-z pack-relative-relocs` (DT_RELR) is NOT set here: it needs glibc >= 2.36 at
+# load time and would break manylinux_2_28 wheels. scripts/build.sh --release and
+# scripts/wheel_size.sh add it for local builds (scripts/release_rustflags.sh).
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-Wl,--icf=all", "-C", "link-arg=-Wl,-z,pack-relative-relocs"]
+rustflags = ["-C", "link-arg=-Wl,--icf=all"]

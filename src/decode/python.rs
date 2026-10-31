@@ -6,8 +6,7 @@
 //! columns repeat a few thousand values and building a Decimal is the most
 //! expensive cell conversion.
 
-use std::collections::HashMap;
-use std::os::raw::c_int;
+use std::sync::OnceLock;
 
 use mssql_tds::datatypes::decoder::DecimalParts;
 use pyo3::ffi;
@@ -17,12 +16,79 @@ use pyo3::types::PyList;
 use super::buffer::{Cell, RowBuffer};
 use super::{binary, numeric, temporal, text};
 
-/// Most distinct Decimal values cached per column in one batch.
-const DECIMAL_CACHE_LIMIT: usize = 4096;
+/// Most slots in one column's Decimal cache.
+const DECIMAL_CACHE_SLOTS: usize = 4096;
 
-/// Decimal objects of one column, keyed by the exact value: magnitude, scale
-/// and sign. Those three fields determine the Decimal, trailing zeros included.
-type DecimalCache = HashMap<(u128, u8, bool), Py<PyAny>>;
+/// Decimal objects of one column in a direct-mapped table, keyed by the exact
+/// value: magnitude, scale and sign. Those three fields determine the Decimal,
+/// trailing zeros included. A hit compares the full key; a collision simply
+/// overwrites the slot, so the table never grows or rehashes.
+#[derive(Default)]
+struct DecimalCache {
+    slots: Vec<Option<DecimalSlot>>,
+    mask: usize,
+}
+
+struct DecimalSlot {
+    magnitude: u128,
+    scale: u8,
+    positive: bool,
+    value: Py<PyAny>,
+}
+
+impl DecimalCache {
+    /// Allocated on first use, sized for `rows` values (a power of two).
+    fn init(&mut self, rows: usize) {
+        let slots = rows.next_power_of_two().max(16).min(slot_limit());
+        self.slots = (0..slots).map(|_| None).collect();
+        self.mask = slots - 1;
+    }
+
+    /// A new reference to the cached Decimal for `parts`, building and
+    /// caching it on a miss.
+    fn get(&mut self, py: Python<'_>, parts: &DecimalParts, rows: usize) -> PyResult<*mut ffi::PyObject> {
+        if self.slots.is_empty() {
+            self.init(rows);
+        }
+        let (magnitude, scale, positive) = (parts.magnitude(), parts.scale, parts.is_positive);
+        let index = self.index(magnitude, scale, positive);
+        if let Some(slot) = &self.slots[index]
+            && slot.magnitude == magnitude
+            && slot.scale == scale
+            && slot.positive == positive
+        {
+            return Ok(slot.value.clone_ref(py).into_ptr());
+        }
+        let value = numeric::decimal_object(py, parts)?;
+        self.slots[index] = Some(DecimalSlot { magnitude, scale, positive, value: value.clone().unbind() });
+        Ok(value.into_ptr())
+    }
+
+    fn index(&self, magnitude: u128, scale: u8, positive: bool) -> usize {
+        let folded = (magnitude as u64) ^ ((magnitude >> 64) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let mixed = (folded ^ (u64::from(scale) << 56) ^ u64::from(positive)).wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+        ((mixed >> 32) as usize) & self.mask
+    }
+}
+
+/// Slots of the per-thread cache used by fetchone and other single-row paths.
+const SINGLE_ROW_SLOTS: usize = 1024;
+
+thread_local! {
+    static SINGLE_ROW_DECIMALS: std::cell::RefCell<DecimalCache> = std::cell::RefCell::new(DecimalCache::default());
+}
+
+/// Slot count cap; `MSSQL_RS_DECIMAL_CACHE_SLOTS` shrinks it so tests can
+/// force collisions.
+fn slot_limit() -> usize {
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("MSSQL_RS_DECIMAL_CACHE_SLOTS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map_or(DECIMAL_CACHE_SLOTS, |n| n.clamp(1, DECIMAL_CACHE_SLOTS).next_power_of_two())
+    })
+}
 
 /// Converts cells of one `RowBuffer` into Python objects.
 struct Converter<'a> {
@@ -30,22 +96,21 @@ struct Converter<'a> {
     errors: text::Utf16Errors,
     /// One cache per column for a batch; empty when converting single values.
     decimals: Vec<DecimalCache>,
-    /// Reused buffer that holds an ASCII UTF-16 value narrowed to one byte per
-    /// character.
-    ascii: Vec<u8>,
+    /// Rows in the batch, which sizes the Decimal caches.
+    rows: usize,
 }
 
 impl<'a> Converter<'a> {
     fn uncached(buf: &'a RowBuffer, errors: text::Utf16Errors) -> Self {
-        Self { buf, errors, decimals: Vec::new(), ascii: Vec::new() }
+        Self { buf, errors, decimals: Vec::new(), rows: 0 }
     }
 
     fn for_batch(buf: &'a RowBuffer, ncols: usize, errors: text::Utf16Errors) -> Self {
         Self {
             buf,
             errors,
-            decimals: (0..ncols).map(|_| DecimalCache::new()).collect(),
-            ascii: Vec::new(),
+            decimals: (0..ncols).map(|_| DecimalCache::default()).collect(),
+            rows: buf.rows,
         }
     }
 
@@ -76,43 +141,40 @@ impl<'a> Converter<'a> {
         })
     }
 
-    /// A new reference to the column's cached Decimal, or a fresh one.
+    /// A new reference to the column's cached Decimal, or a fresh one. Single
+    /// row fetches share one per-thread cache across columns and calls.
     fn decimal(
         &mut self,
         py: Python<'_>,
         col: usize,
         parts: &DecimalParts,
     ) -> PyResult<*mut ffi::PyObject> {
-        let Some(cache) = self.decimals.get_mut(col) else {
-            return numeric::decimal(py, parts);
-        };
-        let key = (parts.magnitude(), parts.scale, parts.is_positive);
-        if let Some(value) = cache.get(&key) {
-            return Ok(value.clone_ref(py).into_ptr());
+        match self.decimals.get_mut(col) {
+            Some(cache) => cache.get(py, parts, self.rows),
+            None => SINGLE_ROW_DECIMALS.with(|cache| cache.borrow_mut().get(py, parts, SINGLE_ROW_SLOTS)),
         }
-        let value = numeric::decimal_object(py, parts)?;
-        if cache.len() < DECIMAL_CACHE_LIMIT {
-            cache.insert(key, value.clone().unbind());
-        }
-        Ok(value.into_ptr())
     }
 
     /// UTF-16LE text. ASCII-only values, the common case, are narrowed to one
-    /// byte per character and built directly; anything else takes the codec.
+    /// byte per character straight into a new `str`; anything else takes the
+    /// codec.
     fn utf16(&mut self, py: Python<'_>, bytes: &[u8]) -> PyResult<*mut ffi::PyObject> {
-        if !is_ascii_utf16(bytes) {
+        if bytes.len() % 2 != 0 {
             return text::utf16le(py, bytes, self.errors);
         }
-        self.ascii.clear();
-        self.ascii.extend(bytes.iter().step_by(2));
-        let ptr = unsafe {
-            ffi::PyUnicode_FromKindAndData(
-                ffi::PyUnicode_1BYTE_KIND as c_int,
-                self.ascii.as_ptr().cast(),
-                self.ascii.len() as ffi::Py_ssize_t,
-            )
-        };
-        if ptr.is_null() { Err(PyErr::fetch(py)) } else { Ok(ptr) }
+        unsafe {
+            let ptr = ffi::PyUnicode_New((bytes.len() / 2) as ffi::Py_ssize_t, 127);
+            if ptr.is_null() {
+                return Err(PyErr::fetch(py));
+            }
+            let dst = std::slice::from_raw_parts_mut(ffi::PyUnicode_1BYTE_DATA(ptr), bytes.len() / 2);
+            if narrow_ascii_utf16(bytes, dst) {
+                Ok(ptr)
+            } else {
+                ffi::Py_DecRef(ptr);
+                text::utf16le(py, bytes, self.errors)
+            }
+        }
     }
 
     /// Build one `list` for a row. Its items come from `row`, whose cells are
@@ -134,9 +196,36 @@ impl<'a> Converter<'a> {
     }
 }
 
+/// High bytes and bit 7 of the low byte of four UTF-16LE units.
+const NON_ASCII_MASK: u64 = 0xFF80_FF80_FF80_FF80;
+
+/// Narrow UTF-16LE `src` into `dst` (one byte per unit) while checking that
+/// every unit is ASCII. Returns false at the first non-ASCII unit, leaving
+/// `dst` partly written. `src` must hold exactly `2 * dst.len()` bytes.
+fn narrow_ascii_utf16(src: &[u8], dst: &mut [u8]) -> bool {
+    debug_assert_eq!(src.len(), dst.len() * 2);
+    let mut chunks = src.chunks_exact(8);
+    let mut out = dst.chunks_exact_mut(4);
+    for (chunk, o) in (&mut chunks).zip(&mut out) {
+        let word = u64::from_le_bytes(chunk.try_into().unwrap());
+        if word & NON_ASCII_MASK != 0 {
+            return false;
+        }
+        o.copy_from_slice(&[chunk[0], chunk[2], chunk[4], chunk[6]]);
+    }
+    for (unit, o) in chunks.remainder().chunks_exact(2).zip(out.into_remainder()) {
+        if unit[0] >= 0x80 || unit[1] != 0 {
+            return false;
+        }
+        *o = unit[0];
+    }
+    true
+}
+
 /// True when `bytes` is UTF-16LE in which every code unit is ASCII.
+#[cfg(test)]
 fn is_ascii_utf16(bytes: &[u8]) -> bool {
-    bytes.len() % 2 == 0 && bytes.chunks_exact(2).all(|unit| unit[0] < 0x80 && unit[1] == 0)
+    bytes.len() % 2 == 0 && narrow_ascii_utf16(bytes, &mut vec![0; bytes.len() / 2])
 }
 
 /// Convert one cell without any batch cache.
@@ -189,7 +278,7 @@ pub fn extend_with_row(
 
 #[cfg(test)]
 mod tests {
-    use super::is_ascii_utf16;
+    use super::{is_ascii_utf16, narrow_ascii_utf16};
 
     #[test]
     fn ascii_utf16_detection() {
@@ -198,5 +287,30 @@ mod tests {
         assert!(!is_ascii_utf16(&[0xE9, 0]), "U+00E9 is not ASCII");
         assert!(!is_ascii_utf16(&[b'a', 1]), "U+0161 is not ASCII");
         assert!(!is_ascii_utf16(&[b'a']), "odd length is malformed");
+    }
+
+    fn utf16(s: &[u16]) -> Vec<u8> {
+        s.iter().flat_map(|u| u.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn ascii_utf16_word_loop_edges() {
+        // Every length around the 4-unit word boundary, with the bad unit at
+        // every position and with each kind of non-ASCII value.
+        for len in 0..=13usize {
+            let ok: Vec<u16> = (0..len).map(|i| 0x20 + i as u16).collect();
+            let mut dst = vec![0u8; len];
+            assert!(narrow_ascii_utf16(&utf16(&ok), &mut dst));
+            assert_eq!(dst, ok.iter().map(|u| *u as u8).collect::<Vec<_>>());
+            for pos in 0..len {
+                for bad in [0x80u16, 0xE9, 0x100, 0x161, 0xFF00, 0xD800, 0xDC00] {
+                    let mut units = ok.clone();
+                    units[pos] = bad;
+                    assert!(!is_ascii_utf16(&utf16(&units)), "len {len} pos {pos} unit {bad:#x}");
+                }
+            }
+        }
+        assert!(is_ascii_utf16(&utf16(&[0, 0x7F, 0, 0x7F, 0x7F])), "NUL and DEL are ASCII");
+        assert!(!is_ascii_utf16(&[b'a', 0, b'b', 0, b'c']), "odd length with a word");
     }
 }

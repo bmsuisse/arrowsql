@@ -248,10 +248,12 @@ def _writes_small():
 
 
 def _writes_bulk():
-    def make(kind, size_label, n_full, n_quick, layout, tablock, batch, batch_label):
+    def make(kind, size_label, n_full, n_quick, layout, tablock, batch, batch_label, stream=False):
         base = f"write.bulk_{kind}_{size_label}.{layout}.{'tablock' if tablock else 'notablock'}"
         if batch_label:
             base += f".{batch_label}"
+        if stream:
+            base += ".stream"
 
         def n_of(ctx):
             return n_quick if ctx.quick else n_full
@@ -266,8 +268,8 @@ def _writes_bulk():
             d.prepare_payload(p)
             if d.name != "bcp" and kind == "arrow":
                 p.arrow()  # parquet read + casts happen outside the timed region
-            if d.name != "bcp" and kind == "rows":
-                p.arrow()
+            if d.name != "bcp" and kind == "rows" and not stream:
+                p.materialize_rows()  # Arrow -> tuple boxing stays out of the timed region (bcp stages a file)
 
         def run(d, ctx):
             p = ctx.payload(n_of(ctx))
@@ -285,7 +287,8 @@ def _writes_bulk():
 
         req = {"bulk_rows" if kind == "rows" else "bulk_arrow"} | ({"tablock"} if tablock else set())
         _add(Workload(base, "write", frozenset(req), run, dataset="taxi_all", setup=setup, prepare=prepare,
-                      verify=verify, teardown=teardown, repeats=3, quick_repeats=2))
+                      verify=verify, teardown=teardown, repeats=3, quick_repeats=2,
+                      note="rows boxed lazily inside the timed call (old behaviour)" if stream else ""))
 
     D = BULK_DEFAULT_BATCH
     for kind in ("rows", "arrow"):
@@ -301,8 +304,19 @@ def _writes_bulk():
             make(kind, main_label, n_full, n_quick, layout, tablock, batch, bl)
         if kind == "rows":
             make("rows", "1m", 1_000_000, 250_000, "heap", True, D, "")
+            make("rows", "100k", 100_000, 100_000, "heap", True, D, "", stream=True)
+            make("rows", "1m", 1_000_000, 250_000, "heap", True, D, "", stream=True)
         else:
             make("arrow", "3m", 2_964_624, 750_000, "heap", True, D, "")
+
+
+def _bcp_fixed_cost():
+    def run(d, ctx):
+        return d.noop()
+
+    _add(Workload("write.bcp_fixed_cost.noop", "write", frozenset({"export"}), run, unit="calls",
+                  repeats=10, quick_repeats=5,
+                  note="one `bcp SELECT 1 queryout`: podman exec + process start + login; subtract from bcp loads"))
 
 
 _read_modes()
@@ -310,6 +324,7 @@ _read_small()
 _latency()
 _writes_small()
 _writes_bulk()
+_bcp_fixed_cost()
 
 
 # ------------------------------------------------- PARALLEL WRITE (rust_port only)

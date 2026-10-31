@@ -7,7 +7,9 @@
 
 use std::collections::HashMap;
 
-use mssql_tds::connection::client_context::{ClientContext, TdsAuthenticationMethod};
+use mssql_tds::connection::client_context::{
+    CloneableEntraIdTokenFactory, ClientContext, IPAddressPreference, TdsAuthenticationMethod,
+};
 use mssql_tds::core::EncryptionSetting;
 use mssql_tds::message::login_options::ApplicationIntent;
 
@@ -89,6 +91,70 @@ pub fn build_context(
     conn_str: &str,
     access_token: Option<String>,
 ) -> Result<(ClientContext, ConnOptions), String> {
+    build_context_with(conn_str, access_token, None)
+}
+
+/// What an `Authentication=` value asks of the driver.
+#[derive(Debug, PartialEq, Eq)]
+enum AuthKeyword {
+    /// Absent, empty or `SqlPassword`: SQL login (or SSPI/Kerberos when
+    /// `Trusted_Connection` says so).
+    Sql,
+    /// Entra ID flow whose token factory is told the tenant by the server
+    /// during login (`ActiveDirectoryPassword` / `ActiveDirectoryServicePrincipal`).
+    Federated(TdsAuthenticationMethod),
+    /// A mode that needs a token the caller acquires up front.
+    Token(&'static str),
+    /// Known to ODBC, not available here.
+    Unsupported(&'static str),
+}
+
+fn auth_keyword(value: &str) -> Result<AuthKeyword, String> {
+    Ok(match value.trim().to_ascii_lowercase().as_str() {
+        "" | "sqlpassword" => AuthKeyword::Sql,
+        "activedirectorypassword" => AuthKeyword::Federated(TdsAuthenticationMethod::ActiveDirectoryPassword),
+        "activedirectoryserviceprincipal" => {
+            AuthKeyword::Federated(TdsAuthenticationMethod::ActiveDirectoryServicePrincipal)
+        }
+        "activedirectoryinteractive" => AuthKeyword::Token("ActiveDirectoryInteractive"),
+        "activedirectorydevicecode" => AuthKeyword::Token("ActiveDirectoryDeviceCode"),
+        "activedirectorydefault" => AuthKeyword::Token("ActiveDirectoryDefault"),
+        "activedirectorymsi" => AuthKeyword::Token("ActiveDirectoryMSI"),
+        "activedirectorymanagedidentity" => AuthKeyword::Token("ActiveDirectoryManagedIdentity"),
+        "activedirectoryintegrated" => AuthKeyword::Unsupported(
+            "Authentication=ActiveDirectoryIntegrated is not supported; for Kerberos/GSSAPI \
+             integrated login use Trusted_Connection=yes, or pass a token via token_provider=",
+        ),
+        "activedirectoryworkloadidentity" => AuthKeyword::Unsupported(
+            "Authentication=ActiveDirectoryWorkloadIdentity is not supported; \
+             pass a token via token_provider=",
+        ),
+        _ => {
+            return Err(format!(
+                "Invalid value specified for connection string attribute 'Authentication': {value}"
+            ));
+        }
+    })
+}
+
+/// A positive integer keyword (ODBC rejects 0 and non-numeric values).
+fn positive_u32(map: &HashMap<String, String>, key: &str, label: &str) -> Result<Option<u32>, String> {
+    let Some(raw) = map.get(key) else { return Ok(None) };
+    match raw.trim().parse::<u32>() {
+        Ok(n) if n > 0 => Ok(Some(n)),
+        _ => Err(format!("Invalid value specified for connection string attribute '{label}': {raw}")),
+    }
+}
+
+/// Like [`build_context`]; `federated` is the token factory used for the
+/// `ActiveDirectoryPassword` / `ActiveDirectoryServicePrincipal` flows. Every
+/// `Authentication=` value either maps to a login method or is an error: it
+/// never degrades to a SQL login.
+pub fn build_context_with(
+    conn_str: &str,
+    access_token: Option<String>,
+    federated: Option<Box<dyn CloneableEntraIdTokenFactory>>,
+) -> Result<(ClientContext, ConnOptions), String> {
     let map = parse(conn_str);
     let server = first(&map, &["server", "address", "addr", "data source"])
         .ok_or_else(|| MISSING_SERVER.to_string())?
@@ -167,11 +233,60 @@ pub fn build_context(
         ctx.connect_retry_interval = n;
     }
 
+    if let Some(spn) = first(&map, &["serverspn"]).filter(|v| !v.is_empty()) {
+        ctx.server_spn = Some(spn.to_string());
+    }
+    // ODBC: both are positive millisecond counts. TCP_KEEPIDLE/TCP_KEEPINTVL
+    // take whole seconds (a sub-second value truncates to 0 and the socket
+    // setup fails with EINVAL), so round up to the next second.
+    let round_up_secs = |ms: u32| ms.div_ceil(1000).saturating_mul(1000);
+    if let Some(n) = positive_u32(&map, "keepalive", "KeepAlive")? {
+        ctx.keep_alive_in_ms = round_up_secs(n);
+    }
+    if let Some(n) = positive_u32(&map, "keepaliveinterval", "KeepAliveInterval")? {
+        ctx.keep_alive_interval_in_ms = round_up_secs(n);
+    }
+    if let Some(pref) = first(&map, &["ipaddresspreference"]) {
+        ctx.ipaddress_preference = match pref.to_ascii_lowercase().as_str() {
+            "ipv4first" => IPAddressPreference::IPv4First,
+            "ipv6first" => IPAddressPreference::IPv6First,
+            "useplatformdefault" => {
+                IPAddressPreference::UsePlatformDefault
+            }
+            _ => {
+                return Err(format!(
+                    "Invalid value specified for connection string attribute 'IpAddressPreference': {pref}"
+                ));
+            }
+        };
+    }
+
+    let keyword = auth_keyword(first(&map, &["authentication"]).unwrap_or(""))?;
     if let Some(token) = access_token {
         ctx.tds_authentication_method = TdsAuthenticationMethod::AccessToken;
         ctx.access_token = Some(token);
         ctx.user_name.clear();
         ctx.password.clear();
+    } else if let AuthKeyword::Federated(method) = keyword {
+        let factory = federated.ok_or_else(|| {
+            format!(
+                "Authentication={} needs a token factory; connect through mssql_python.connect \
+                 (requires azure-identity: pip install arrowsql[azure])",
+                first(&map, &["authentication"]).unwrap_or_default()
+            )
+        })?;
+        // The identity travels in the token, never in LOGIN7.
+        ctx.user_name.clear();
+        ctx.password.clear();
+        ctx.auth_method_map.insert(method.clone(), factory);
+        ctx.tds_authentication_method = method;
+    } else if let AuthKeyword::Token(name) = keyword {
+        return Err(format!(
+            "Authentication={name} needs an access token acquired before connecting \
+             (requires azure-identity: pip install arrowsql[azure])"
+        ));
+    } else if let AuthKeyword::Unsupported(why) = keyword {
+        return Err(why.to_string());
     } else if first(&map, &["trusted_connection", "integrated security"]).is_some_and(|v| {
         yes(v) || v.eq_ignore_ascii_case("sspi")
     }) {
@@ -220,6 +335,34 @@ mod tests {
         assert_eq!(ctx.packet_size, DEFAULT_PACKET_SIZE);
         let (ctx, _) = build_context("Server=h;Packet Size=4096;", None).unwrap();
         assert_eq!(ctx.packet_size, 4096);
+    }
+
+    #[test]
+    fn authentication_never_degrades_to_sql_login() {
+        for bad in ["Authentication=Bogus", "Authentication=ActiveDirectoryIntegrated", "Authentication=ActiveDirectoryInteractive", "Authentication=ActiveDirectoryServicePrincipal;UID=a;PWD=b"] {
+            assert!(build_context(&format!("Server=h;{bad}"), None).is_err(), "{bad}");
+        }
+        let (ctx, _) = build_context("Server=h;Authentication=SqlPassword;UID=u;PWD=p", None).unwrap();
+        assert_eq!(ctx.tds_authentication_method, TdsAuthenticationMethod::Password);
+        assert_eq!(ctx.user_name, "u");
+        let (ctx, _) = build_context("Server=h;Authentication=ActiveDirectoryMSI;UID=u", Some("t".into())).unwrap();
+        assert_eq!(ctx.tds_authentication_method, TdsAuthenticationMethod::AccessToken);
+    }
+
+    #[test]
+    fn network_keywords_are_applied_and_validated() {
+        let (ctx, _) = build_context(
+            "Server=h;ServerSPN=MSSQLSvc/h:1433;KeepAlive=5000;KeepAliveInterval=250;IpAddressPreference=IPv6First",
+            None,
+        )
+        .unwrap();
+        assert_eq!(ctx.server_spn.as_deref(), Some("MSSQLSvc/h:1433"));
+        assert_eq!(ctx.keep_alive_in_ms, 5000);
+        assert_eq!(ctx.keep_alive_interval_in_ms, 1000, "rounded up to whole seconds");
+        assert!(ctx.ipaddress_preference == IPAddressPreference::IPv6First);
+        for bad in ["KeepAlive=0", "KeepAlive=x", "KeepAliveInterval=-1", "IpAddressPreference=none"] {
+            assert!(build_context(&format!("Server=h;{bad}"), None).is_err(), "{bad}");
+        }
     }
 
     #[test]

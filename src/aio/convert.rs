@@ -156,7 +156,7 @@ impl RowBatch {
             return None;
         }
         let rest = if *pos == 0 { std::mem::take(buf) } else { buf.slice_rows(self.ncols, *pos, remaining) };
-        *buf = RowBuffer::new();
+        buf.clear();
         *pos = 0;
         Some((rest, self.ncols))
     }
@@ -173,7 +173,7 @@ impl RowBatch {
         let list = rows_range(py, buf, self.ncols, *pos, count, Some(&self.shape), self.as_tuple)?;
         *pos += count;
         if *pos == buf.rows {
-            *buf = RowBuffer::new();
+            buf.clear();
             *pos = 0;
         }
         Ok(list)

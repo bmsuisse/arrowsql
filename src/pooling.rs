@@ -25,6 +25,8 @@ use parking_lot::Mutex;
 use pyo3::prelude::*;
 
 
+/// Upper bound on the checkin liveness probe.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_MAX_SIZE: usize = 100;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -35,6 +37,9 @@ pub struct IdleClient {
     pub token: Option<String>,
     /// Token expiry as Unix seconds; 0 when the factory reported none.
     pub token_expiry: i64,
+    /// `SQL_ATTR_CONNECTION_TIMEOUT` the session was returned with; it
+    /// belongs to the physical connection, so the next borrower inherits it.
+    pub connection_timeout: u32,
 }
 
 impl IdleClient {
@@ -207,7 +212,12 @@ pub fn evict_with_token(lease: &Lease, token: &str) {
 /// (pooling disabled, new generation, dead session, open batch); the caller
 /// then closes it, and `lease` frees the slot on drop.
 pub fn checkin(mut lease: Lease, mut entry: IdleClient) -> Option<SyncClient> {
-    verify_alive(&mut entry.client);
+    if !verify_alive(&mut entry.client) {
+        // Unanswered: the stream may sit mid-request, so even a polite close
+        // could block on the same dead socket. Dropping closes the socket.
+        drop(entry);
+        return None;
+    }
     let mut manager = MANAGER.lock();
     let poolable = manager.accepting
         && manager.generation == lease.generation
@@ -228,15 +238,22 @@ pub fn checkin(mut lease: Lease, mut entry: IdleClient) -> Option<SyncClient> {
 /// fail the next borrower. Failure marks the session dead, so `checkin`
 /// refuses it. The request is a SET, which never opens an implicit
 /// transaction (a SELECT would, under IMPLICIT_TRANSACTIONS). Runs outside
-/// the pool lock.
-fn verify_alive(client: &mut SyncClient) {
+/// the pool lock. The probe is bounded by [`VERIFY_TIMEOUT`]: a half-open
+/// socket (peer gone without a FIN) would otherwise stall `close()` until TCP
+/// keepalive gives up. Returns false when the probe timed out.
+fn verify_alive(client: &mut SyncClient) -> bool {
     if client.is_connection_dead() || client.has_open_batch() {
-        return;
+        return true;
     }
-    let _ = client.block_on(|c| async move {
-        c.execute("SET NOEXEC OFF".to_string(), ()).await?;
-        c.close_query().await
-    });
+    client
+        .block_on(|c| async move {
+            tokio::time::timeout(VERIFY_TIMEOUT, async move {
+                c.execute("SET NOEXEC OFF".to_string(), ()).await?;
+                c.close_query().await
+            })
+            .await
+        })
+        .is_ok()
 }
 
 /// Close sessions politely (outside any lock).
@@ -258,14 +275,18 @@ fn reset_pools(manager: &mut Manager) -> Vec<SyncClient> {
 /// Runs in a forked child. The idle sockets belong to the parent, so they are
 /// leaked, not closed: a close would write to the parent's live connection.
 pub fn forget_after_fork() {
-    // Only the forking thread survives in the child; a lock another parent
-    // thread held at fork time would never be released.
+    // Only the forking thread survives in the child, so the lock may be held
+    // by a thread that no longer exists and the map may have been caught
+    // mid-mutation (a torn HashMap). Nothing may read or iterate it: forget
+    // the whole map (leaking its sockets, which belong to the parent) and
+    // start from an empty one.
     if MANAGER.is_locked() {
         // SAFETY: its owner thread does not exist in this process.
         unsafe { MANAGER.force_unlock() };
     }
-    let inherited = reset_pools(&mut MANAGER.lock());
-    std::mem::forget(inherited);
+    let mut manager = MANAGER.lock();
+    manager.generation += 1;
+    std::mem::forget(std::mem::take(&mut manager.pools));
 }
 
 #[pyfunction]

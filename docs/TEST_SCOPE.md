@@ -11,8 +11,14 @@ targets.
 
 Within the targets, tests of ODBC/C++/packaging internals that have no meaning
 for a native-TDS Rust core are excluded, each with a reason, in
-tests/upstream_excluded.txt (filled in as triage proceeds; every entry needs a
-one-line justification).
+tests/upstream_excluded.txt (every entry needs a one-line justification). Entries
+start with INAPPLICABLE (ODBC/C++/upstream-CI internals) or GAP (a real behavioural
+difference). Some entries are not baseline targets at all; they record why the test
+fails on the port so it is not mistaken for a regression. Current GAP entry: pool
+checkout validation timeout (GH #854).
+
+`scripts/check_upstream_baseline.py` runs the suite, skips the excluded entries and
+fails if any baseline test did not pass. CI runs it.
 
 ## Common-issues suite (tests/common_issues)
 
@@ -24,3 +30,8 @@ marked `upstream_bug` assert correct behavior that upstream gets wrong
 
     source scripts/env.sh <your-id>
     cd tests/upstream && ../../.venv/bin/python -m pytest -q --timeout 120 <file>
+
+Anywhere else (this is what CI does): set `DB_CONNECTION_STRING` and run
+
+    python -m pytest -q --timeout 120 tests/common_issues tests/port
+    python scripts/check_upstream_baseline.py

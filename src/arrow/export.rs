@@ -157,6 +157,8 @@ struct StreamCore {
     stmt: Arc<StmtShared>,
     generation: u64,
     rx: Mutex<Option<Receiver<BatchResult>>>,
+    /// `close()` was called: readers end, `rx` may still be held by one.
+    closing: AtomicBool,
     producer: Mutex<Option<JoinHandle<()>>>,
     /// An exported C stream exists that hasn't been released yet.
     exporting: AtomicBool,
@@ -174,20 +176,29 @@ struct StreamCore {
 impl StreamCore {
     /// Stop the producer and give the connection back: unread rows of the
     /// result are discarded unless it was read to the end.
+    ///
+    /// Never waits for a reader: one parked in `recv` holds the `rx` lock, so
+    /// the producer is interrupted first and the reader wakes once it is gone.
     fn shutdown(&self) {
-        drop(self.rx.lock().unwrap().take()); // a blocked producer's send fails
+        self.closing.store(true, Ordering::Release);
         if let Some(handle) = self.producer.lock().unwrap().take() {
-            // A producer blocked inside a read (e.g. on a row lock) never sees
-            // the closed channel: interrupt its read until it is gone.
             while !handle.is_finished() {
+                // A producer blocked in `send` wakes when the receiver goes;
+                // one blocked inside a read (e.g. on a row lock) never sees the
+                // closed channel: interrupt its read until it is gone.
+                if let Ok(mut rx) = self.rx.try_lock() {
+                    drop(rx.take());
+                }
                 self.stmt.cancel_execution();
                 std::thread::sleep(Duration::from_millis(5));
             }
             let _ = handle.join();
+            if !self.exhausted.load(Ordering::Acquire) {
+                statement::abandon_result(&self.stmt, self.generation);
+            }
         }
-        if !self.exhausted.load(Ordering::Acquire) {
-            statement::abandon_result(&self.stmt, self.generation);
-        }
+        // The producer is gone, so a reader in `recv` has returned.
+        drop(self.rx.lock().unwrap().take());
     }
 }
 
@@ -243,8 +254,12 @@ impl Iterator for ExportReader {
     fn next(&mut self) -> Option<Self::Item> {
         self.pulled = true;
         self.core.consumed.store(true, Ordering::Release);
+        if self.core.closing.load(Ordering::Acquire) {
+            return None;
+        }
         let rx = self.core.rx.lock().unwrap();
         match rx.as_ref()?.recv() {
+            _ if self.core.closing.load(Ordering::Acquire) => None,
             Ok(Ok(batch)) => Some(Ok(batch)),
             Ok(Err(message)) => Some(Err(ArrowError::ExternalError(message.into()))),
             Err(_) => None, // producer finished
@@ -297,6 +312,7 @@ impl ArrowStream {
                 stmt,
                 generation,
                 rx: Mutex::new(Some(rx)),
+                closing: AtomicBool::new(false),
                 producer: Mutex::new(Some(producer)),
                 exporting: AtomicBool::new(false),
                 consumed: AtomicBool::new(false),
@@ -321,7 +337,7 @@ impl ArrowStream {
 
     #[getter]
     fn closed(&self) -> bool {
-        self.core.rx.lock().unwrap().is_none()
+        self.core.closing.load(Ordering::Acquire)
     }
 
     /// Stop streaming and discard unread rows; the cursor stays usable.
@@ -368,7 +384,7 @@ impl ArrowStream {
 }
 
 fn take_reader(core: &Arc<StreamCore>) -> PyResult<ExportReader> {
-    if core.rx.lock().unwrap().is_none() {
+    if core.closing.load(Ordering::Acquire) {
         return Err(PyValueError::new_err("ArrowStream is closed"));
     }
     if core.consumed.load(Ordering::Acquire) {

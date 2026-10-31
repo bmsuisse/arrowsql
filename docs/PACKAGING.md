@@ -9,7 +9,22 @@ brings only the compiled `ddbc_bindings` extension and the vendored
 | (none) | nothing | `connect()`, the DB-API cursor/row path, `aio`, `read_arrow` on the native Arrow stream |
 | `arrow` | `pyarrow>=14` | `cursor.arrow()`, `arrow_batch()`, `arrow_reader()` (upstream API surface) |
 | `azure` | `azure-identity` | `auth=` / `token_provider=` with azure-identity credentials |
-| `async-preview` | `mssql-python-rs==0.3.0` (Microsoft `mssql_py_core`, ~30 MB) | `bulkcopy()`, `bulkcopy_arrow()`, upstream `async_query` preview |
+| `async-preview` | `mssql-python-rs==0.4.0` (Microsoft `mssql_py_core`, ~30 MB) | `bulkcopy()`, `bulkcopy_arrow()`, upstream `async_query` preview |
+
+## Wheels, sdist and versions
+
+`.github/workflows/wheels.yml` builds, as workflow artifacts only (no PyPI step; a
+trusted-publishing job is left commented out): manylinux_2_28 and musllinux_1_2 for
+x86_64 and aarch64, macOS x86_64 and arm64, Windows x64, for CPython 3.10 to
+3.15, plus 3.14t and 3.15t, and an sdist. Untested outside Linux x86_64; see README "Support".
+
+The sdist needs `vendor/mssql-tds` (a `[patch]` path dependency, which maturin does
+not collect on its own), so `[tool.maturin] include` adds it. `cargo metadata
+--locked` succeeds on an unpacked sdist.
+
+Versions: distribution 0.1.0 (`pyproject.toml`), `mssql_python.__version__` 1.16.0
+(the vendored upstream release), `ddbc_bindings.__version__` 1.0.0 (binding
+contract). See `CHANGELOG.md`.
 
 ## Import hygiene
 
@@ -255,9 +270,11 @@ installed 7,716 KiB (was 8,008), `.so` 7,016 KiB. The 3.0 MB / 6 MB lean targets
 not met: they were only reachable with "s" on the hot path, which costs 4-6% on reads.
 Speed is the primary goal, so the targets give way.
 
-Glibc: `.cargo/config.toml` passes `-z pack-relative-relocs` (DT_RELR), which
-needs glibc >= 2.36 at load time. A `manylinux_2_28` build must drop that flag
-(there is no CI wheel build yet).
+Glibc: `-z pack-relative-relocs` (DT_RELR) needs glibc >= 2.36 at load time, so
+it is not in `.cargo/config.toml` any more. `scripts/build.sh --release` and
+`scripts/wheel_size.sh` add it through `scripts/release_rustflags.sh`
+(`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS`); the CI wheel build
+(`.github/workflows/wheels.yml`, manylinux_2_28) does not, and keeps only `--icf=all`.
 
 Result of the lane (opt-level "s" everywhere): the wheel is 2.94 MB (target 3.0 MB, met). Installed is 6,176 KiB
 (target 6 MB, missed by about 3%, 176 KiB over 6,000 KiB). The `.so` is 5.6 MB
@@ -296,15 +313,11 @@ A package override on `ddbc_bindings` makes Cargo ignore
 Setting `[tool.maturin] strip = true` fixes that if a per-package override on
 `ddbc_bindings` is ever added.
 
-`.cargo/config.toml` only applies to `x86_64-unknown-linux-gnu`. Two
-requirements:
-
-* `--icf=all` needs lld. Rust 1.90 and later use it by default on this target.
-  With an older toolchain the link fails (GNU ld has no `--icf`).
-* `-z pack-relative-relocs` (DT_RELR) needs glibc 2.36 or later at load time.
-  The wheel built here is already tagged `manylinux_2_38`. A build in a
-  `manylinux_2_28` container must drop that flag, or auditwheel and the loader
-  reject the wheel.
+`.cargo/config.toml` only applies to `x86_64-unknown-linux-gnu` and sets
+`--icf=all`, which needs lld (Rust 1.90 and later use it by default on this
+target; with an older toolchain the link fails because GNU ld has no `--icf`).
+`-z pack-relative-relocs` is added only by the local release scripts, because a
+`manylinux_2_28` build must not carry DT_RELR.
 
 Remaining ways to cut the last 176 KiB, none taken: std's backtrace code
 (gimli, addr2line, miniz_oxide, rustc_demangle, about 180 KB) can only be
