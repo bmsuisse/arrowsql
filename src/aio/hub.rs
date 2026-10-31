@@ -78,6 +78,8 @@ impl HubInner {
 #[pyclass(name = "AioHub", module = "ddbc_bindings", frozen)]
 pub struct Hub {
     pub inner: Arc<HubInner>,
+    /// A `weakref.ref` to the loop: the loop owns the hub (via add_reader), so a
+    /// strong reference here would keep every closed loop alive.
     event_loop: Py<PyAny>,
     shape_factory: Py<PyAny>,
     /// Pending futures and whether their rows are plain tuples.
@@ -88,7 +90,11 @@ pub struct Hub {
 impl Hub {
     /// Create a loop future and register it under a new request id.
     pub fn register<'py>(&self, py: Python<'py>, as_tuple: bool) -> PyResult<(u64, Bound<'py, PyAny>)> {
-        let future = self.event_loop.bind(py).call_method0(intern!(py, "create_future"))?;
+        let event_loop = self.event_loop.bind(py).call0()?;
+        if event_loop.is_none() {
+            return Err(PyRuntimeError::new_err("The event loop is gone"));
+        }
+        let future = event_loop.call_method0(intern!(py, "create_future"))?;
         let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
         self.futures.lock().insert(id, (future.clone().unbind(), as_tuple));
         Ok((id, future))

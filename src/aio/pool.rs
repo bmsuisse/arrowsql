@@ -16,9 +16,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::diag::DiagRecord;
 
-use super::connection::{ConnCore, build_command, open_session, query_mode, spawn_op};
+use super::connection::{CancelMap, ConnCore, build_command, open_session, query_mode, spawn_op};
 use super::hub::{Hub, Outcome, QueryMode, to_exception};
-use super::session::{Command, Diag, OpCancel, Session};
+use super::session::{Command, Diag, OpCancel, Session, cancelled};
 
 pub struct PoolInner {
     conn_str: String,
@@ -31,6 +31,8 @@ pub struct PoolInner {
     /// Reset session state (temp tables, SET options, ...) between users.
     reset: bool,
     closed: AtomicBool,
+    /// In-flight pool requests, so `AioPool.cancel` can reach them.
+    cancels: Arc<CancelMap>,
 }
 
 fn pool_closed() -> Diag {
@@ -38,15 +40,26 @@ fn pool_closed() -> Diag {
 }
 
 impl PoolInner {
-    async fn checkout(&self) -> Result<(Session, OwnedSemaphorePermit), Diag> {
-        let permit = self.slots.clone().acquire_owned().await.map_err(|_| pool_closed())?;
+    async fn checkout(&self, cancel: &OpCancel) -> Result<(Session, OwnedSemaphorePermit), Diag> {
+        let permit = tokio::select! {
+            permit = self.slots.clone().acquire_owned() => permit.map_err(|_| pool_closed())?,
+            () = cancel.cancelled() => return Err(cancelled()),
+        };
         if self.closed.load(Ordering::Acquire) {
             return Err(pool_closed());
+        }
+        if cancel.is_cancelled() {
+            return Err(cancelled());
         }
         loop {
             let session = self.idle.lock().pop();
             match session {
-                Some(session) if session.is_open() => return Ok((session, permit)),
+                Some(mut session) if session.is_open() => {
+                    // The borrower may have changed these on the native side.
+                    session.autocommit = self.autocommit;
+                    session.timeout = self.timeout.load(Ordering::Relaxed);
+                    return Ok((session, permit));
+                }
                 Some(_) => continue,
                 None => break,
             }
@@ -68,7 +81,7 @@ impl PoolInner {
     }
 
     async fn run(&self, command: Command, max_rows: usize, mode: QueryMode, cancel: &OpCancel) -> Outcome {
-        let (mut session, permit) = match self.checkout().await {
+        let (mut session, permit) = match self.checkout(cancel).await {
             Ok(checked_out) => checked_out,
             Err(records) => return Outcome::Error(records),
         };
@@ -106,8 +119,9 @@ impl AioPool {
     /// Check out a connection; closing it returns the session to the pool.
     fn acquire<'py>(&self, py: Python<'py>, hub: &Bound<'py, Hub>) -> Op<'py> {
         let inner = self.inner.clone();
-        spawn_op(py, hub, false, None, move |_| async move {
-            match inner.checkout().await {
+        let cancels = inner.cancels.clone();
+        spawn_op(py, hub, false, Some(&cancels), move |cancel| async move {
+            match inner.checkout(&cancel).await {
                 Ok((session, permit)) => {
                     let as_tuple = inner.as_tuple;
                     Outcome::Connection(ConnCore::new(session, as_tuple, Some((inner, permit))))
@@ -132,7 +146,8 @@ impl AioPool {
         let mode = query_mode(mode);
         let max_rows = if matches!(mode, QueryMode::All) { usize::MAX } else { 1 };
         let inner = self.inner.clone();
-        spawn_op(py, hub, inner.as_tuple, None, move |cancel| async move {
+        let cancels = inner.cancels.clone();
+        spawn_op(py, hub, inner.as_tuple, Some(&cancels), move |cancel| async move {
             inner.run(command, max_rows, mode, &cancel).await
         })
     }
@@ -150,6 +165,14 @@ impl AioPool {
             }
             Outcome::None
         })
+    }
+
+    /// Cancel request `id` (a no-op once it finished): a queued acquire gives
+    /// up its place, a running query gets a TDS attention.
+    fn cancel(&self, id: u64) {
+        if let Some(cancel) = self.inner.cancels.lock().get(&id) {
+            cancel.cancel();
+        }
     }
 
     #[getter]
@@ -209,6 +232,7 @@ pub fn create_pool<'py>(
         max_size,
         reset,
         closed: AtomicBool::new(false),
+        cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
     });
     let (future, _) = spawn_op(py, hub, false, None, move |_| async move {
         // Open the minimum number of sessions concurrently.

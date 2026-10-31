@@ -238,3 +238,10 @@ and now uses about 1.3 us (measured with the native calls stubbed).
   SQLSTATE 42000 but raises `ConversionDataError`, a `DataError` that is also
   a `ProgrammingError`. 2628 -> 22001 is in `src/diag.rs` and
   `_server_sqlstate.py`.
+
+## aio review fixes (r2_aio)
+
+- `aio.py` (port-only module): `AsyncCursor.__del__` retires the native cursor;
+  the per-loop hub is given a `weakref.ref` of its loop so closed loops are
+  collected; `fetchall()` keeps fetching until the result is done, so an error
+  after some rows is raised instead of returning a truncated list.

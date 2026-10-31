@@ -38,16 +38,25 @@ pub type Diag = Vec<DiagRecord>;
 pub struct OpCancel {
     pub handle: CancelHandle,
     flag: AtomicBool,
+    wake: tokio::sync::Notify,
 }
 
 impl OpCancel {
     pub fn new() -> Self {
-        Self { handle: CancelHandle::new(), flag: AtomicBool::new(false) }
+        Self { handle: CancelHandle::new(), flag: AtomicBool::new(false), wake: tokio::sync::Notify::new() }
     }
 
     pub fn cancel(&self) {
         self.flag.store(true, Ordering::Release);
         self.handle.cancel();
+        self.wake.notify_one();
+    }
+
+    /// Resolves once `cancel` was called (for operations still queued).
+    pub async fn cancelled(&self) {
+        while !self.is_cancelled() {
+            self.wake.notified().await;
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -166,7 +175,7 @@ impl Session {
     /// Hand the client back for pooling: no live batch, and (when `reset`)
     /// session state reset on the next request.
     pub async fn into_reusable(mut self, reset: bool) -> Option<Session> {
-        self.release_wire(0).await;
+        self.discard_wire().await;
         let client = self.client.as_mut()?;
         if client.is_connection_dead() || client.has_open_batch() {
             return None;
@@ -183,7 +192,7 @@ impl Session {
     }
 
     pub async fn close(&mut self) {
-        self.release_wire(0).await;
+        self.discard_wire().await;
         if let Some(mut client) = self.client.take() {
             if client.has_active_transaction() {
                 let _ = client.rollback_transaction(None, None).await;
@@ -198,18 +207,32 @@ impl Session {
 
     /// Free the wire for `requester` (0 = the connection): drain another
     /// cursor's live rows into its buffer, or discard our own.
-    async fn release_wire(&mut self, requester: u64) {
+    async fn release_wire(&mut self, requester: u64, cancel: Option<&OpCancel>) {
         let Some(client) = self.client.as_mut() else { return };
         if let Some(owner) = self.owner.take() {
             let keep = owner != requester && self.cursors.contains_key(&owner);
             if keep {
                 let state = self.cursors.entry(owner).or_default();
-                drain_into(client, state, self.owner_rows).await;
+                drain_into(client, state, self.owner_rows, cancel).await;
             }
         }
         self.owner_rows = false;
         if client.has_open_batch() {
             let _ = client.close_query().await;
+            let _ = client.take_info_messages();
+        }
+    }
+
+    /// Throw away whatever is still on the wire (close, pool checkin, end of a
+    /// shortcut query): an attention ends the response without buffering it.
+    async fn discard_wire(&mut self) {
+        self.owner = None;
+        self.owner_rows = false;
+        let Some(client) = self.client.as_mut() else { return };
+        if client.has_open_batch() {
+            if client.cancel_query(5).await.is_err() {
+                let _ = client.close_query().await;
+            }
             let _ = client.take_info_messages();
         }
     }
@@ -297,7 +320,10 @@ impl Session {
         if cancel.is_cancelled() {
             return Err(cancelled());
         }
-        self.release_wire(cursor).await;
+        self.release_wire(cursor, Some(cancel)).await;
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
         self.cursors.insert(cursor, CursorState::default());
         self.prepare_session().await?;
         let (sql, params) = match command {
@@ -330,6 +356,7 @@ impl Session {
         let mut out = ExecOut { columns: None, rows: RowBuffer::new(), done: true, rowcount: -1, info: Vec::new() };
         match result {
             Ok(StatementResult::Rows) => {
+                let mut failed = false;
                 let columns = Arc::new(client.get_metadata().clone());
                 let read = read_rows(
                     client,
@@ -351,15 +378,18 @@ impl Session {
                         self.after_error(cursor);
                         return Err(records);
                     }
+                    // Rows came first: hand them out, and raise the error from the
+                    // next fetch (done stays false so the caller asks for it).
                     Err(err) => {
-                        out.done = true;
+                        failed = true;
+                        out.done = false;
                         self.cursors.entry(cursor).or_default().drained_error =
                             Some(diag::records_for_error(&err, "HY000"));
                     }
                 }
                 self.cursors.entry(cursor).or_default().columns = Some(columns.clone());
                 out.columns = Some(columns);
-                self.owner_rows = !out.done;
+                self.owner_rows = !out.done && !failed;
             }
             Ok(StatementResult::NoRows { rows_affected }) => {
                 out.rowcount = rows_affected.map_or(-1, |n| n as i64);
@@ -402,12 +432,17 @@ impl Session {
                 state.drained_pos += take;
                 out
             };
-            let done = state.drained.as_ref().is_none_or(|b| state.drained_pos >= b.rows);
+            let mut done = state.drained.as_ref().is_none_or(|b| state.drained_pos >= b.rows);
             if done {
                 state.drained = None;
                 state.drained_pos = 0;
-                if rows.rows == 0 && let Some(err) = state.drained_error.take() {
-                    return Err(err);
+                if state.drained_error.is_some() {
+                    // The error follows the last buffered rows: raise it now, or
+                    // from the next fetch when there are rows to hand out first.
+                    if rows.rows == 0 {
+                        return Err(state.drained_error.take().unwrap_or_else(cancelled));
+                    }
+                    done = false;
                 }
             }
             return Ok(RowsOut { columns, rows, ncols, done });
@@ -433,7 +468,7 @@ impl Session {
                 }
                 if rows.rows > 0 {
                     state.drained_error = Some(diag::records_for_error(&err, "HY000"));
-                    Ok(RowsOut { columns, rows, ncols, done: true })
+                    Ok(RowsOut { columns, rows, ncols, done: false })
                 } else {
                     Err(diag::records_for_error(&err, "HY000"))
                 }
@@ -446,13 +481,17 @@ impl Session {
         let state = self.cursors.get_mut(&cursor).ok_or_else(invalid_cursor)?;
         state.drained = None;
         state.drained_pos = 0;
-        state.drained_error = None;
+        let pending_error = state.drained_error.take();
         state.columns = None;
+        if let Some(err) = pending_error {
+            return Err(err);
+        }
         if let Some(next) = state.queued.pop_front() {
             if let Some(err) = next.error.clone().filter(|_| next.columns.is_none()) {
                 return Err(err);
             }
-            let done = true;
+            // A buffered error follows its rows: done stays false until it is raised.
+            let done = next.error.is_none();
             state.columns = next.columns.clone();
             state.drained_error = next.error;
             return Ok(Some(ExecOut { columns: next.columns, rows: next.rows, done, rowcount: next.rowcount, info: next.info }));
@@ -466,6 +505,7 @@ impl Session {
         let mut out = ExecOut { columns: None, rows: RowBuffer::new(), done: true, rowcount: -1, info: Vec::new() };
         let result = match advanced {
             Ok(StatementResult::Rows) => {
+                let mut failed = false;
                 let columns = Arc::new(client.get_metadata().clone());
                 let read = read_rows(client, &mut out.rows, |b| b.rows, RowBuffer::byte_size, prefetch.max(1), PREFETCH_BYTES, Some(cancel)).await;
                 info.extend(diag::info_records(&client.take_info_messages()));
@@ -480,15 +520,18 @@ impl Session {
                         records.extend(info);
                         return Err(records);
                     }
+                    // Rows came first: hand them out, and raise the error from the
+                    // next fetch (done stays false so the caller asks for it).
                     Err(err) => {
-                        out.done = true;
+                        failed = true;
+                        out.done = false;
                         self.cursors.entry(cursor).or_default().drained_error =
                             Some(diag::records_for_error(&err, "HY000"));
                     }
                 }
                 self.cursors.entry(cursor).or_default().columns = Some(columns.clone());
                 out.columns = Some(columns);
-                self.owner_rows = !out.done;
+                self.owner_rows = !out.done && !failed;
                 Ok(Some(out))
             }
             Ok(StatementResult::NoRows { rows_affected }) => {
@@ -587,7 +630,10 @@ impl Session {
         if cancel.is_cancelled() {
             return Err(cancelled());
         }
-        self.release_wire(cursor).await;
+        self.release_wire(cursor, Some(cancel)).await;
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
         self.cursors.insert(cursor, CursorState::default());
         self.prepare_session().await?;
         if !all_null.is_empty() && !rows.is_empty() {
@@ -659,7 +705,7 @@ impl Session {
     }
 
     pub async fn commit(&mut self) -> Result<(), Diag> {
-        self.release_wire(0).await;
+        self.release_wire(0, None).await;
         let client = self.client.as_mut().ok_or_else(closed)?;
         if client.has_active_transaction() {
             client.commit_transaction(None, None).await.map_err(|e| diag::records_for_error(&e, "HY000"))?;
@@ -668,7 +714,7 @@ impl Session {
     }
 
     pub async fn rollback(&mut self) -> Result<(), Diag> {
-        self.release_wire(0).await;
+        self.release_wire(0, None).await;
         let client = self.client.as_mut().ok_or_else(closed)?;
         if client.has_active_transaction() {
             client.rollback_transaction(None, None).await.map_err(|e| diag::records_for_error(&e, "HY000"))?;
@@ -682,9 +728,13 @@ impl Session {
         const SHORTCUT: u64 = 0;
         let out = self.execute(SHORTCUT, command, max_rows, usize::MAX, cancel).await?;
         let ncols = out.columns.as_ref().map_or(0, |c| c.len());
-        self.release_wire(0).await;
+        let pending_error = self.cursors.get_mut(&SHORTCUT).and_then(|s| s.drained_error.take());
+        self.discard_wire().await;
         self.cursors.remove(&SHORTCUT);
-        Ok((out, ncols))
+        match pending_error {
+            Some(records) => Err(records),
+            None => Ok((out, ncols)),
+        }
     }
 }
 
@@ -693,15 +743,22 @@ fn invalid_cursor() -> Diag {
 }
 
 /// Move everything still on the wire for `state`'s cursor into its buffers.
-async fn drain_into(client: &mut TdsClient, state: &mut CursorState, rows_on_wire: bool) {
+async fn drain_into(client: &mut TdsClient, state: &mut CursorState, rows_on_wire: bool, cancel: Option<&OpCancel>) {
     if rows_on_wire {
         let mut rows = state.drained.take().unwrap_or_default();
-        if let Err(err) = read_rows(client, &mut rows, |b| b.rows, RowBuffer::byte_size, usize::MAX, usize::MAX, None).await {
+        if let Err(err) = read_rows(client, &mut rows, |b| b.rows, RowBuffer::byte_size, usize::MAX, usize::MAX, cancel).await {
             state.drained_error = Some(diag::records_for_error(&err, "HY000"));
         }
         state.drained = Some(rows);
     }
     while client.has_open_batch() {
+        if cancel.is_some_and(OpCancel::is_cancelled) {
+            // Give up on the rest of the previous cursor's results.
+            let _ = client.cancel_query(5).await;
+            let _ = client.take_info_messages();
+            state.drained_error.get_or_insert_with(cancelled);
+            break;
+        }
         let advanced = client.advance().await;
         let info: Diag = diag::info_records(&client.take_info_messages()).collect();
         match advanced {
@@ -716,7 +773,7 @@ async fn drain_into(client: &mut TdsClient, state: &mut CursorState, rows_on_wir
             Ok(StatementResult::Rows) => {
                 let columns = Some(Arc::new(client.get_metadata().clone()));
                 let mut rows = RowBuffer::new();
-                let error = read_rows(client, &mut rows, |b| b.rows, RowBuffer::byte_size, usize::MAX, usize::MAX, None)
+                let error = read_rows(client, &mut rows, |b| b.rows, RowBuffer::byte_size, usize::MAX, usize::MAX, cancel)
                     .await
                     .err()
                     .map(|e| diag::records_for_error(&e, "HY000"));
