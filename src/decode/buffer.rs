@@ -65,6 +65,37 @@ pub struct RowBuffer {
     pub rows: usize,
 }
 
+/// Small buffers kept per thread so single-row and short fetches (fetchone,
+/// partial fetchmany) reuse allocations instead of making two per call.
+const POOL_DEPTH: usize = 4;
+const POOL_MAX_CELLS: usize = 1024;
+const POOL_MAX_ARENA: usize = 16 << 10;
+
+thread_local! {
+    static POOL: std::cell::RefCell<Vec<(Vec<Cell>, Vec<u8>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl Drop for RowBuffer {
+    fn drop(&mut self) {
+        if self.cells.capacity() == 0
+            || self.cells.capacity() > POOL_MAX_CELLS
+            || self.arena.capacity() > POOL_MAX_ARENA
+        {
+            return;
+        }
+        let mut cells = std::mem::take(&mut self.cells);
+        let mut arena = std::mem::take(&mut self.arena);
+        cells.clear();
+        arena.clear();
+        let _ = POOL.try_with(|pool| {
+            let mut pool = pool.borrow_mut();
+            if pool.len() < POOL_DEPTH {
+                pool.push((cells, arena));
+            }
+        });
+    }
+}
+
 impl RowBuffer {
     pub fn new() -> Self {
         Self::default()
@@ -163,20 +194,37 @@ impl RowBuffer {
         }
     }
 
-    /// Move rows `[from, from+count)` of an `ncols`-wide buffer into a new one.
+    /// Copy rows `[from, from+count)` of an `ncols`-wide buffer into a new one.
+    ///
+    /// Rows are written in order, so the spans of a row range sit in one
+    /// contiguous arena stretch: it is copied once and the spans rebased,
+    /// instead of one arena push per text cell.
     pub fn slice_rows(&self, ncols: usize, from: usize, count: usize) -> RowBuffer {
-        let mut out = RowBuffer::new();
-        let cells = &self.cells[from * ncols..(from + count) * ncols];
-        out.cells.reserve(cells.len());
-        for cell in cells {
-            let moved = match cell {
-                Cell::Utf8(s) => Cell::Utf8(out.push_span(self.bytes(*s))),
-                Cell::Utf16(s) => Cell::Utf16(out.push_span(self.bytes(*s))),
-                Cell::Bytes(s) => Cell::Bytes(out.push_span(self.bytes(*s))),
-                other => other.clone(),
-            };
-            out.cells.push(moved);
+        let src = &self.cells[from * ncols..(from + count) * ncols];
+        let (mut lo, mut hi) = (usize::MAX, 0usize);
+        for cell in src {
+            if let Cell::Utf8(s) | Cell::Utf16(s) | Cell::Bytes(s) = cell {
+                lo = lo.min(s.start);
+                hi = hi.max(s.start + s.len);
+            }
         }
+        let mut out = RowBuffer::new();
+        if src.len() <= POOL_MAX_CELLS
+            && let Some((cells, arena)) = POOL.try_with(|pool| pool.borrow_mut().pop()).ok().flatten()
+        {
+            (out.cells, out.arena) = (cells, arena);
+        }
+        if lo < hi {
+            out.arena.extend_from_slice(&self.arena[lo..hi]);
+        }
+        out.cells.reserve(src.len());
+        let rebase = |s: &Span| Span { start: s.start - lo, len: s.len };
+        out.cells.extend(src.iter().map(|cell| match cell {
+            Cell::Utf8(s) => Cell::Utf8(rebase(s)),
+            Cell::Utf16(s) => Cell::Utf16(rebase(s)),
+            Cell::Bytes(s) => Cell::Bytes(rebase(s)),
+            other => other.clone(),
+        }));
         out.rows = count;
         out
     }
