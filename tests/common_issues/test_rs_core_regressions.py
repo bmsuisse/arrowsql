@@ -8,6 +8,7 @@ entry point.
 """
 
 import decimal
+import os
 import threading
 import time
 
@@ -533,6 +534,7 @@ def test_executemany_decimal_mixed_with_other_numbers_allows_zero_integer_digits
     )
 
 
+@pytest.mark.skipif(not hasattr(os, "register_at_fork"), reason="no os.register_at_fork (Windows)")
 def test_module_imports_without_register_at_fork():
     import subprocess
     import sys
