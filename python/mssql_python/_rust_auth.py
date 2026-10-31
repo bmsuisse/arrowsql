@@ -58,7 +58,7 @@ _KNOWN = (
 # that allows the username/password (ROPC) grant without an app registration.
 _PASSWORD_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
 
-_AZURE_HINT = "Install the optional dependency: pip install mssql-python-rs[azure]"
+_AZURE_HINT = "Install the optional dependency: pip install arrowsql[azure]"
 
 
 def _require_azure_identity(mode: str) -> None:

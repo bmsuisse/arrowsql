@@ -152,7 +152,7 @@ jobs:
       - name: Install the matching wheel and import it
         shell: bash
         run: |
-          python -m pip install --no-index --find-links dist mssql-python-rs-port
+          python -m pip install --no-index --find-links dist arrowsql
           cd "$RUNNER_TEMP"
           python -c "import mssql_python, mssql_python.ddbc_bindings as d; print(mssql_python.__version__, d.__version__, d.__rust_port__)"
 

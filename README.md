@@ -1,4 +1,4 @@
-# mssql-rs (mssql-python on a Rust core)
+# arrowsql (mssql-python on a Rust core)
 
 [mssql-python](https://github.com/microsoft/mssql-python) with its C++/ODBC
 core replaced by Rust: a PyO3 extension over Microsoft's native TDS crate
@@ -246,9 +246,9 @@ Methodology, profiles and the compression findings are in
 
 ```bash
 # not on PyPI yet; wheels are CI artifacts (see Support)
-pip install mssql-python-rs-port              # zero required dependencies
-pip install 'mssql-python-rs-port[arrow]'     # + pyarrow for arrow() / bulkcopy_arrow
-pip install 'mssql-python-rs-port[azure]'     # + azure-identity credentials
+pip install arrowsql              # zero required dependencies
+pip install 'arrowsql[arrow]'     # + pyarrow for arrow() / bulkcopy_arrow
+pip install 'arrowsql[azure]'     # + azure-identity credentials
 ```
 
 ## Build and test

@@ -3796,7 +3796,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             raise ImportError(
                 "Bulk copy requires the mssql_py_core library for this source, which is "
                 "not installed. Install the optional extra: "
-                "pip install 'mssql-python-rs-port[async-preview]'"
+                "pip install 'arrowsql[async-preview]'"
             ) from exc
 
     @classmethod
