@@ -1,4 +1,4 @@
-//! `mssql_python.ddbc_bindings`, re-implemented in Rust on mssql-tds.
+//! `arrowsql.ddbc_bindings`, re-implemented in Rust on mssql-tds.
 //!
 //! Drop-in for the C++/pybind11 ODBC binding: same symbol names, argument
 //! names, defaults and return codes. See docs/ARCHITECTURE.md for the design

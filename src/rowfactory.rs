@@ -23,7 +23,7 @@ pub fn construct_rows<'py>(
     let row_type = row_class
         .cast::<PyType>()
         .map_err(|_| PyTypeError::new_err("row_class must be a type"))?;
-    let base = ROW_TYPE.import(py, "mssql_python.row", "Row")?;
+    let base = ROW_TYPE.import(py, "arrowsql.row", "Row")?;
     if !row_type.is_subclass(base)? {
         return Err(PyTypeError::new_err("row_class must be Row or a Row subclass"));
     }

@@ -8,10 +8,10 @@ import re
 import threading
 import locale
 from typing import Any, Union, Tuple, Optional
-from mssql_python import ddbc_bindings
-from mssql_python.exceptions import raise_exception
-from mssql_python.logging import logger
-from mssql_python.constants import ConstantsDDBC
+from arrowsql import ddbc_bindings
+from arrowsql.exceptions import raise_exception
+from arrowsql.logging import logger
+from arrowsql.constants import ConstantsDDBC
 
 # normalize_architecture import removed as it's unused
 
@@ -81,7 +81,7 @@ def sanitize_connection_string(conn_str: str) -> str:
     Returns:
         str: The sanitized connection string.
     """
-    from mssql_python.connection_string_parser import (
+    from arrowsql.connection_string_parser import (
         sanitize_connection_string as _sanitize,
     )
 

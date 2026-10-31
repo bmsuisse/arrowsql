@@ -96,7 +96,7 @@ fn rows_range<'py>(
     as_tuple: bool,
 ) -> PyResult<Bound<'py, PyList>> {
     let row_type = match (shape, as_tuple) {
-        (Some(_), false) => Some(ROW_TYPE.import(py, "mssql_python.row", "Row")?.clone()),
+        (Some(_), false) => Some(ROW_TYPE.import(py, "arrowsql.row", "Row")?.clone()),
         _ => None,
     };
     unsafe {

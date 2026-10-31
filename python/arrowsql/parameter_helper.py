@@ -13,8 +13,8 @@ Reference: https://www.python.org/dev/peps/pep-0249/#paramstyle
 """
 
 from typing import Dict, List, Tuple, Any, Union
-from mssql_python.logging import logger
-from mssql_python.exceptions import ProgrammingError
+from arrowsql.logging import logger
+from arrowsql.exceptions import ProgrammingError
 
 # Distinctive marker for escaped percent signs during pyformat conversion
 # Uses a unique prefix/suffix that's extremely unlikely to appear in real SQL

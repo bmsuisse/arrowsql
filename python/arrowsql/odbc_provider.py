@@ -18,7 +18,7 @@ import warnings
 import importlib
 from typing import Dict, Optional, Tuple
 
-from mssql_python.logging import logger
+from arrowsql.logging import logger
 
 NATIVE_PROVIDER_ENV_VAR = "MSSQL_PYTHON_NATIVE_PROVIDER"
 
@@ -157,7 +157,7 @@ class ProviderManager:
         package = _PACKAGE_BY_PROVIDER[provider]
         # RUST-PORT: the Rust bindings speak TDS natively; no ODBC driver
         # package needs to be importable.
-        from mssql_python import ddbc_bindings
+        from arrowsql import ddbc_bindings
 
         if getattr(ddbc_bindings, "__rust_port__", False):
             return cls.resolve()
@@ -208,7 +208,7 @@ class ProviderManager:
             version = getattr(provider_module, "__version__", None)
             module_file = getattr(provider_module, "__file__", None)
             if module_file:
-                from mssql_python import ddbc_bindings
+                from arrowsql import ddbc_bindings
 
                 driver_path = ddbc_bindings._get_odbc_driver_path(
                     os.path.dirname(os.path.abspath(module_file)), provider
