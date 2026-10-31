@@ -602,9 +602,10 @@ fn utc_offset_minutes(value: &Bound<'_, PyAny>) -> Result<i16, String> {
 }
 
 /// Sign and magnitude of a Python Decimal, int, float or numeric string at the
-/// destination's scale. A value that does not fit is rejected, never rounded.
+/// destination's scale. Extra scale is rejected, except for floats: they carry
+/// no exact scale, so they are rounded half to even like mssql_py_core does.
 fn to_decimal(cell: &Bound<'_, PyAny>, dest: &BulkCopyColumnMetadata) -> Result<(bool, u128), String> {
-    parse_decimal(&number_text(cell, "DECIMAL")?, dest)
+    parse_decimal(&number_text(cell, "DECIMAL")?, dest, cell.is_instance_of::<PyFloat>())
 }
 
 /// A decimal string as `(negative, digits, shift)`: the value is
@@ -638,7 +639,7 @@ fn decimal_digits(text: &str, column: &str) -> Result<(bool, u128, i64), String>
     Ok((negative, digits, i64::from(exponent) - fraction.len() as i64))
 }
 
-fn parse_decimal(text: &str, dest: &BulkCopyColumnMetadata) -> Result<(bool, u128), String> {
+fn parse_decimal(text: &str, dest: &BulkCopyColumnMetadata, round: bool) -> Result<(bool, u128), String> {
     let (negative, digits, shift) = decimal_digits(text, &dest.column_name)?;
     let too_wide = || format!("Decimal value exceeds target precision {} of column '{}'", dest.precision, dest.column_name);
     let to_scale = shift + i64::from(dest.scale);
@@ -649,6 +650,12 @@ fn parse_decimal(text: &str, dest: &BulkCopyColumnMetadata) -> Result<(bool, u12
         match 10u128.checked_pow(u32::try_from(-to_scale).unwrap_or(u32::MAX)) {
             Some(divisor) if digits % divisor == 0 => digits / divisor,
             _ if digits == 0 => 0,
+            Some(divisor) if round => {
+                let (quotient, remainder) = (digits / divisor, digits % divisor);
+                let round_up = remainder * 2 > divisor || (remainder * 2 == divisor && quotient % 2 == 1);
+                quotient + u128::from(round_up)
+            }
+            None if round => 0,
             _ => {
                 return Err(format!(
                     "Input decimal scale exceeds target scale {} of column '{}'",
