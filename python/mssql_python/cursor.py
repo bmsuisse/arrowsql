@@ -717,7 +717,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
     def arraysize(self, value: int) -> None:
         # RUST-PORT: DB-API requires an int. A rejected value leaves the previous
         # setting in place, so a later fetchmany() cannot fail on it.
-        if not isinstance(value, int):
+        if isinstance(value, bool) or not isinstance(value, int):
             raise TypeError(f"arraysize must be an int, not {type(value).__name__}")
         if value < 0:
             raise ValueError("arraysize must not be negative")
@@ -1207,21 +1207,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 self.last_executed_stmt = ""
                 return
         self._clear_rownumber()
-
-    # RUST-PORT: upstream stores whatever is assigned, so None, "" or b"1234"
-    # is accepted and a later fetchmany() fails. DB-API needs an int >= 0.
-    @property
-    def arraysize(self) -> int:
-        """Rows fetched per ``fetchmany()`` call when no size is given."""
-        return self._arraysize
-
-    @arraysize.setter
-    def arraysize(self, value: int) -> None:
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise TypeError(f"arraysize must be an int, not {type(value).__name__}")
-        if value < 0:
-            raise ValueError("arraysize must not be negative")
-        self._arraysize = value
 
     def close(self) -> None:
         """
