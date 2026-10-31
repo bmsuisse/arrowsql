@@ -15,8 +15,10 @@ trap 'rm -rf "$scratch"' EXIT
 if [ "${1:-}" ]; then
   wheel="$(realpath "$1")"
 else
+  source "$root/scripts/env.sh" ""  # cargo on PATH, shared target dir; explicit arg: else it inherits ours
   cd "$root"
-  "$root/.venv/bin/maturin" build -q --release -i "$root/.venv/bin/python" -o "$scratch/dist" >&2
+  flock "$CARGO_TARGET_DIR.lock" "$root/.venv/bin/maturin" build -q --release \
+    -i "$root/.venv/bin/python" -o "$scratch/dist" >&2
   wheel="$(ls "$scratch"/dist/*.whl)"
 fi
 
