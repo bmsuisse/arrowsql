@@ -1,14 +1,17 @@
 name: CI
 
+# Pushes to main run this through release.yml's `test` job (workflow_call), which
+# gates the auto-release on it, so there is no `push: main` trigger here.
 on:
   push:
-    branches: [main, dev]
+    branches: [dev]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -42,16 +45,56 @@ jobs:
       - name: cargo test
         run: cargo test --lib
 
-  portability:
-    name: cargo check (${{ matrix.os }})
+  native:
+    name: build + DB-free tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    # No SQL Server here: the common_issues conftest skips every DB test when
+    # DB_CONNECTION_STRING is unset. This checks that the extension builds,
+    # imports, and passes `cargo test --lib` plus the tests that need no server.
     runs-on: ${{ matrix.os }}
-    # Nothing has been built on these platforms by hand yet; the wheels
-    # workflow is the real test. Keep this advisory until it is green once.
-    continue-on-error: true
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, windows-latest]
+        include:
+          - { os: macos-15, python: "3.13" }
+          - { os: macos-15, python: "3.15" }
+          - { os: macos-15-intel, python: "3.13" }
+          - { os: windows-latest, python: "3.13" }
+          - { os: windows-latest, python: "3.15" }
+          - { os: windows-11-arm, python: "3.13" }
+          - { os: ubuntu-24.04-arm, python: "3.13" }
+          - { os: ubuntu-24.04-arm, python: "3.15" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.python }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: cargo test --lib
+        run: cargo test --lib
+      - name: Build the extension (maturin develop)
+        shell: bash
+        run: |
+          python -m venv .venv
+          . "$(ls .venv/Scripts/activate .venv/bin/activate 2>/dev/null | head -1)"
+          pip install "maturin>=1.9,<2.0" pytest pytest-timeout pytest-asyncio psutil
+          maturin develop
+      - name: DB-free tests (DB tests skip without DB_CONNECTION_STRING)
+        shell: bash
+        run: |
+          . "$(ls .venv/Scripts/activate .venv/bin/activate 2>/dev/null | head -1)"
+          (cd "$RUNNER_TEMP" && python -I -c "import mssql_python, mssql_python.ddbc_bindings as d; print(mssql_python.__version__, d.__version__, d.__rust_port__)")
+          python -m pytest -q --timeout 120 -p no:randomly -rs tests/common_issues tests/port
+
+  windows-db:
+    name: pytest (SQL Server Express, windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      DB_CONNECTION_STRING: "Server=localhost,1433;Database=rs_ci;Uid=sa;Pwd=Ci-Test-Passw0rd-123;Encrypt=yes;TrustServerCertificate=yes"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -59,7 +102,36 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: cargo check --lib
+      - name: Install SQL Server Express (SQL auth, TCP 1433)
+        shell: pwsh
+        run: ./scripts/ci/install-sqlserver-windows.ps1 -SaPassword $env:MSSQL_SA_PASSWORD
+      - name: Build the extension (maturin develop)
+        shell: bash
+        run: |
+          python -m venv .venv
+          . .venv/Scripts/activate
+          pip install "maturin>=1.9,<2.0" pytest pytest-timeout pytest-asyncio psutil
+          grep -vE '^(#|$|maturin|pytest|psutil)' requirements-dev.txt | while read -r req; do
+            pip install --only-binary=:all: "$req" || echo "::warning::no wheel for $req"
+          done
+          maturin develop
+      - name: Create the test database
+        shell: bash
+        run: |
+          . .venv/Scripts/activate
+          python -I - <<'EOF'
+          import os, mssql_python
+          master = os.environ["DB_CONNECTION_STRING"].replace("Database=rs_ci", "Database=master")
+          conn = mssql_python.connect(master, autocommit=True)
+          cur = conn.cursor()
+          cur.execute("IF DB_ID('rs_ci') IS NULL CREATE DATABASE [rs_ci]")
+          cur.execute("IF DB_ID('rs_ci_other') IS NULL CREATE DATABASE [rs_ci_other]")
+          EOF
+      - name: common_issues and port suites
+        shell: bash
+        run: |
+          . .venv/Scripts/activate
+          python -m pytest -q --timeout 120 -p no:randomly tests/common_issues tests/port
 
   tests:
     name: pytest (SQL Server 2022, Python ${{ matrix.python }})
