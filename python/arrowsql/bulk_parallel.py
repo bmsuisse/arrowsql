@@ -1,16 +1,26 @@
-"""RUST-PORT: parallel bulk load into a heap.
+"""RUST-PORT: parallel bulk load.
 
 One bulk-copy stream is limited by the client-side encoder, not by the server.
 ``write_arrow`` (Arrow sources) and ``write_rows`` (Python row tuples) cut the
 source into slices, hand them to N connections, and run one bulk copy per
-connection with TABLOCK. Bulk-update locks are compatible with each other, so
-the streams load the same heap at once.
+connection.
 
-Parallel loads need a heap without indexes. A clustered, columnstore or
-nonclustered-indexed target loads on one worker and a ``RuntimeWarning`` says
-why (measured: TABLOCK workers into a heap with a nonclustered index were
-slower than one). Row order is not kept. Rows committed by a worker before
-another worker fails stay in the table; the first error is raised.
+The target decides the policy (``_TARGET_QUERY`` detects it):
+
+* heap: TABLOCK on every worker. Bulk-update locks are compatible with each
+  other, so the streams load the same heap at once.
+* clustered columnstore: parallel, without TABLOCK (a table lock serializes
+  the loads; concurrent loads without it are the documented way to scale a
+  columnstore load) and with batches of at least 102,400 rows so full
+  rowgroups compress directly instead of landing in the delta store. Each
+  worker's last partial batch ends up in an open delta rowgroup that the tuple
+  mover compresses later.
+* heap with nonclustered indexes, or a clustered rowstore index: one worker
+  and a ``RuntimeWarning`` (measured: TABLOCK workers into a heap with a
+  nonclustered index were slower than one).
+
+Row order is not kept. Rows committed by a worker before another worker fails
+stay in the table; the first error is raised.
 """
 
 import itertools
@@ -45,8 +55,10 @@ SELECT
     (SELECT recovery_model_desc FROM sys.databases WHERE database_id = DB_ID())
 """
 
+# Fewest rows per batch for a columnstore load: smaller batches land in the delta store.
+_COLUMNSTORE_MIN_BATCH = 102_400
+
 _SINGLE_WORKER_REASON = {
-    "columnstore": "it has a clustered columnstore index",
     "clustered": "it has a clustered index",
     "heap_nci": "it is a heap with nonclustered indexes, where parallel TABLOCK loads are slower",
 }
@@ -71,8 +83,11 @@ def write_arrow(
 
     ``source`` takes the same forms as :meth:`Cursor.bulkcopy_arrow`. With
     ``workers > 1`` the source is cut into slices that workers pull from a
-    shared queue, so faster connections take more of the load. ``table_lock``
-    is forced on when ``workers > 1``.
+    shared queue, so faster connections take more of the load. With
+    ``workers > 1`` the target decides the lock: TABLOCK for a heap, none for a
+    clustered columnstore (batches are raised to at least 102,400 rows), and
+    ``workers`` falls back to 1 with a warning for other indexed targets
+    (``table_lock`` then applies as given).
 
     Returns a dict with ``rows_copied``, ``batch_count``, ``elapsed_time``,
     ``rows_per_second`` and ``workers`` (connections used).
@@ -94,7 +109,9 @@ def write_arrow(
     started = time.perf_counter()
 
     if workers > 1:
-        workers = _effective_workers("write_arrow", connection_str, table, workers, connect_kwargs)
+        workers, table_lock, bulk_options = _apply_target_policy(
+            "write_arrow", connection_str, table, workers, table_lock, bulk_options, connect_kwargs
+        )
     if workers == 1:
         result = _load_single(connection_str, table, source, table_lock, bulk_options, connect_kwargs)
         return _summarize([result], 1, started)
@@ -104,7 +121,9 @@ def write_arrow(
         connection_str,
         workers,
         _slices(source, slice_rows),
-        lambda cursor, first, pieces: _load_arrow_pieces(cursor, table, first, pieces, bulk_options),
+        lambda cursor, first, pieces: _load_arrow_pieces(
+            cursor, table, first, pieces, table_lock, bulk_options
+        ),
         connect_kwargs,
     )
     return _summarize(results, workers, started)
@@ -151,13 +170,16 @@ def write_rows(
     }
     started = time.perf_counter()
 
+    table_lock = True
     if workers > 1:
-        workers = _effective_workers("write_rows", connection_str, table, workers, connect_kwargs)
+        workers, table_lock, bulk_options = _apply_target_policy(
+            "write_rows", connection_str, table, workers, True, bulk_options, connect_kwargs
+        )
     if workers == 1:
         with connect(connection_str, autocommit=True, **connect_kwargs) as conn:
             cursor = conn.cursor()
             try:
-                result = cursor.bulkcopy(table, rows, table_lock=True, **bulk_options)
+                result = cursor.bulkcopy(table, rows, table_lock=table_lock, **bulk_options)
             finally:
                 cursor.close()
         return _summarize([result], 1, started)
@@ -166,7 +188,9 @@ def write_rows(
         connection_str,
         workers,
         _row_slices(rows, workers),
-        lambda cursor, first, pieces: _load_row_pieces(cursor, table, first, pieces, bulk_options),
+        lambda cursor, first, pieces: _load_row_pieces(
+            cursor, table, first, pieces, table_lock, bulk_options
+        ),
         connect_kwargs,
     )
     return _summarize(results, workers, started)
@@ -181,8 +205,8 @@ def _check_args(workers, batch_size, timeout):
         raise ValueError(f"timeout must be a non-negative integer, got {timeout!r}")
 
 
-def _effective_workers(caller, connection_str, table, workers, connect_kwargs):
-    """Return ``workers`` for a plain heap, else 1 with a warning."""
+def _apply_target_policy(caller, connection_str, table, workers, table_lock, bulk_options, connect_kwargs):
+    """Return ``(workers, table_lock, bulk_options)`` for the target's kind."""
     with connect(connection_str, autocommit=True, **connect_kwargs) as conn:
         cursor = conn.cursor()
         try:
@@ -192,8 +216,8 @@ def _effective_workers(caller, connection_str, table, workers, connect_kwargs):
             cursor.close()
     if recovery_model == "FULL":
         warnings.warn(
-            f"{caller}: the database uses the FULL recovery model, so bulk loads are fully "
-            "logged; BULK_LOGGED or SIMPLE is much faster for large loads",
+            f"{caller}: the database uses the FULL recovery model, so bulk loads are fully logged; "
+            "BULK_LOGGED or SIMPLE is much faster for large loads",
             RuntimeWarning,
             stacklevel=3,
         )
@@ -203,8 +227,12 @@ def _effective_workers(caller, connection_str, table, workers, connect_kwargs):
             RuntimeWarning,
             stacklevel=3,
         )
-        return 1
-    return workers
+        return 1, table_lock, bulk_options
+    if kind == "columnstore":
+        if bulk_options["batch_size"] < _COLUMNSTORE_MIN_BATCH:
+            bulk_options = {**bulk_options, "batch_size": _COLUMNSTORE_MIN_BATCH}
+        return workers, False, bulk_options
+    return workers, True, bulk_options
 
 
 def _slice_rows(source, workers):
@@ -280,18 +308,18 @@ def _load_worker(connection_str, pending, stop, load, connect_kwargs):
             cursor.close()
 
 
-def _load_arrow_pieces(cursor, table, first, pieces, bulk_options):
+def _load_arrow_pieces(cursor, table, first, pieces, table_lock, bulk_options):
     import pyarrow as pa
 
     # A RecordBatchReader is an Arrow C stream, which the native bulk
     # copy consumes directly; a bare generator would need mssql_py_core.
     reader = pa.RecordBatchReader.from_batches(first.schema, pieces)
-    return cursor.bulkcopy_arrow(table, reader, table_lock=True, **bulk_options)
+    return cursor.bulkcopy_arrow(table, reader, table_lock=table_lock, **bulk_options)
 
 
-def _load_row_pieces(cursor, table, first, pieces, bulk_options):
+def _load_row_pieces(cursor, table, first, pieces, table_lock, bulk_options):
     rows = itertools.chain.from_iterable(pieces)
-    return cursor.bulkcopy(table, rows, table_lock=True, **bulk_options)
+    return cursor.bulkcopy(table, rows, table_lock=table_lock, **bulk_options)
 
 
 def _row_slices(rows, workers):

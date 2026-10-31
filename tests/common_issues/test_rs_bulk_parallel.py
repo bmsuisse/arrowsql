@@ -107,7 +107,7 @@ def test_non_heap_target_falls_back_to_one_worker(conn_str, cursor, table_name):
     )
     cursor.connection.commit()
 
-    with pytest.warns(RuntimeWarning, match="not a heap"):
+    with pytest.warns(RuntimeWarning, match="clustered index"):
         result = write_arrow(conn_str, table, _source(), workers=4)
 
     assert result["workers"] == 1
@@ -121,6 +121,7 @@ def test_heap_target_does_not_warn(conn_str, cursor, table_name):
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
+        warnings.filterwarnings("ignore", message=".*recovery model.*")
         write_arrow(conn_str, table, _source(1_000), workers=2)
 
 

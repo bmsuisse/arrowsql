@@ -103,7 +103,6 @@ def test_generator_error_raises(conn_str, cursor, table_name):
     "index, reason",
     [
         ("CREATE CLUSTERED INDEX ix ON {table} (id)", "clustered index"),
-        ("CREATE CLUSTERED COLUMNSTORE INDEX ix ON {table}", "columnstore"),
         ("CREATE NONCLUSTERED INDEX ix ON {table} (id, name)", "nonclustered"),
     ],
 )
@@ -185,3 +184,66 @@ def test_row_slices_cover_input_once():
 
     gen_pieces = list(bulk_parallel._row_slices((r for r in rows), 4))
     assert [r for p in gen_pieces for r in p] == rows
+
+
+def _record_bulk_calls(monkeypatch):
+    """Record (table_lock, batch_size) of every bulkcopy / bulkcopy_arrow call."""
+    from mssql_python.cursor import Cursor
+
+    calls = []
+    for name in ("bulkcopy", "bulkcopy_arrow"):
+        real = getattr(Cursor, name)
+
+        def wrapper(self, *args, _real=real, **kwargs):
+            calls.append((kwargs.get("table_lock"), kwargs.get("batch_size")))
+            return _real(self, *args, **kwargs)
+
+        monkeypatch.setattr(Cursor, name, wrapper)
+    return calls
+
+
+@pytest.mark.parametrize("loader", ["rows", "arrow"])
+@pytest.mark.parametrize("batch_size", [0, 5_000, 200_000])
+def test_columnstore_loads_in_parallel_without_tablock(
+    conn_str, cursor, table_name, monkeypatch, loader, batch_size
+):
+    table = f"dbo.{table_name}"
+    n = 500_000
+    _create(cursor, table, "CREATE CLUSTERED COLUMNSTORE INDEX ix ON {table}")
+    calls = _record_bulk_calls(monkeypatch)
+    rows = _rows(n)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        warnings.filterwarnings("ignore", message=".*recovery model.*")
+        if loader == "rows":
+            result = write_rows(conn_str, table, rows, workers=2, batch_size=batch_size)
+        else:
+            pa = pytest.importorskip("pyarrow")
+            ids, names, values = zip(*rows)
+            source = pa.table({"id": pa.array(ids, pa.int64()), "name": list(names), "v": list(values)})
+            result = write_arrow(conn_str, table, source, workers=2, batch_size=batch_size)
+
+    assert result["workers"] == 2
+    assert result["rows_copied"] == n
+    assert len(calls) == 2
+    assert all(lock is False for lock, _ in calls)
+    assert all(batch >= 102_400 for _, batch in calls)
+    assert max(batch for _, batch in calls) == max(batch_size, 102_400)
+    stats = _stats(cursor, table)
+    assert stats[0] == n and stats[2:4] == (0, n - 1)
+    cursor.execute(
+        "SELECT COUNT(*) FROM sys.dm_db_column_store_row_group_physical_stats "
+        f"WHERE object_id = OBJECT_ID('{table}') AND state_desc = 'COMPRESSED'"
+    )
+    assert cursor.fetchone()[0] >= 1  # full batches compressed directly
+
+
+def test_heap_keeps_tablock_and_batch_size(conn_str, cursor, table_name, monkeypatch):
+    table = f"dbo.{table_name}"
+    _create(cursor, table)
+    calls = _record_bulk_calls(monkeypatch)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*recovery model.*")
+        write_rows(conn_str, table, _rows(10_000), workers=2, batch_size=1_000)
+    assert calls and all(call == (True, 1_000) for call in calls)
