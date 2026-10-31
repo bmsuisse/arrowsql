@@ -6,7 +6,7 @@ These classes are used to raise exceptions when an error occurs while executing 
 """
 
 from typing import Optional
-from mssql_python.logging import logger
+from arrowsql.logging import logger
 import builtins
 
 

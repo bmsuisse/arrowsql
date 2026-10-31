@@ -587,8 +587,8 @@ def get_info_constants() -> Dict[str, int]:
 
 
 # Automatically export selected enum constants as module-level attributes
-# This allows: from mssql_python import SQL_VARCHAR
-# Instead of: from mssql_python.constants import ConstantsDDBC; ConstantsDDBC.SQL_VARCHAR.value
+# This allows: from arrowsql import SQL_VARCHAR
+# Instead of: from arrowsql.constants import ConstantsDDBC; ConstantsDDBC.SQL_VARCHAR.value
 
 # Define which ConstantsDDBC members should be exported as public API
 # Internal/driver-manager-dependent constants are excluded
