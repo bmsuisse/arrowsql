@@ -2053,6 +2053,16 @@ impl TdsClient {
         })
     }
 
+    /// Errors the server has raised so far for the parameter set currently
+    /// producing results (for example a `RAISERROR` ahead of its first row).
+    pub fn current_parameter_set_errors(&self) -> Vec<SqlErrorInfo> {
+        self.prepared_batch
+            .as_ref()
+            .and_then(|batch| batch.current.as_ref())
+            .map(|row| row.errors.clone())
+            .unwrap_or_default()
+    }
+
     /// Index of the parameter set currently producing results, if any.
     pub fn current_parameter_set(&self) -> Option<usize> {
         self.prepared_batch

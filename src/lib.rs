@@ -138,6 +138,7 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(statement::exec_direct, m)?)?;
     m.add_function(wrap_pyfunction!(statement::execute, m)?)?;
     m.add_function(wrap_pyfunction!(statement::execute_many, m)?)?;
+    m.add_function(wrap_pyfunction!(statement::execute_many_rows, m)?)?;
     m.add_function(wrap_pyfunction!(statement::row_count, m)?)?;
     m.add_function(wrap_pyfunction!(statement::num_result_cols, m)?)?;
     m.add_function(wrap_pyfunction!(statement::describe_col, m)?)?;

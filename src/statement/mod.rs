@@ -12,6 +12,7 @@
 //! GIL released (`py.detach`). Python objects are built from a detached
 //! `RowBuffer` after the locks are dropped.
 
+mod batch_rpc;
 mod cancel;
 mod cursor;
 mod exec;
@@ -43,6 +44,7 @@ pub use odbc::{
     reset_stmt, row_count, set_stmt_attr,
 };
 pub use odbc::append_messages;
+pub use batch_rpc::execute_many_rows;
 pub use wire::{Slot, abandon_result, discard_all, free_for_connection};
 
 static NEXT_STMT_ID: AtomicU64 = AtomicU64::new(1);

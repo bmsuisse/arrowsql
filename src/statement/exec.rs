@@ -464,6 +464,13 @@ impl BatchProgress {
             state.result_done = false;
             state.on_wire = true;
             self.has_current_result = true;
+            let raised = client.current_parameter_set_errors();
+            if !raised.is_empty() {
+                // An error raised ahead of the first row (RAISERROR) fails the call.
+                state.columns = None;
+                state.diag.splice(0..0, raised.iter().map(server_error_record));
+                return SQL_ERROR;
+            }
             return SQL_SUCCESS;
         }
         wire::buffer_all(client, &mut chunk_results, DRAIN_BUDGET_BYTES);
