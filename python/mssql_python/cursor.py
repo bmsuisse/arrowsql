@@ -13,6 +13,7 @@ Resource Management:
 
 import decimal
 import logging
+import re
 import uuid
 import datetime
 import warnings
@@ -28,6 +29,7 @@ from mssql_python.exceptions import (
     ProgrammingError,
     OperationalError,
     DatabaseError,
+    raise_exception,
 )
 from mssql_python.row import Row
 from mssql_python.perf_timer import perf_phase
@@ -383,6 +385,24 @@ _SQL_TYPE_TO_PYTHON_TYPE = {
 _SQL_HANDLE_STMT = ddbc_sql_const.SQL_HANDLE_STMT.value
 _SQL_SUCCESS_WITH_INFO = ddbc_sql_const.SQL_SUCCESS_WITH_INFO.value
 _SQL_NO_DATA = ddbc_sql_const.SQL_NO_DATA.value
+
+# RUST-PORT: the native bulk copy raises SQL Server errors as
+# "SQLSTATE:<state>:NATIVE:<number>:<message>" RuntimeErrors (see _raise_native_bulk_error).
+_NATIVE_SERVER_ERROR_RE = re.compile(r"^SQLSTATE:([0-9A-Z]{5}):NATIVE:(\d+):(.*)", re.DOTALL)
+
+
+def _raise_native_bulk_error(err: RuntimeError) -> None:
+    """
+    RUST-PORT: raise the DB-API exception that execute raises for the same server
+    error (a CHECK violation is an IntegrityError, a missing table a ProgrammingError).
+    Any other RuntimeError is re-raised unchanged.
+    """
+    match = _NATIVE_SERVER_ERROR_RE.match(str(err))
+    if match is None:
+        raise err
+    sqlstate, number, message = match.group(1), match.group(2), match.group(3)
+    # The number stays in the text, as mssql_py_core's "Sql Error: <n>: ..." did.
+    raise_exception(sqlstate, f"Sql Error: {number}: {message}", int(number) or None)
 
 
 class _ResultLayout:  # pylint: disable=too-few-public-methods
@@ -3787,20 +3807,23 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         if native_handle is not None:
             self._check_closed()
             self._bulkcopy_connection_params()  # same preconditions as the mssql_py_core path
-            result = ddbc_bindings.DDBCBulkCopyRows(
-                native_handle,
-                table_name,
-                self._bulk_row_iterator(data),
-                batch_size=batch_size,
-                timeout=timeout,
-                column_mappings=column_mappings,
-                keep_identity=keep_identity,
-                check_constraints=check_constraints,
-                table_lock=table_lock,
-                keep_nulls=keep_nulls,
-                fire_triggers=fire_triggers,
-                use_internal_transaction=use_internal_transaction,
-            )
+            try:
+                result = ddbc_bindings.DDBCBulkCopyRows(
+                    native_handle,
+                    table_name,
+                    self._bulk_row_iterator(data),
+                    batch_size=batch_size,
+                    timeout=timeout,
+                    column_mappings=column_mappings,
+                    keep_identity=keep_identity,
+                    check_constraints=check_constraints,
+                    table_lock=table_lock,
+                    keep_nulls=keep_nulls,
+                    fire_triggers=fire_triggers,
+                    use_internal_transaction=use_internal_transaction,
+                )
+            except RuntimeError as err:
+                _raise_native_bulk_error(err)
             logger.info(
                 "_bulkcopy: completed natively - rows_copied=%s, batch_count=%s, elapsed_time=%s",
                 result.get("rows_copied", "N/A"),
@@ -3905,7 +3928,10 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         self._bulkcopy_connection_params()  # same preconditions as the mssql_py_core path
         # No fallback on BulkUnsupported: mssql_py_core accepts exactly the same
         # (Arrow type, SQL type) pairs, and a one-shot reader is gone by then.
-        result = ddbc_bindings.DDBCBulkCopyArrow(handle, table_name, source, **options)
+        try:
+            result = ddbc_bindings.DDBCBulkCopyArrow(handle, table_name, source, **options)
+        except RuntimeError as err:
+            _raise_native_bulk_error(err)
         logger.info(
             "bulkcopy_arrow: completed natively - rows_copied=%s, batch_count=%s, elapsed_time=%s",
             result.get("rows_copied", "N/A"),

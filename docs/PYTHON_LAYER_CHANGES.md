@@ -136,6 +136,13 @@ The Rust side already reads a `None` entry as "no hint" (`params::parse_hint`).
   materializes a `Cursor` of the same connection used as a row source, which
   would otherwise deadlock on the connection's wire.
 - Timeout errors read "Bulk copy timeout: the operation timed out after N seconds".
+- Server errors from the native load (`DDBCBulkCopyRows` / `DDBCBulkCopyArrow`)
+  arrive as `SQLSTATE:<state>:NATIVE:<n>:<message>` and `_raise_native_bulk_error`
+  raises the DB-API class `execute` raises for them (CHECK or PRIMARY KEY violation
+  is `IntegrityError`, missing table is `ProgrammingError`), `RUST-PORT`. Upstream
+  raises `RuntimeError` for all of them; the `upstream_bug` tests in
+  `tests/common_issues/ported/test_port_sqlclient_bulkcopy.py` require the DB-API
+  classes. Other RuntimeErrors pass through unchanged.
 
 ## Failed execute clears the description (`cursor.py`, RUST-PORT)
 

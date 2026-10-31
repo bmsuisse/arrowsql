@@ -143,7 +143,9 @@ impl ConnShared {
     }
 }
 
-fn error_text(record: &DiagRecord) -> String {
+/// `SQLSTATE:<state>:NATIVE:<number>:<message>`, the RuntimeError text the Python
+/// layer maps to a DB-API exception class.
+pub(crate) fn error_text(record: &DiagRecord) -> String {
     format!("SQLSTATE:{}:NATIVE:{}:{}", record.sqlstate, record.native_error, record.message)
 }
 
