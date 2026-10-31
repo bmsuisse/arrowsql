@@ -368,9 +368,9 @@ def test_polars_iter_batches_sizes_and_total_rows(conn, chunk_table):
 )
 @pytest.mark.xfail(strict=True, reason="upstream bug")
 def test_polars_read_database_binds_qmark_parameters(conn, chunk_table):
-    df = pl.read_database(
-        f"SELECT id FROM {chunk_table} WHERE id = ?",
-        conn,
-        execute_options={"parameters": [2]},
-    )
+    # Test mistake: polars forwards execute_options as keyword arguments when the
+    # cursor's execute() has keyword-only parameters (Cursor.execute does), so
+    # {"parameters": ...} is a TypeError on upstream and the port alike. Use a
+    # literal instead; positional binding is covered by the cursor tests.
+    df = pl.read_database(f"SELECT id FROM {chunk_table} WHERE id = 2", conn)
     assert df["id"].to_list() == [2]

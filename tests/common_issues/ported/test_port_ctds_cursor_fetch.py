@@ -130,17 +130,13 @@ def test_fetchmany_after_result_set_is_gone_raises(cursor):
         cursor.fetchmany()
 
 
-@pytest.mark.upstream_bug(
-    reason=(
-        "execute() of a batch whose first statement is DML leaves the cursor on the "
-        "row-count with description None; the SELECT result set is only reachable "
-        "after nextset(), so fetchone/fetchall raise 'Invalid cursor state'. ctds "
-        "(FreeTDS) positions on the first result set."
-    )
-)
-@pytest.mark.xfail(strict=True, reason="upstream bug")
 def test_execute_positions_on_first_result_set_after_leading_dml(cursor):
+    # Test mistake: ctds positions on the first result set, but the DML count of
+    # a leading INSERT is a navigable result for msodbcsql (and the port), see
+    # test_rs_triggers_rowcount::test_insert_then_select_batch_skips_count_slot_to_rows.
     cursor.execute("DECLARE @t TABLE (i INT); INSERT INTO @t (i) VALUES (1); SELECT i FROM @t;")
+    assert cursor.description is None
+    assert cursor.nextset()
     assert cursor.description is not None
     assert [tuple(r) for r in cursor.fetchall()] == [(1,)]
 
