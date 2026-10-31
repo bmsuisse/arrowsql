@@ -9,6 +9,7 @@
 //! (closed, freed, re-executed, connection closing) its batch is abandoned
 //! instead of read ([`discard_owner`]).
 
+use crate::runtime::Lockable;
 use std::sync::{Arc, Weak};
 
 use mssql_tds::connection::tds_client::{ResultSet, StatementResult};
@@ -106,19 +107,19 @@ pub fn discard_if_owner(slot: &mut Slot, statement_id: u64) {
 /// `generation`: an Arrow stream was dropped before its end, so nobody will
 /// read the rest.
 pub fn abandon_result(stmt: &StmtShared, generation: u64) {
-    let mut slot = stmt.conn.slot.lock();
-    if stmt.state.lock().generation != generation {
+    let mut slot = stmt.conn.slot.lock_checked();
+    if stmt.state.lock_checked().generation != generation {
         return;
     }
     discard_if_owner(&mut slot, stmt.id);
-    let mut state = stmt.state.lock();
+    let mut state = stmt.state.lock_checked();
     if state.generation == generation {
         state.reset_results();
     }
 }
 
 fn discard_owner(client: &mut SyncClient, owned: &StmtShared) {
-    let mut state = owned.state.lock();
+    let mut state = owned.state.lock_checked();
     // A read error also ends the result: only `close_query` resynchronises
     // after one.
     let exhausted = state.result_done;
@@ -175,7 +176,7 @@ fn buffer_owner(
     owned: &StmtShared,
     requester: Option<(&Arc<StmtCancel>, u32)>,
 ) {
-    let mut state = owned.state.lock();
+    let mut state = owned.state.lock_checked();
     if !state.on_wire {
         return;
     }

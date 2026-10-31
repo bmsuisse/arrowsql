@@ -37,14 +37,14 @@ pub type Diag = Vec<DiagRecord>;
 /// A cancellable operation: the mssql-tds handle (attention on the wire) plus a
 /// flag checked between rows and before the operation starts.
 pub struct OpCancel {
-    pub handle: CancelHandle,
+    pub handle: Arc<CancelHandle>,
     flag: AtomicBool,
     wake: tokio::sync::Notify,
 }
 
 impl OpCancel {
     pub fn new() -> Self {
-        Self { handle: CancelHandle::new(), flag: AtomicBool::new(false), wake: tokio::sync::Notify::new() }
+        Self { handle: Arc::new(CancelHandle::new()), flag: AtomicBool::new(false), wake: tokio::sync::Notify::new() }
     }
 
     pub fn cancel(&self) {
@@ -129,6 +129,9 @@ pub struct Session {
     owner: Option<u64>,
     /// Owner still has rows of its current result on the wire.
     owner_rows: bool,
+    /// Cancellation of the execution that started the owner's batch: reads of
+    /// that batch obey it, so cancelling a drain means cancelling this.
+    owner_handle: Option<Arc<CancelHandle>>,
     cursors: HashMap<u64, CursorState>,
     param_types: HashMap<String, Vec<(String, String)>>,
     /// When the TDS login finished (pool `max_lifetime`).
@@ -166,6 +169,7 @@ impl Session {
             timeout,
             owner: None,
             owner_rows: false,
+            owner_handle: None,
             cursors: HashMap::new(),
             param_types: HashMap::new(),
             born: Instant::now(),
@@ -178,9 +182,12 @@ impl Session {
 
     /// Whether the server still answers on this session (pool checkout
     /// validation); the reset flag, if pending, rides on this request.
-    pub async fn ping(&mut self) -> bool {
-        let cancel = OpCancel::new();
-        self.query(Command::Batch("SELECT 1".into()), 1, &cancel).await.is_ok() && self.is_open()
+    ///
+    /// Bounded by `limit` and by `cancel`: a half-open socket never answers,
+    /// and the caller holds a pool permit while it waits.
+    pub async fn ping(&mut self, cancel: &OpCancel, limit: std::time::Duration) -> bool {
+        let probe = self.query(Command::Batch("SELECT 1".into()), 1, cancel);
+        matches!(tokio::time::timeout(limit, probe).await, Ok(Ok(_))) && self.is_open()
     }
 
     pub fn is_open(&self) -> bool {
@@ -228,7 +235,22 @@ impl Session {
             let keep = owner != requester && self.cursors.contains_key(&owner);
             if keep {
                 let state = self.cursors.entry(owner).or_default();
-                drain_into(client, state, self.owner_rows, cancel).await;
+                let drain = drain_into(client, state, self.owner_rows, cancel);
+                match (cancel, self.owner_handle.as_ref()) {
+                    (Some(cancel), Some(handle)) => {
+                        tokio::pin!(drain);
+                        tokio::select! {
+                            () = &mut drain => {}
+                            // The drain may be blocked in a read of the owner's
+                            // batch (e.g. its WAITFOR): cancel that read too.
+                            () = cancel.cancelled() => {
+                                handle.cancel();
+                                drain.await;
+                            }
+                        }
+                    }
+                    _ => drain.await,
+                }
             }
         }
         self.owner_rows = false;
@@ -362,6 +384,7 @@ impl Session {
     ) -> Result<ExecOut, Diag> {
         let timeout = self.timeout;
         let client = self.client.as_mut().ok_or_else(closed)?;
+        self.owner_handle = Some(cancel.handle.clone());
         let options = ExecuteOptions::new().timeout_secs(timeout).cancel(&cancel.handle);
         let result = match params {
             None => client.execute(sql, options).await,

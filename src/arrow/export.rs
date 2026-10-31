@@ -26,7 +26,7 @@ use pyo3::types::{PyCapsule, PyList, PyTuple};
 use super::plan::Plan;
 use super::sink::ArrowSink;
 use crate::consts::*;
-use crate::statement::{self, BatchSink, StmtShared};
+use crate::statement::{self, BatchSink, StmtCancel, StmtShared};
 
 fn arrow_err(err: impl std::fmt::Display) -> PyErr {
     PyRuntimeError::new_err(err.to_string())
@@ -156,6 +156,10 @@ struct StreamCore {
     schema: SchemaRef,
     stmt: Arc<StmtShared>,
     generation: u64,
+    /// Cancellation of the execution this stream reads: closing the stream
+    /// interrupts that execution only. The statement's current execution may
+    /// be a newer query on the same cursor.
+    execution: Option<Arc<StmtCancel>>,
     rx: Mutex<Option<Receiver<BatchResult>>>,
     /// `close()` was called: readers end, `rx` may still be held by one.
     closing: AtomicBool,
@@ -189,7 +193,9 @@ impl StreamCore {
                 if let Ok(mut rx) = self.rx.try_lock() {
                     drop(rx.take());
                 }
-                self.stmt.cancel_execution();
+                if let Some(execution) = &self.execution {
+                    execution.cancel();
+                }
                 std::thread::sleep(Duration::from_millis(5));
             }
             let _ = handle.join();
@@ -293,6 +299,7 @@ impl ArrowStream {
         stmt: Arc<StmtShared>,
         plan: Plan,
         generation: u64,
+        execution: Option<Arc<StmtCancel>>,
         batch_rows: usize,
         depth: usize,
         owner: Option<Py<PyAny>>,
@@ -311,6 +318,7 @@ impl ArrowStream {
                 schema: plan.schema,
                 stmt,
                 generation,
+                execution,
                 rx: Mutex::new(Some(rx)),
                 closing: AtomicBool::new(false),
                 producer: Mutex::new(Some(producer)),

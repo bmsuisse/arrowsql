@@ -78,6 +78,9 @@ pub fn forget_after_fork() {
         unsafe { BUILD.force_unlock() };
     }
     OWNER_PID.store(0, Ordering::Release);
+    // This thread is the child's only one, hence its main thread whatever it
+    // was in the parent (`threading` makes the forking thread the main one).
+    MAIN_THREAD.with(|m| m.set(0));
 }
 
 fn build_runtime() -> Runtime {
@@ -158,14 +161,21 @@ const SIGNAL_SLICE: Duration = Duration::from_millis(100);
 
 thread_local! {
     /// The statement whose execution or fetch this thread is running with the
-    /// GIL released (see [`detach_interruptible`]); null otherwise.
+    /// GIL released (see [`detach_interruptible`]); null otherwise, and always
+    /// null off the main thread (only it can receive signals).
     static WATCHED: Cell<*const StmtShared> = const { Cell::new(std::ptr::null()) };
+    /// A Python signal handler is running inside a watched wait, with the
+    /// statement's locks held (see [`interrupted`]).
+    static IN_HANDLER: Cell<bool> = const { Cell::new(false) };
     /// The exception a signal handler raised while the statement was waited on.
     static RAISED: RefCell<Option<PyErr>> = const { RefCell::new(None) };
     /// 0 = not asked yet, 1 = main thread, 2 = another thread.
     static MAIN_THREAD: Cell<u8> = const { Cell::new(0) };
 }
 
+/// Whether the calling thread is Python's main thread. Asked of Python once
+/// per thread, with the GIL held and no driver lock held (it runs Python
+/// code, which can run finalizers).
 fn on_main_thread(py: Python<'_>) -> bool {
     if MAIN_THREAD.with(Cell::get) == 0 {
         let is_main = || -> PyResult<bool> {
@@ -181,13 +191,20 @@ fn on_main_thread(py: Python<'_>) -> bool {
 /// handler raises (Ctrl-C), cancel the watched statement on the server and
 /// keep the exception for [`detach_interruptible`] to re-raise. Returns whether
 /// to stop looking.
+///
+/// The handler runs inside the wait, so the statement's connection and state
+/// locks are held by this very thread. A handler may call `cursor.cancel()`
+/// (lock free), but any driver call that needs those locks would wait for
+/// itself: [`Lockable::lock_checked`] turns that into an immediate error.
+/// Attaching to the GIL here cannot deadlock against another thread: nobody
+/// blocks on a statement lock while holding the GIL.
 fn interrupted() -> bool {
     let stmt = WATCHED.with(Cell::get);
     Python::attach(|py| {
-        if !on_main_thread(py) {
-            return true;
-        }
-        match py.check_signals() {
+        IN_HANDLER.with(|h| h.set(true));
+        let result = py.check_signals();
+        IN_HANDLER.with(|h| h.set(false));
+        match result {
             Ok(()) => false,
             Err(err) => {
                 RAISED.with(|r| *r.borrow_mut() = Some(err));
@@ -198,6 +215,28 @@ fn interrupted() -> bool {
             }
         }
     })
+}
+
+/// A lock that fails fast when taken by a signal handler that interrupted
+/// this thread's own wait, instead of deadlocking on itself.
+pub trait Lockable<T> {
+    fn lock_checked(&self) -> parking_lot::MutexGuard<'_, T>;
+}
+
+impl<T> Lockable<T> for Mutex<T> {
+    #[inline]
+    fn lock_checked(&self) -> parking_lot::MutexGuard<'_, T> {
+        if IN_HANDLER.with(Cell::get) {
+            return self.try_lock().unwrap_or_else(|| {
+                panic!(
+                    "arrowsql: this call needs the connection a statement on this thread is \
+                     waiting on, and was made from a signal handler that interrupted that wait. \
+                     Only cursor.cancel() is allowed there; do other work after the handler returns."
+                )
+            });
+        }
+        self.lock()
+    }
 }
 
 /// [`Python::detach`] for running a statement: while `f` waits for the server
@@ -215,8 +254,9 @@ pub fn detach_interruptible<R: Send>(
             WATCHED.with(|w| w.set(self.0));
         }
     }
+    let published = if on_main_thread(py) { std::ptr::from_ref(stmt) as usize } else { 0 };
     let out = py.detach(|| {
-        let _restore = Restore(WATCHED.with(|w| w.replace(std::ptr::from_ref(stmt))));
+        let _restore = Restore(WATCHED.with(|w| w.replace(published as *const StmtShared)));
         f()
     });
     match RAISED.with(|r| r.borrow_mut().take()) {

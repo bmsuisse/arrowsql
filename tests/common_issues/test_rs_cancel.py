@@ -143,3 +143,124 @@ def test_signal_handler_that_returns_does_not_cancel(conn):
         assert seen
     finally:
         signal.signal(signal.SIGINT, previous)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SIGINT delivery differs on Windows")
+def test_signal_handler_may_use_the_cursor_it_interrupted(conn):
+    """A handler runs while the interrupted statement holds the connection, so
+    a driver call that needs it fails fast instead of deadlocking."""
+    cur = conn.cursor()
+    refused = []
+
+    def handler(*_):
+        try:
+            cur.close()
+        except BaseException as exc:  # noqa: BLE001 - a PanicException derives from BaseException
+            refused.append(str(exc))
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGINT, handler)
+    try:
+        timer = _sigint_after(0.3)
+        # A deadlock would hang the run: a watchdog ends the process instead.
+        watchdog = _later(15, lambda: os._exit(70))
+        start = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            cur.execute(LONG_WAIT)
+        watchdog.cancel()
+        timer.join()
+        assert time.monotonic() - start < 8
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    assert refused and "signal handler" in refused[0]
+    _assert_usable(conn)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SIGINT delivery differs on Windows")
+def test_other_thread_can_read_cursor_metadata_while_main_waits(conn):
+    """arrow_stream() / description from a second thread while the main thread
+    waits in execute must not deadlock on the statement locks and the GIL."""
+    pytest.importorskip("pyarrow")
+    cur = conn.cursor()
+    cur.execute("SELECT 1 AS a")
+    cur.fetchall()
+    results = []
+
+    def probe():
+        time.sleep(0.5)
+        for _ in range(50):
+            try:
+                cur.description  # noqa: B018
+                cur.arrow_stream().close()
+            except Exception as exc:  # noqa: BLE001 - any answer is fine, a hang is not
+                results.append(type(exc).__name__)
+            time.sleep(0.02)
+        results.append("done")
+
+    thread = threading.Thread(target=probe, daemon=True)
+    thread.start()
+    watchdog = _later(20, lambda: os._exit(71))
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        # Only the execute is raced: the probe's streams discard the result they
+        # export, so the main thread must not fetch from it afterwards.
+        cur.execute("WAITFOR DELAY '00:00:03'; SELECT 7")
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        watchdog.cancel()
+    thread.join(10)
+    assert "done" in results
+
+
+def test_cancel_during_fetchall_lands_at_any_point(conn):
+    """One cancel at a random moment of a fetchall. It may land between two
+    batches, while rows are converted and no lock is held: it must still stop
+    the next batch instead of being dropped as a cancel of an idle cursor."""
+    import random
+
+    rng = random.Random(7)
+    for _ in range(25):
+        cur = conn.cursor()
+        cur.execute(HUGE_RESULT)
+        # A hung fetchall would never return; end the run instead of the suite.
+        watchdog = _later(60, lambda: os._exit(72))
+        timer = _later(rng.uniform(0.1, 0.5), cur.cancel)
+        with pytest.raises(mssql_python.Error):
+            cur.fetchall()
+        timer.join()
+        watchdog.cancel()
+        cur.close()
+    _assert_usable(conn)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+def test_ctrl_c_works_in_a_child_forked_from_a_worker_thread(conn_str):
+    """A worker thread that already ran a query cached 'not the main thread';
+    after fork() it is the child's main thread and must be watched again."""
+    outcome = {}
+
+    def worker():
+        conn = mssql_python.connect(conn_str)
+        conn.cursor().execute("WAITFOR DELAY '00:00:00.3'")  # long enough for a signal check: caches the role
+        conn.close()
+        pid = os.fork()
+        if pid == 0:
+            code = 1
+            try:
+                signal.signal(signal.SIGINT, signal.default_int_handler)
+                child = mssql_python.connect(conn_str)
+                _sigint_after(0.5)
+                start = time.monotonic()
+                try:
+                    child.cursor().execute(LONG_WAIT)
+                except KeyboardInterrupt:
+                    code = 0 if time.monotonic() - start < 10 else 2
+            finally:
+                os._exit(code)
+        outcome["status"] = os.waitpid(pid, 0)[1]
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(60)
+    assert not thread.is_alive()
+    assert os.waitstatus_to_exitcode(outcome["status"]) == 0

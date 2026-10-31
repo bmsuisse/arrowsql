@@ -213,7 +213,7 @@ def test_invalid_network_keyword_values_are_rejected(bad):
 
 
 def test_network_keywords_are_accepted_by_a_real_login(conn_str):
-    extra = "ServerSPN=MSSQLSvc/example:1433;KeepAlive=5000;KeepAliveInterval=500;IpAddressPreference=IPv4First"
+    extra = "ServerSPN=MSSQLSvc/example:1433;KeepAlive=30;KeepAliveInterval=5;IpAddressPreference=IPv4First"
     with connect(conn_str + ";" + extra) as c:
         assert c.cursor().execute("SELECT 1").fetchone()[0] == 1
 

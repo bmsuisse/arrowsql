@@ -2,6 +2,7 @@
 //! handle, converts Python arguments, and hands the work to `exec` /
 //! `cursor` with the GIL released.
 
+use crate::runtime::Lockable;
 use std::sync::Arc;
 
 use mssql_tds::datatypes::sqltypes::SqlType;
@@ -45,7 +46,7 @@ fn with_state<R: Send>(py: Python<'_>, stmt: &StmtShared, f: impl FnOnce(&mut St
     if let Some(mut state) = stmt.state.try_lock() {
         return f(&mut state);
     }
-    py.detach(|| f(&mut stmt.state.lock()))
+    py.detach(|| f(&mut stmt.state.lock_checked()))
 }
 
 /// [`fetch`] that avoids releasing the GIL when no wire read is needed.
@@ -59,7 +60,7 @@ fn fetch_with_gil(py: Python<'_>, stmt: &StmtShared, n: usize, plan: FetchPlan) 
 /// Replace the statement's diagnostics with one driver record.
 fn reject(py: Python<'_>, stmt: &Arc<StmtShared>, record: DiagRecord) -> i16 {
     py.detach(|| {
-        let mut state = stmt.state.lock();
+        let mut state = stmt.state.lock_checked();
         state.diag.clear();
         state.diag.push(record);
     });
@@ -310,6 +311,7 @@ pub fn fetch_all(
     let stmt = stmt_of(StatementHandle)?;
     crate::logging::debug(py, "FetchAll: fetching remaining rows");
     let mut ret = SQL_SUCCESS;
+    let _fetching = super::FetchingAll::enter(&stmt);
     loop {
         let fetched = crate::runtime::detach_interruptible(py, &stmt, || fetch(&stmt, FETCHALL_BATCH_ROWS, FetchPlan::Batch))?;
         append_messages(py, messages, &fetched.info)?;

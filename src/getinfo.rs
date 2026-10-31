@@ -10,6 +10,7 @@
 //! connection; the rest are driver constants. Information types the driver does
 //! not answer are rejected with HY096, which `Connection.getinfo` turns into None.
 
+use crate::runtime::Lockable;
 use std::borrow::Cow;
 
 use mssql_tds::connection::tds_client::StatementResult;
@@ -146,7 +147,7 @@ fn static_value(info_type: u16) -> Option<Value> {
 fn server_text(py: Python<'_>, conn: &ConnShared, info_type: u16) -> PyResult<Value> {
     // Metadata is read under the connection lock, with the GIL released.
     py.detach(|| {
-        let slot = conn.slot.lock();
+        let slot = conn.slot.lock_checked();
         let client = slot.client.as_ref().ok_or_else(connection_closed)?;
         let value = match info_type {
             // @@SERVERNAME, reported by the server in the login response.
@@ -163,7 +164,7 @@ fn server_text(py: Python<'_>, conn: &ConnShared, info_type: u16) -> PyResult<Va
 /// released it.
 fn user_name(py: Python<'_>, conn: &ConnShared) -> PyResult<Value> {
     py.detach(|| {
-        let mut slot = conn.slot.lock();
+        let mut slot = conn.slot.lock_checked();
         free_for_connection(&mut slot);
         let client = slot.client.as_mut().ok_or_else(connection_closed)?;
         let mut rows = RowBuffer::new();

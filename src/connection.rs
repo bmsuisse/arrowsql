@@ -4,6 +4,7 @@
 //! `_raise_connection_error` keeps mapping them:
 //! `RuntimeError("SQLSTATE:XXXXX:NATIVE:<n>:<message>")`.
 
+use crate::runtime::Lockable;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -287,7 +288,9 @@ impl mssql_tds::connection::client_context::EntraIdTokenFactory for PyTokenFacto
     ) -> mssql_tds::core::TdsResult<Vec<u8>> {
         let factory = self.0.clone();
         // The callable does network I/O under the GIL: keep it off the reactor.
-        let outcome = tokio::task::spawn_blocking(move || {
+        // On the shared runtime, not the connection's own: when the login times
+        // out that runtime is dropped, and dropping waits for blocking tasks.
+        let outcome = crate::runtime::runtime().spawn_blocking(move || {
             Python::attach(|py| -> PyResult<Vec<u8>> {
                 factory.bind(py).call1((spn, sts_url, format!("{auth_method:?}")))?.extract()
             })
@@ -348,7 +351,7 @@ impl Connection {
         }
         let shared = self.shared.clone();
         py.detach(move || {
-            let mut slot = shared.slot.lock();
+            let mut slot = shared.slot.lock_checked();
             // Transaction / session operations need the wire: buffer any
             // statement that still has results pending.
             crate::statement::free_for_connection(&mut slot);
@@ -385,7 +388,7 @@ impl Connection {
     /// Take the client out of the slot, ready to be retired. `None` when the
     /// connection was already closed.
     fn take_client(&self, transaction_already_rolled_back: bool, pooled: bool) -> PyResult<Option<SyncClient>> {
-        let mut slot = self.shared.slot.lock();
+        let mut slot = self.shared.slot.lock_checked();
         if slot.client.is_none() {
             self.closed.store(true, Ordering::Release);
             return Ok(None);

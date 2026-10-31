@@ -263,12 +263,78 @@ async def test_dead_idle_session_is_replaced_at_checkout(conn_str):
         await pool.close()
 
 
+@pytest.mark.asyncio
+async def test_checkout_restores_autocommit_before_validating(conn_str, table):
+    """A borrower left manual-commit mode on; the validation ping of the next
+    checkout must not open a transaction that outlives the restored setting."""
+    pool = await aio.create_pool(
+        conn_str, min_size=1, max_size=1, max_inactive_connection_lifetime=0, validate_after=0.05
+    )
+    try:
+        async with pool.acquire() as conn:
+            await conn.set_autocommit(False)
+        await asyncio.sleep(0.2)
+        async with pool.acquire() as conn:
+            assert conn.autocommit
+            await conn.execute(f"INSERT INTO dbo.{table} VALUES (1)")
+        assert await _count(conn_str, table) == 1
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_acquire_releases_its_permit_during_validation_and_login(conn_str):
+    pool = await aio.create_pool(conn_str, min_size=1, max_size=1, validate_after=0)
+    try:
+        held = await pool.acquire()
+        waiter = asyncio.ensure_future(pool.acquire().__aenter__())
+        await asyncio.sleep(0.2)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        await held.close()
+        started = time.monotonic()
+        assert await asyncio.wait_for(pool.fetchval("SELECT 5"), 10) == 5
+        assert time.monotonic() - started < 10
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_handover_drain_interrupts_the_blocked_read(conn_str):
+    """Cursor B takes the wire from cursor A, whose last row takes the server
+    minutes to compute: cancelling B must cut that read short."""
+    conn = await aio.connect(conn_str, autocommit=True)
+    try:
+        a, b = conn.cursor(), conn.cursor()
+        await a.execute(
+            "SELECT n FROM (SELECT TOP (30000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n "
+            "FROM sys.all_columns x CROSS JOIN sys.all_columns y) q UNION ALL "
+            "SELECT COUNT_BIG(*) FROM sys.all_objects p CROSS JOIN sys.all_objects q "
+            "CROSS JOIN sys.all_objects r CROSS JOIN sys.all_objects s OPTION (MAXDOP 1)"
+        )
+        started = time.monotonic()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(b.execute("SELECT 3"), 1)
+        assert time.monotonic() - started < 5, "cancel waited for the blocked drain"
+        c = conn.cursor()
+        await asyncio.wait_for(c.execute("SELECT 4"), 20)
+        assert (await c.fetchone())[0] == 4
+        assert time.monotonic() - started < 20
+    finally:
+        await conn.close()
+
+
 # ---- (d) non-Unix platforms
 
 
 @pytest.mark.asyncio
 async def test_connect_and_create_pool_raise_not_supported_without_native_aio(monkeypatch, conn_str):
-    monkeypatch.delattr(ddbc_bindings, "AioHub")
+    # Every Unix-only symbol is absent, as on Windows: the platform check must
+    # come before any of them is looked up.
+    for symbol in ("AioHub", "AioConnection", "AioPool", "AioOpening", "AioRowBatch",
+                   "aio_connect", "aio_create_pool"):
+        monkeypatch.delattr(ddbc_bindings, symbol, raising=False)
     with pytest.raises(mssql_python.NotSupportedError, match="Unix"):
         await aio.connect(conn_str)
     with pytest.raises(mssql_python.NotSupportedError, match="Unix"):

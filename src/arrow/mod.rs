@@ -20,7 +20,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 
 use crate::consts::*;
-use crate::statement::{self, BatchSink};
+use std::sync::Arc;
+
+use crate::statement::{self, BatchSink, StmtCancel};
 use export::{ArrowStream, ArrowTable};
 use plan::Plan;
 use sink::ArrowSink;
@@ -28,12 +30,15 @@ use sink::ArrowSink;
 /// Rows per batch when the caller doesn't care (native API default).
 pub const DEFAULT_BATCH_ROWS: usize = 65_536;
 
-fn current_plan(stmt: &statement::StmtShared) -> PyResult<(Plan, u64)> {
-    let Some((columns, generation)) = statement::result_columns(stmt) else {
+/// The statement lock is waited for with the GIL released: a thread running a
+/// query on this statement holds it, and that thread may need the GIL (to look
+/// at signals) before it can let go.
+fn current_plan(py: Python<'_>, stmt: &statement::StmtShared) -> PyResult<(Plan, u64, Option<Arc<StmtCancel>>)> {
+    let Some((columns, generation, execution)) = py.detach(|| statement::result_columns(stmt)) else {
         return Err(PyRuntimeError::new_err("No active result set. Cannot fetch Arrow batch."));
     };
     let plan = Plan::new(&columns).map_err(PyRuntimeError::new_err)?;
-    Ok((plan, generation))
+    Ok((plan, generation, execution))
 }
 
 /// Upstream contract: fetch up to `arrowBatchSize` rows as one record batch,
@@ -50,7 +55,7 @@ pub fn fetch_arrow_batch(
     messages: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<i16> {
     let stmt = statement::stmt_of(StatementHandle)?;
-    let (plan, _) = current_plan(&stmt)?;
+    let (plan, _, _) = current_plan(py, &stmt)?;
     let rows = arrowBatchSize.max(0) as usize;
     let (fetched, batch) = py.detach(|| {
         let mut sink = ArrowSink::new(&plan, rows);
@@ -79,7 +84,7 @@ pub fn fetch_arrow_table(
     messages: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(i16, ArrowTable)> {
     let stmt = statement::stmt_of(StatementHandle)?;
-    let (plan, _) = current_plan(&stmt)?;
+    let (plan, _, _) = current_plan(py, &stmt)?;
     let batch_size = batch_size.max(1);
     let mut remaining = if max_rows < 0 { usize::MAX } else { max_rows as usize };
     let (ret, info, batches) = py.detach(|| {
@@ -123,14 +128,15 @@ pub fn fetch_arrow_table(
 #[pyo3(name = "DDBCArrowStream", signature = (StatementHandle, batch_size=DEFAULT_BATCH_ROWS, prefetch=2, owner=None))]
 #[allow(non_snake_case)]
 pub fn arrow_stream(
+    py: Python<'_>,
     StatementHandle: &Bound<'_, PyAny>,
     batch_size: usize,
     prefetch: usize,
     owner: Option<Py<PyAny>>,
 ) -> PyResult<ArrowStream> {
     let stmt = statement::stmt_of(StatementHandle)?;
-    let (plan, generation) = current_plan(&stmt)?;
-    Ok(ArrowStream::start(stmt, plan, generation, batch_size.max(1), prefetch, owner))
+    let (plan, generation, execution) = current_plan(py, &stmt)?;
+    Ok(ArrowStream::start(stmt, plan, generation, execution, batch_size.max(1), prefetch, owner))
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

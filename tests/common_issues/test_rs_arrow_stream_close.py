@@ -122,3 +122,44 @@ def test_closed_flag_does_not_wait_for_a_blocked_reader(conn, conn_str, cursor, 
         holder.rollback()
     finally:
         holder.close()
+
+
+def test_closing_an_old_stream_does_not_cancel_a_newer_query(conn, conn_str, cursor, table_name):
+    """The cursor re-executes while the old stream's producer is still stuck in
+    a read; closing the old stream must cancel only that old execution."""
+    holder, stream = _locked_stream(conn, conn_str, cursor, table_name, 30000, 10_000)
+    try:
+        reader = threading.Thread(target=lambda: _swallow(stream), daemon=True)
+        reader.start()
+        time.sleep(1)
+        outcome = {}
+
+        def rerun():
+            try:
+                # The raw binding: cursor.execute() would first close the cursor,
+                # which cancels the old execution by itself.
+                outcome["ret"] = ddbc_bindings.DDBCSQLExecDirect(
+                    cursor.hstmt, "WAITFOR DELAY '00:00:03'; SELECT 11"
+                )
+            except Exception as exc:  # noqa: BLE001
+                outcome["error"] = exc
+
+        runner = threading.Thread(target=rerun, daemon=True)
+        runner.start()
+        time.sleep(1)  # the new execute is waiting for the wire behind the producer
+        stream.close()
+        runner.join(30)
+        reader.join(CLOSE_DEADLINE)
+        assert outcome.get("ret") == 0, outcome  # SQL_SUCCESS, not HY008
+        row = []
+        assert ddbc_bindings.DDBCSQLFetchOne(cursor.hstmt, row) == 0 and row[0] == 11
+        holder.rollback()
+    finally:
+        holder.close()
+
+
+def _swallow(stream):
+    try:
+        stream.read_all()
+    except Exception:  # noqa: BLE001
+        pass
