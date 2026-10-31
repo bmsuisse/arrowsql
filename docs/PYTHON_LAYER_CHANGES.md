@@ -126,3 +126,16 @@ converter map is still keyed on the converter generation.
 - `pyproject.toml`: no required dependencies. `async-preview`, `arrow` and
   `azure` are optional extras. No Python-layer code changed for them: the
   imports were already lazy.
+
+## executemany fast path
+
+- `Cursor.executemany` (`RUST-PORT`): list/tuple batches without
+  `setinputsizes` first go to `ddbc_bindings.SQLExecuteManyRows`
+  (`src/statement/batch_rpc.rs`), which converts the rows as given. It returns
+  `None`, having sent nothing, for batches it cannot run exactly like the
+  general path (ragged rows, a column mixing kinds, strings over 4000 chars or
+  binaries over 8000 bytes, Decimals next to NULLs, unsupported types, or a
+  non-native handle such as a test mock); the general path then runs and
+  reports any error.
+- The diagnostics / rowcount / description tail of `executemany` moved to
+  `Cursor._finish_executemany` so both paths share it.
