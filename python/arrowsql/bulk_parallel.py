@@ -28,6 +28,7 @@ import queue
 import threading
 import time
 import warnings
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any, Optional
 
@@ -177,11 +178,8 @@ def write_rows(
         )
     if workers == 1:
         with connect(connection_str, autocommit=True, **connect_kwargs) as conn:
-            cursor = conn.cursor()
-            try:
+            with closing(conn.cursor()) as cursor:
                 result = cursor.bulkcopy(table, rows, table_lock=table_lock, **bulk_options)
-            finally:
-                cursor.close()
         return _summarize([result], 1, started)
 
     results = _load_parallel(
@@ -208,12 +206,9 @@ def _check_args(workers, batch_size, timeout):
 def _apply_target_policy(caller, connection_str, table, workers, table_lock, bulk_options, connect_kwargs):
     """Return ``(workers, table_lock, bulk_options)`` for the target's kind."""
     with connect(connection_str, autocommit=True, **connect_kwargs) as conn:
-        cursor = conn.cursor()
-        try:
+        with closing(conn.cursor()) as cursor:
             cursor.execute(_TARGET_QUERY, (table, table, table, table))
             kind, recovery_model = cursor.fetchone()
-        finally:
-            cursor.close()
     if recovery_model == "FULL":
         warnings.warn(
             f"{caller}: the database uses the FULL recovery model, so bulk loads are fully logged; "
@@ -235,22 +230,22 @@ def _apply_target_policy(caller, connection_str, table, workers, table_lock, bul
     return workers, True, bulk_options
 
 
+def _slice_size(count, workers):
+    """Slice size that gives each worker several slices to pull."""
+    return max(1, min(_MAX_SLICE_ROWS, -(-count // (workers * _SLICES_PER_WORKER))))
+
+
 def _slice_rows(source, workers):
-    """Pick a slice size that gives each worker several slices to pull."""
     num_rows = getattr(source, "num_rows", None)
     if isinstance(num_rows, int) and num_rows > 0:
-        per_slice = -(-num_rows // (workers * _SLICES_PER_WORKER))
-        return max(1, min(_MAX_SLICE_ROWS, per_slice))
+        return _slice_size(num_rows, workers)
     return _MAX_SLICE_ROWS
 
 
 def _load_single(connection_str, table, source, table_lock, bulk_options, connect_kwargs):
     with connect(connection_str, autocommit=True, **connect_kwargs) as conn:
-        cursor = conn.cursor()
-        try:
+        with closing(conn.cursor()) as cursor:
             return cursor.bulkcopy_arrow(table, source, table_lock=table_lock, **bulk_options)
-        finally:
-            cursor.close()
 
 
 def _load_parallel(connection_str, workers, pieces, load, connect_kwargs):
@@ -291,8 +286,7 @@ def _load_parallel(connection_str, workers, pieces, load, connect_kwargs):
 
 def _load_worker(connection_str, pending, stop, load, connect_kwargs):
     with connect(connection_str, autocommit=True, **connect_kwargs) as conn:
-        cursor = conn.cursor()
-        try:
+        with closing(conn.cursor()) as cursor:
             first = _next(pending, stop)
             if first is _END:
                 return None
@@ -304,8 +298,6 @@ def _load_worker(connection_str, pending, stop, load, connect_kwargs):
                     piece = _next(pending, stop)
 
             return load(cursor, first, pieces())
-        finally:
-            cursor.close()
 
 
 def _load_arrow_pieces(cursor, table, first, pieces, table_lock, bulk_options):
@@ -326,7 +318,7 @@ def _row_slices(rows, workers):
     """Yield lists of rows: plain slices of a list or tuple, else islice chunks."""
     if isinstance(rows, (list, tuple)):
         count = len(rows)
-        size = max(1, min(_MAX_SLICE_ROWS, -(-count // (workers * _SLICES_PER_WORKER))))
+        size = _slice_size(count, workers)
         for offset in range(0, count, size):
             yield rows[offset : offset + size]
         return

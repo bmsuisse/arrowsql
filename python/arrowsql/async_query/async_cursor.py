@@ -12,12 +12,11 @@ from contextlib import asynccontextmanager
 from typing import Any, Optional
 import uuid
 
-from ..exceptions import OperationalError
 from ..helpers import get_settings
 from ..logging import logger
 from ..row import Row
 from . import async_execute, async_fetch
-from .exception_translator import translate_py_core_exceptions
+from .exception_translator import is_connection_busy, translate_py_core_exceptions
 
 
 class _AsyncCursor:
@@ -97,9 +96,7 @@ class _AsyncCursor:
                 return
 
     def _reconcile_failed_result_operation(self, operation: str, error: BaseException) -> None:
-        if isinstance(error, OperationalError) and str(error.__cause__).startswith(
-            "Connection is busy"
-        ):
+        if is_connection_busy(error):
             return
         self._reset_fetch_tracking()
         self._clear_result_metadata()
@@ -187,9 +184,7 @@ class _AsyncCursor:
                 with translate_py_core_exceptions():
                     await close_awaitable
             except (Exception, asyncio.CancelledError) as error:
-                if isinstance(error, OperationalError) and str(error.__cause__).startswith(
-                    "Connection is busy"
-                ):
+                if is_connection_busy(error):
                     close_accepted = False
                 raise
             finally:

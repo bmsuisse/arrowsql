@@ -19,6 +19,7 @@ statement is never rewritten or retried.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -232,9 +233,9 @@ def _server_message(exc: BaseException) -> str:
     """The server's own text, without the ODBC driver prefix."""
     text = getattr(exc, "ddbc_error", None) or getattr(exc, "driver_error", None) or str(exc)
     text = str(text)
-    marker = text.find("[SQL Server]")
-    if marker >= 0:
-        return text[marker + len("[SQL Server]") :].strip()
+    _, sep, server_text = text.partition("[SQL Server]")
+    if sep:
+        return server_text.strip()
     return _DRIVER_PREFIX.sub("", text, count=1).strip() or text
 
 
@@ -308,9 +309,9 @@ def _split_message(item: Any) -> str:
     """Text of a ``cursor.messages`` entry, with the SQL Server number when present."""
     label, text = item if isinstance(item, (tuple, list)) and len(item) == 2 else ("", str(item))
     text = str(text)
-    marker = text.find("[SQL Server]")
-    if marker >= 0:
-        text = text[marker + len("[SQL Server]") :]
+    _, sep, server_text = text.partition("[SQL Server]")
+    if sep:
+        text = server_text
     match = re.search(r"\((\d+)\)", str(label))
     prefix = f"({match.group(1)}) " if match and match.group(1) != "0" else ""
     return prefix + text.strip()
@@ -430,20 +431,14 @@ def _run(
         return error_json(exc, max_bytes), False
     finally:
         if own_cursor is not None:
-            try:
+            with contextlib.suppress(Exception):
                 own_cursor.close()
-            except Exception:  # pylint: disable=broad-exception-caught
-                pass
         if previous_timeout is not None and owned is None:
-            try:
+            with contextlib.suppress(Exception):
                 conn_or_str.timeout = previous_timeout
-            except Exception:  # pylint: disable=broad-exception-caught
-                pass
         if owned is not None:
-            try:
+            with contextlib.suppress(Exception):
                 owned.close()
-            except Exception:  # pylint: disable=broad-exception-caught
-                pass
 
 
 def query(
@@ -516,18 +511,16 @@ def query_cursor(
 # --- command line -----------------------------------------------------------
 
 
+def _emit_error(category: str, message: str, next_step: str) -> None:
+    payload = {"category": category, "message": message, "next_step": next_step, "retryable": False}
+    print(json.dumps(payload), file=sys.stderr)
+
+
 def _configuration_error(message: str) -> None:
-    print(
-        json.dumps(
-            {
-                "category": "configuration",
-                "message": message,
-                "next_step": "Check --help, the connection string, SQL input and positive budgets "
-                "(max_bytes >= 256).",
-                "retryable": False,
-            }
-        ),
-        file=sys.stderr,
+    _emit_error(
+        "configuration",
+        message,
+        "Check --help, the connection string, SQL input and positive budgets (max_bytes >= 256).",
     )
 
 
@@ -606,17 +599,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             timeout_s=args.timeout_s,
         )
     except KeyboardInterrupt:
-        print(
-            json.dumps(
-                {
-                    "category": "interrupted",
-                    "message": "Query interrupted.",
-                    "next_step": "Retry only if you still need the result.",
-                    "retryable": False,
-                }
-            ),
-            file=sys.stderr,
-        )
+        _emit_error("interrupted", "Query interrupted.", "Retry only if you still need the result.")
         return 130
     parsed = _is_configuration(text) if not ok else False
     # Locale encoding and newline translation must not change the byte budget.
