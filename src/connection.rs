@@ -270,20 +270,53 @@ fn call_token_factory(py: Python<'_>, factory: &Py<PyAny>) -> PyResult<FactoryTo
     Ok(FactoryToken { token, expiry })
 }
 
+/// Bridges a Python `(spn, sts_url, auth_method) -> UTF-16LE JWT bytes`
+/// callable to mssql-tds' federated-auth hook. The server names the tenant
+/// (STS URL) mid-login, which is why the token cannot be fetched up front for
+/// `ActiveDirectoryServicePrincipal` / `ActiveDirectoryPassword`.
+#[derive(Clone)]
+struct PyTokenFactory(Arc<Py<PyAny>>);
+
+#[async_trait::async_trait]
+impl mssql_tds::connection::client_context::EntraIdTokenFactory for PyTokenFactory {
+    async fn create_token(
+        &self,
+        spn: String,
+        sts_url: String,
+        auth_method: mssql_tds::connection::client_context::TdsAuthenticationMethod,
+    ) -> mssql_tds::core::TdsResult<Vec<u8>> {
+        let factory = self.0.clone();
+        // The callable does network I/O under the GIL: keep it off the reactor.
+        let outcome = tokio::task::spawn_blocking(move || {
+            Python::attach(|py| -> PyResult<Vec<u8>> {
+                factory.bind(py).call1((spn, sts_url, format!("{auth_method:?}")))?.extract()
+            })
+        })
+        .await;
+        match outcome {
+            Ok(Ok(token)) => Ok(token),
+            Ok(Err(e)) => Err(mssql_tds::error::Error::ConnectionError(format!("Entra ID token acquisition failed: {e}"))),
+            Err(e) => Err(mssql_tds::error::Error::ConnectionError(format!("Entra ID token acquisition aborted: {e}"))),
+        }
+    }
+}
+
 /// The session a new `Connection` runs on.
 struct Session {
     client: SyncClient,
     token: Option<String>,
     token_expiry: i64,
+    /// Connection timeout the pooled session carried (0 for a new one).
+    connection_timeout: u32,
     /// Came out of the pool: server-side state is reset by the next request.
     reused: bool,
 }
 
 impl Session {
     fn reused(entry: IdleClient) -> Self {
-        let IdleClient { mut client, token, token_expiry } = entry;
+        let IdleClient { mut client, token, token_expiry, connection_timeout } = entry;
         client.prepare_reset_connection(false);
-        Self { client, token, token_expiry, reused: true }
+        Self { client, token, token_expiry, connection_timeout, reused: true }
     }
 }
 
@@ -378,7 +411,12 @@ impl Connection {
             let _ = client.block_on(|c| c.close_connection());
             return Err(err);
         }
-        let entry = IdleClient { client, token: membership.token, token_expiry: membership.token_expiry };
+        let entry = IdleClient {
+            client,
+            token: membership.token,
+            token_expiry: membership.token_expiry,
+            connection_timeout: self.shared.connection_timeout.load(Ordering::Relaxed),
+        };
         if let Some(rejected) = pooling::checkin(membership.lease, entry) {
             pooling::close_all(vec![rejected]);
         }
@@ -460,6 +498,7 @@ fn open_session(
     conn_str: &str,
     attrs: &ConnAttrs,
     factory: Option<&Py<PyAny>>,
+    federated: Option<&Py<PyAny>>,
     lease: Option<&Lease>,
     pooled: Option<IdleClient>,
 ) -> PyResult<Session> {
@@ -487,15 +526,26 @@ fn open_session(
         (None, Some(factory)) => call_token_factory(py, factory)?,
         (None, None) => FactoryToken { token: attrs.token.clone(), expiry: 0 },
     };
-    connect(py, conn_str, attrs, token, expiry)
+    connect(py, conn_str, attrs, federated, token, expiry)
 }
 
 fn expiry_is_safe(expiry: i64) -> bool {
     expiry > 0 && pooling::unix_now() + TOKEN_REFRESH_THRESHOLD_SECS < expiry
 }
 
-fn connect(py: Python<'_>, conn_str: &str, attrs: &ConnAttrs, token: Option<String>, expiry: i64) -> PyResult<Session> {
-    let (mut context, opts) = crate::connstr::build_context(conn_str, token.clone()).map_err(|msg| {
+fn connect(
+    py: Python<'_>,
+    conn_str: &str,
+    attrs: &ConnAttrs,
+    federated: Option<&Py<PyAny>>,
+    token: Option<String>,
+    expiry: i64,
+) -> PyResult<Session> {
+    let federated = federated.map(|f| {
+        Box::new(PyTokenFactory(Arc::new(f.clone_ref(py))))
+            as Box<dyn mssql_tds::connection::client_context::CloneableEntraIdTokenFactory>
+    });
+    let (mut context, opts) = crate::connstr::build_context_with(conn_str, token.clone(), federated).map_err(|msg| {
         let state = if msg == crate::connstr::MISSING_SERVER { "08001" } else { "HY000" };
         driver_error(state, msg)
     })?;
@@ -506,13 +556,13 @@ fn connect(py: Python<'_>, conn_str: &str, attrs: &ConnAttrs, token: Option<Stri
     let client = py
         .detach(|| SyncClient::connect(context, &datasource))
         .map_err(|e| runtime_error(&diag::login_records_for_error(&e)))?;
-    Ok(Session { client, token, token_expiry: expiry, reused: false })
+    Ok(Session { client, token, token_expiry: expiry, connection_timeout: 0, reused: false })
 }
 
 #[pymethods]
 impl Connection {
     #[new]
-    #[pyo3(signature = (conn_str, use_pool, attrs_before=None, pool_key=String::new(), token_factory=None))]
+    #[pyo3(signature = (conn_str, use_pool, attrs_before=None, pool_key=String::new(), token_factory=None, fedauth_factory=None))]
     fn new(
         py: Python<'_>,
         conn_str: String,
@@ -520,9 +570,11 @@ impl Connection {
         attrs_before: Option<&Bound<'_, PyDict>>,
         pool_key: String,
         token_factory: Option<Py<PyAny>>,
+        fedauth_factory: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let mut attrs = ConnAttrs::parse(attrs_before)?;
         let factory = token_factory.filter(|f| !f.bind(py).is_none());
+        let fedauth = fedauth_factory.filter(|f| !f.bind(py).is_none());
         let pool_id = use_pool.then(|| pooling::key(&conn_str, &pool_key));
         let acquired = match &pool_id {
             Some(id) => py
@@ -536,7 +588,11 @@ impl Connection {
             Acquired::Fresh(lease) => (Some(lease), None),
         };
         // On any early return the lease drops and frees the pool slot.
-        let session = open_session(py, &conn_str, &attrs, factory.as_ref(), lease.as_ref(), pooled)?;
+        let session = open_session(py, &conn_str, &attrs, factory.as_ref(), fedauth.as_ref(), lease.as_ref(), pooled)?;
+        if session.reused && attrs.connection_timeout == 0 {
+            // The timeout is a property of the physical connection.
+            attrs.connection_timeout = session.connection_timeout;
+        }
         if session.reused && attrs.pending.isolation.is_none() {
             // RESETCONNECTION leaves the isolation level of the previous user.
             attrs.pending.isolation = Some(READ_COMMITTED_SQL);
