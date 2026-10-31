@@ -31,9 +31,11 @@ use mssql_tds::datatypes::row_writer::RowWriter;
 use mssql_tds::datatypes::sql_json::SqlJson;
 use mssql_tds::datatypes::sql_string::EncodingType;
 use mssql_tds::datatypes::sql_vector::SqlVector;
+use mssql_tds::datatypes::sqldatatypes::TdsDataType;
 use uuid::Uuid;
 
 use super::plan::{Kind, Plan};
+use crate::agent::fmt;
 use crate::decode::RowBuffer;
 use crate::decode::buffer::Cell;
 use crate::statement::BatchSink;
@@ -119,6 +121,8 @@ struct Column {
     kind: Kind,
     values: Values,
     valid: Bits,
+    /// Base type of the current `sql_variant` value (text columns only).
+    variant_base: Option<TdsDataType>,
 }
 
 impl Column {
@@ -141,7 +145,7 @@ impl Column {
                 Values::Var { offsets, data: Vec::with_capacity(rows.saturating_mul(width)) }
             }
         };
-        Column { kind, values, valid: Bits::with_capacity(rows) }
+        Column { kind, values, valid: Bits::with_capacity(rows), variant_base: None }
     }
 
     fn len(&self) -> usize {
@@ -208,6 +212,13 @@ impl Column {
             self.valid.push(true);
             return;
         }
+        if matches!(self.values, Values::Var { .. }) {
+            // sql_variant decimal: exact text, not just the whole part.
+            let signed = if negative { -(magnitude as i128) } else { magnitude as i128 };
+            let mut text = String::new();
+            fmt::write_decimal(&mut text, signed, scale.max(0) as u32);
+            return self.text(text.as_bytes());
+        }
         let digits = POW10[scale.max(0) as usize] as u128;
         let whole = (magnitude / digits) as i64;
         if matches!(self.values, Values::Float32(_) | Values::Float64(_)) {
@@ -225,6 +236,14 @@ impl Column {
             Values::Timestamp(v) => v.push((days - UNIX_EPOCH_DAYS) * MICROS_PER_DAY + micros),
             Values::Date32(v) => v.push((days - UNIX_EPOCH_DAYS) as i32),
             Values::Time64(v) => v.push(micros * 1000),
+            Values::Var { .. } => {
+                // sql_variant datetime: the shortest exact text.
+                let mut text = String::new();
+                fmt::write_date(&mut text, days - UNIX_EPOCH_DAYS);
+                text.push(' ');
+                fmt::write_time_trimmed(&mut text, micros * 1000);
+                return self.text(text.as_bytes());
+            }
             _ => return self.null(),
         }
         self.valid.push(true);
@@ -234,6 +253,11 @@ impl Column {
     fn time(&mut self, ticks: u64) {
         match &mut self.values {
             Values::Time64(v) => v.push(ticks as i64 * 100),
+            Values::Var { .. } => {
+                let mut text = String::new();
+                fmt::write_time_trimmed(&mut text, ticks as i64 * 100);
+                return self.text(text.as_bytes());
+            }
             _ => return self.null(),
         }
         self.valid.push(true);
@@ -244,6 +268,11 @@ impl Column {
         match &mut self.values {
             Values::Date32(v) => v.push((i64::from(days) - UNIX_EPOCH_DAYS) as i32),
             Values::Timestamp(v) => v.push((i64::from(days) - UNIX_EPOCH_DAYS) * MICROS_PER_DAY),
+            Values::Var { .. } => {
+                let mut text = String::new();
+                fmt::write_date(&mut text, i64::from(days) - UNIX_EPOCH_DAYS);
+                return self.text(text.as_bytes());
+            }
             _ => return self.null(),
         }
         self.valid.push(true);
@@ -265,6 +294,16 @@ impl Column {
     /// Raw bytes: kept as-is in a binary column, made valid UTF-8 in a text one.
     #[inline]
     fn bytes(&mut self, bytes: &[u8]) {
+        if self.kind == Kind::Text
+            && matches!(
+                self.variant_base,
+                Some(TdsDataType::VarBinary | TdsDataType::BigVarBinary | TdsDataType::Binary | TdsDataType::BigBinary)
+            )
+        {
+            let mut text = String::new();
+            fmt::write_hex(&mut text, bytes);
+            return self.text(text.as_bytes());
+        }
         if self.kind == Kind::Text && std::str::from_utf8(bytes).is_err() {
             return self.text(String::from_utf8_lossy(bytes).as_bytes());
         }
@@ -496,6 +535,9 @@ impl BatchSink for ArrowSink {
 impl RowWriter for ArrowSink {
     fn write_null(&mut self, col: usize) {
         self.columns[col].null();
+    }
+    fn write_variant_base_type(&mut self, col: usize, base: TdsDataType) {
+        self.columns[col].variant_base = Some(base);
     }
     fn write_bool(&mut self, col: usize, val: bool) {
         self.columns[col].int(i64::from(val));

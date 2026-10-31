@@ -66,12 +66,24 @@ impl Plan {
     /// Errors (upstream's wording) on SQL types upstream can't fetch as Arrow,
     /// e.g. sql_variant.
     pub fn new(columns: &[ColumnMetadata]) -> Result<Plan, String> {
+        Self::build(columns, false)
+    }
+
+    /// Like `new`, but `sql_variant` columns become text (the agent renderer
+    /// shows them in their value's own text form).
+    pub fn for_display(columns: &[ColumnMetadata]) -> Result<Plan, String> {
+        Self::build(columns, true)
+    }
+
+    fn build(columns: &[ColumnMetadata], variant_as_text: bool) -> Result<Plan, String> {
         let mut kinds = Vec::with_capacity(columns.len());
         let mut widths = Vec::with_capacity(columns.len());
         let mut fields = Vec::with_capacity(columns.len());
         for (i, meta) in columns.iter().enumerate() {
             let sql_type = describe::odbc_sql_type(meta);
-            let kind = kind_of(sql_type, meta).ok_or_else(|| {
+            let kind = kind_of(sql_type, meta)
+                .or((variant_as_text && sql_type == SQL_SS_VARIANT).then_some(Kind::Text))
+                .ok_or_else(|| {
                 format!(
                     "Unsupported data type for Arrow batch fetch for column - {}, Type - {}, column ID - {}",
                     meta.column_name,
