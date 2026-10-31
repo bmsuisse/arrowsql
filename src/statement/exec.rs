@@ -397,6 +397,18 @@ fn name_positionally(types: Vec<SqlType>) -> Vec<RpcParameter> {
         .collect()
 }
 
+/// Error 2628 (verbose truncation) is data-related (22001) when a batch row
+/// hits it; msodbcsql reports it as 42000 for a single statement.
+const VERBOSE_TRUNCATION_ERROR: u32 = 2628;
+
+fn batch_error_record(error: &mssql_tds::error::SqlErrorInfo) -> DiagRecord {
+    let mut record = server_error_record(error);
+    if error.number == VERBOSE_TRUNCATION_ERROR {
+        record.sqlstate = "22001".to_string();
+    }
+    record
+}
+
 #[derive(Default)]
 struct BatchProgress {
     total_rows_affected: Option<i64>,
@@ -445,7 +457,7 @@ impl BatchProgress {
         batch: &PreparedBatchResult,
     ) -> bool {
         let Some(failed) = batch.rows.iter().find(|r| !r.errors.is_empty()) else { return false };
-        let errors: Vec<DiagRecord> = failed.errors.iter().map(server_error_record).collect();
+        let errors: Vec<DiagRecord> = failed.errors.iter().map(batch_error_record).collect();
         ex.state.diag.splice(0..0, errors);
         true
     }

@@ -2591,10 +2591,16 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             fast_executemany is not None
             and not self._inputsizes
             and isinstance(seq_of_parameters, (list, tuple))
+            and isinstance(self.hstmt, ddbc_bindings.SqlHandle)
         ):
             with perf_phase("py::executemany::cpp_call"):
                 ret = fast_executemany(self.hstmt, operation, seq_of_parameters)
             if ret is not None:
+                logger.debug(
+                    "Executing batch query with %d parameter sets (%d columns per row)",
+                    len(seq_of_parameters),
+                    len(seq_of_parameters[0]),
+                )
                 self._finish_executemany(operation, ret)
                 return
 
