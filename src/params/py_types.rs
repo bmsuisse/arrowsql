@@ -876,8 +876,8 @@ fn py_datetime_to_sql_type(
         let days = datetime_days(py_obj)?;
         return Ok(SqlType::DateTime2(Some(SqlDateTime2 {
             days,
-            // Scale 7 matches what the upstream driver declares for a datetime, so
-            // the server formats the value with the same 100 ns digits.
+            // Scale 7 carries the full 100 ns precision; the server then formats a
+            // datetime parameter with seven fraction digits, as upstream does.
             time: py_time(py_obj, hinted_scale.unwrap_or(7))?,
         })));
     }
