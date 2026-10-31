@@ -116,7 +116,8 @@ driver. Release build of this project, median of 5, one measurement at a time
 (machine-wide lock), on a shared dev box with other jobs running (load average
 3.6-5.5): treat absolute times as indicative and compare ratios. Unmarked rows
 are from commit `d5476b1`; rows marked † are from commit `1182ec1`, rows marked
-* from earlier dedicated runs (Arrow agent, aio agent, free-threaded agent).
+* from earlier dedicated runs (Arrow agent, aio agent, free-threaded agent),
+rows marked ‡ from commit `b98b64d` at load average 14-20.
 
 **Reads**
 
@@ -146,23 +147,27 @@ partitioned read is how to get past it.
 | `bulkcopy` (row tuples), 100k rows † | 1.561 s | 0.716 s | 2.2x | `bcp` 0.382 s |
 | `executemany`, 100k rows | 1.257 s | 0.653 s | 1.9x | pyodbc 0.762 s |
 | `INSERT ... VALUES`, 200 rows × 5 params per statement, 10k rows | 0.120 s | 0.094 s | 1.3x | pyodbc 0.096 s |
-| single-row `INSERT` × 1,000, one commit | 0.143 s | 0.125 s | 1.1x | pyodbc 0.132 s |
+| single-row `INSERT` × 1,000, one commit ‡ | 0.159 s | 0.129 s | 1.2x | pyodbc 0.143 s |
 
 **Latency and concurrency**
 
 | workload | upstream | this project | speedup | pyodbc / best other |
 |---|---:|---:|---:|---|
-| 1,000 point lookups | 0.347 s | 0.136 s | 2.6x | pyodbc 0.133 s |
+| 1,000 point lookups ‡ | 0.350 s | 0.122 s | 2.9x | pyodbc 0.157 s |
 | 16 threads × point lookups † | 2.395 s | 0.429 s | 5.6x | FastMssql 0.612 s |
-| `SELECT 1` × 5,000 | 0.816 s | 0.698 s | 1.2x | pyodbc 0.670 s |
-| connect + close × 50 | 0.122 s | 0.109 s | 1.1x | pyodbc 0.133 s |
+| `SELECT 1` × 5,000 ‡ | 0.864 s | 0.730 s | 1.2x | pyodbc 0.727 s |
+| connect + close × 50 ‡ | 0.150 s | 0.120 s | 1.2x | pyodbc 0.130 s |
 | async point lookups, 64 concurrent (`aio`) * | ~7k q/s | ~40k q/s | ~5x | FastMssql ~15k q/s |
 | free-threaded 3.15t, 16 threads point lookups * | 4.3k q/s | 18.7k q/s | 4.4x | – |
 
-Against pyodbc the tiniest round trips are even: `SELECT 1` and single point
-lookups are within 2-4 %, run-to-run noise on this box. Both drivers make one
-send and one receive per query; what is left is a few microseconds of CPU per
-call.
+Point lookups are 15-20 % ahead of pyodbc (three runs); `SELECT 1` is even
+(within 2 % either way). Both drivers make one send and one receive per query.
+For short queries the synchronous driver busy-polls the socket for the first
+response byte instead of sleeping in epoll (adaptive, only while recent waits
+are under 300 µs, at most two threads, off on machines with fewer than 4
+CPUs). That trades one busy core during the wait for the scheduler's wake-up
+latency; set `MSSQL_RS_BUSY_POLL=0` to turn it off. A repeated result shape
+also reuses its parsed column metadata.
 
 Full multi-driver matrix (pyodbc, connectorx, arrow-odbc, pymssql, FastMssql,
 `bcp`): [benchmarks/RESULTS.md](benchmarks/RESULTS.md).
