@@ -169,24 +169,29 @@ text = query(conn_or_connection_string, "SELECT TOP 100 * FROM dbo.orders WHERE 
 
 ### Platforms and Python versions
 
-Honest status: **only Linux x86_64 (glibc) is built and tested by hand so far**
-(CPython 3.13, plus a free-threaded build). CI (`.github/workflows/ci.yml`) runs the
-test suites on Linux x86_64 against SQL Server 2022. The wheel workflow
-(`.github/workflows/wheels.yml`) is new and builds the matrix below as workflow
-artifacts; nothing has been published to PyPI and no wheel other than Linux
-x86_64 has been run against a database.
+Honest status: Linux x86_64 (glibc) is the reference platform, the only one run
+against SQL Server by hand. CI (`.github/workflows/ci.yml`) runs the full suites
+against SQL Server 2022 on Linux x86_64 and against SQL Server Express on Windows
+x64, and the server-free tests plus `cargo test --lib` on macOS (arm64, x86_64),
+Windows (x64, arm64) and Linux arm64. The wheel workflow
+(`.github/workflows/wheels.yml`) builds every wheel below and import-tests it;
+publishing to PyPI is gated by `.github/workflows/release.yml`.
 
-| platform | wheel built by CI | tested against SQL Server | notes |
+| platform | wheel | import tested in CI | DB tests in CI |
 |---|---|---|---|
-| Linux x86_64, glibc (manylinux_2_28) | yes | yes (CI + local) | reference platform |
-| Linux aarch64, glibc | yes | no | built natively on an arm runner; never imported |
-| Linux musl (x86_64, aarch64) | yes | no | |
-| macOS x86_64 / arm64 | yes | no | arm64 wheel gets an import smoke test in CI, x86_64 is never imported; `aio` should work (Unix) |
-| Windows x64 | yes | no | `aio` is not available (needs `loop.add_reader`); wheel gets an import smoke test in CI |
+| Linux x86_64, glibc (manylinux_2_28) | yes | native | SQL Server 2022 |
+| Linux aarch64, glibc (manylinux_2_28) | yes | native (arm runner) | no (no arm64 server image) |
+| Linux x86_64 / aarch64, musl (musllinux_1_2) | yes | Alpine container | no |
+| Linux ppc64le, s390x, glibc (manylinux_2_28) | yes | QEMU container | no |
+| macOS arm64 / x86_64 | yes | native | no (server-free tests) |
+| Windows x64 | yes | native | SQL Server Express |
+| Windows arm64 | yes | native (arm runner) | no (server-free tests) |
 
-Python: CPython 3.10 to 3.15 and free-threaded 3.14t and 3.15t are built. CI runs
-the suites on 3.13 (plus the upstream baseline), 3.15 and 3.15t (3.15t is
-non-gating while optional test dependencies lack free-threaded wheels). PyPy and 32-bit platforms are not supported.
+`aio` is Unix-only (needs `loop.add_reader`). Not built: 32-bit targets (i686,
+armv7: the vendored `mssql-tds` uses 64-bit `usize` constants) and PyPy.
+
+Python: CPython 3.10 to 3.15 plus free-threaded 3.14t and 3.15t where an
+interpreter exists for the platform.
 
 ### Connection string
 

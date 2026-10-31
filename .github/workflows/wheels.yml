@@ -67,7 +67,7 @@ jobs:
           rust-toolchain: stable
           # --find-interpreter would also pick up the images' PyPy builds, which this
           # crate does not support (PyUnicode_1BYTE_DATA is missing from PyPy's C API).
-          before-script-linux: rm -rf /opt/python/pp*
+          before-script-linux: find /usr/local/bin /usr/bin /opt/python -maxdepth 1 \( -name 'pypy*' -o -name 'pp3*' \) -exec rm -rf {} +
           args: --release --out dist --find-interpreter
       - uses: actions/upload-artifact@v4
         with:

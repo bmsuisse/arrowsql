@@ -13,10 +13,41 @@ brings only the compiled `ddbc_bindings` extension and the vendored
 
 ## Wheels, sdist and versions
 
-`.github/workflows/wheels.yml` builds, as workflow artifacts only (no PyPI step; a
-trusted-publishing job is left commented out): manylinux_2_28 and musllinux_1_2 for
-x86_64 and aarch64, macOS x86_64 and arm64, Windows x64, for CPython 3.10 to
-3.15, plus 3.14t and 3.15t, and an sdist. Untested outside Linux x86_64; see README "Support".
+`.github/workflows/wheels.yml` (also `workflow_call`ed by `release.yml`) builds wheels
+and an sdist as workflow artifacts and import-tests every wheel. It never publishes.
+
+| target | runner / build | Pythons | smoke test |
+|---|---|---|---|
+| x86_64-unknown-linux-gnu, manylinux_2_28 | ubuntu-latest, maturin-action container | 3.10-3.15, 3.14t, 3.15t | native, 3.13 and 3.14t |
+| aarch64-unknown-linux-gnu, manylinux_2_28 | ubuntu-24.04-arm, container | same | native, 3.13 and 3.14t |
+| x86_64 / aarch64 unknown-linux-musl, musllinux_1_2 | ubuntu-latest / ubuntu-24.04-arm, container | same | `python:3.13-alpine` container |
+| powerpc64le / s390x unknown-linux-gnu, manylinux_2_28 | ubuntu-latest, rust-cross cross container | same | QEMU `python:3.13-slim` |
+| x86_64-apple-darwin | macos-15-intel | 3.10-3.15, 3.14t, 3.15t | native, 3.13 and 3.14t |
+| aarch64-apple-darwin | macos-15 | same | native, 3.13 and 3.14t |
+| x86_64-pc-windows-msvc | windows-latest | same | native, 3.13 |
+| aarch64-pc-windows-msvc | windows-11-arm | 3.11-3.15 (+ 3.10, 3.14t, 3.15t if setup-python has them) | native, 3.13 |
+| sdist | ubuntu-latest | n/a | `twine check` |
+
+Every Linux wheel also gets `auditwheel show` and `twine check`. The Linux jobs delete the
+images' PyPy builds (`before-script-linux`) because `--find-interpreter` would otherwise
+build for them and PyPy's C API lacks `PyUnicode_1BYTE_DATA`.
+
+Not built: i686 and armv7 (Linux glibc/musl, Windows x86). `vendor/mssql-tds`
+`datatypes/decoder.rs` defines `SQL_PLP_*` as `usize` literals above `u32::MAX`, which
+fail to compile on 32-bit targets (`overflowing_literals`); the PLP length logic would
+need a `u64` rewrite. PyPy and manylinux2014/i686 are likewise out.
+
+The Windows SQL Server Express job (`windows-db` in ci.yml, installer in
+`scripts/ci/install-sqlserver-windows.ps1`) installs and starts the server on 1433, but the
+connection fails with `tls handshake eof` in the Windows TLS stack, so it stays
+`continue-on-error: true` until that is understood.
+
+Release flow (`release.yml`): a push to `main` runs CI, then reads the version from
+`pyproject.toml`; if no `vX.Y.Z` tag exists it builds all wheels and the sdist. The
+publish job (PyPI trusted publishing, tag, GitHub Release from CHANGELOG.md) runs only
+if the repository variable `PUBLISH_PYPI` is `true`. To enable it: on PyPI add a trusted
+publisher for owner `bmsuisse`, repo `arrowsql`, workflow `release.yml`, environment
+`pypi`; create the `pypi` environment in the repo; set `PUBLISH_PYPI=true`.
 
 The sdist needs `vendor/mssql-tds` (a `[patch]` path dependency, which maturin does
 not collect on its own), so `[tool.maturin] include` adds it. `cargo metadata
