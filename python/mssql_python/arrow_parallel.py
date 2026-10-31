@@ -23,7 +23,7 @@ from mssql_python.db_connection import connect
 
 # Slices per worker, and the fewest rows worth a slice (when the row count is known).
 _SLICES_PER_WORKER = 2
-_MIN_SLICE_ROWS = 16 * 1024
+_MIN_SLICE_ROWS = 8 * 1024
 # A result of at most this many rows (catalog estimate) is read over the probe
 # connection alone (measured: parallel wins from about 20k rows up).
 _MIN_PARALLEL_ROWS = 20_000
@@ -145,25 +145,38 @@ def _run_slices(probe_conn, connection_str, connect_kwargs, work, partitions, ba
     return results
 
 
-def _estimate_rows(cursor, query) -> Optional[int]:
-    """Catalog row count when ``query`` is a plain ``SELECT cols FROM table``.
+_NULLABLE_SQL = (
+    "(SELECT TOP 1 is_nullable FROM sys.dm_exec_describe_first_result_set(?, NULL, 0))"
+)
+_ROWS_SQL = (
+    "(SELECT SUM(row_count) FROM sys.dm_db_partition_stats "
+    "WHERE object_id = OBJECT_ID(?) AND index_id IN (0, 1))"
+)
 
-    Anything else (filters, joins, views, no permission) returns None; a count
-    scan is not worth it just to size the plan.
+
+def _probe_meta(cursor, query, column) -> Tuple[Optional[int], bool]:
+    """(estimated row count or None, column may hold NULL) in one round trip.
+
+    The row count comes from the catalog and only when ``query`` is a plain
+    ``SELECT cols FROM table`` (a count scan is not worth it just to size the
+    plan); filters, joins, views or missing permissions give None. A failed
+    nullability check counts as nullable.
     """
+    describe = (f"SELECT {column} FROM ({query}) AS _q",)
     match = _PLAIN_TABLE.match(query)
-    if not match:
-        return None
+    if match:
+        try:
+            cursor.execute(f"SELECT {_ROWS_SQL}, {_NULLABLE_SQL}", (match.group(1),) + describe)
+            rows, nullable = cursor.fetchone()
+            return (None if rows is None else int(rows)), nullable is None or bool(nullable)
+        except Exception:
+            pass
     try:
-        cursor.execute(
-            "SELECT SUM(row_count) FROM sys.dm_db_partition_stats "
-            "WHERE object_id = OBJECT_ID(?) AND index_id IN (0, 1)",
-            (match.group(1),),
-        )
+        cursor.execute(f"SELECT {_NULLABLE_SQL}", describe)
         row = cursor.fetchone()
-        return None if row is None or row[0] is None else int(row[0])
+        return None, row is None or row[0] is None or bool(row[0])
     except Exception:
-        return None
+        return None, True
 
 
 def _plan(conn, query, column, name, partitions) -> List[Tuple[str, tuple]]:
@@ -178,7 +191,7 @@ def _plan(conn, query, column, name, partitions) -> List[Tuple[str, tuple]]:
             raise TypeError(f"partition_on column {name!r} must be an integer column")
         span = high - low + 1
         count = partitions * _SLICES_PER_WORKER
-        rows = _estimate_rows(cursor, query)
+        rows, has_null = _probe_meta(cursor, query, column)
         if rows is not None:
             if rows <= _MIN_PARALLEL_ROWS:
                 return []
@@ -189,7 +202,6 @@ def _plan(conn, query, column, name, partitions) -> List[Tuple[str, tuple]]:
         count = min(count, span)
         if count < 2:
             return []
-        has_null = _is_nullable(cursor, query, column)
     finally:
         cursor.close()
     step = math.ceil(span / count)
@@ -204,19 +216,6 @@ def _plan(conn, query, column, name, partitions) -> List[Tuple[str, tuple]]:
         work.append((base + f"{column} >= ? AND {column} < ?", (a, b)))
     work.append((base + f"{column} >= ?", (edges[-1],)))
     return work
-
-
-def _is_nullable(cursor, query, column) -> bool:
-    """Whether the column can hold NULL; unknown counts as nullable."""
-    try:
-        cursor.execute(
-            "SELECT is_nullable FROM sys.dm_exec_describe_first_result_set(?, NULL, 0)",
-            (f"SELECT {column} FROM ({query}) AS _q",),
-        )
-        row = cursor.fetchone()
-        return row is None or row[0] is None or bool(row[0])
-    except Exception:
-        return True
 
 
 def _fetch(conn, sql, params, batch_size):
