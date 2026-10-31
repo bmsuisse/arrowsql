@@ -13,6 +13,7 @@ use mssql_tds::datatypes::row_writer::RowWriter;
 use mssql_tds::query::metadata::ColumnMetadata;
 
 use super::StmtShared;
+use super::cancel::StmtCancel;
 use super::wire::Slot;
 use crate::consts::*;
 use crate::decode::{RowBuffer, describe};
@@ -66,6 +67,10 @@ pub struct StmtState {
     /// next result). Background Arrow producers stop when it no longer
     /// matches theirs.
     pub generation: u64,
+    /// Cancellation of the execution that produced the current results; its
+    /// reads of the wire stop with it. Kept so that closing an old Arrow
+    /// stream cancels that execution only, never a newer one.
+    pub(super) execution: Option<Arc<StmtCancel>>,
     /// What `DDBCSQLDescribeCol` last returned.
     pub(super) describe_cache: Option<describe::DescribeCache>,
     /// The columns last taken from the client and the metadata they came from.
@@ -538,9 +543,9 @@ pub struct SinkFetch {
 }
 
 /// Current result columns and result generation; `None` without a result.
-pub fn result_columns(stmt: &StmtShared) -> Option<(Arc<Vec<ColumnMetadata>>, u64)> {
+pub fn result_columns(stmt: &StmtShared) -> Option<(Arc<Vec<ColumnMetadata>>, u64, Option<Arc<StmtCancel>>)> {
     let state = stmt.state.lock();
-    state.columns.clone().map(|c| (c, state.generation))
+    state.columns.clone().map(|c| (c, state.generation, state.execution.clone()))
 }
 
 /// Error records of the statement (after a failed `fetch_into`).

@@ -30,7 +30,7 @@ use pyo3::prelude::*;
 use crate::connection::ConnShared;
 use crate::consts::*;
 use crate::diag::DiagRecord;
-use cancel::StmtCancel;
+pub(crate) use cancel::StmtCancel;
 use cursor::StmtState;
 use exec::{Command, execute_command};
 pub(crate) use exec::with_exclusive_wire;

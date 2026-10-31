@@ -81,6 +81,7 @@ pub(crate) fn with_exclusive_wire(
     let mut state = stmt.state.lock();
     state.diag.clear();
     state.reset_results();
+    state.execution = Some(cancel.clone());
     if state.is_freed() {
         return SQL_INVALID_HANDLE;
     }
