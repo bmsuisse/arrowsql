@@ -43,9 +43,9 @@ class Row:
 
     # Slot internal fields while preserving dynamic attributes and weak references.
     __slots__ = (
-        "_values",
+        "_row_values",
         "_column_map",
-        "_cursor",
+        "_row_cursor",
         "_column_map_lower",
         "_column_names",
         "__dict__",
@@ -61,9 +61,9 @@ class Row:
         the entire if/elif/else chain and keyword argument overhead in __init__.
         """
         r = Row.__new__(Row)
-        r._values = values
+        r._row_values = values
         r._column_map = column_map
-        r._cursor = cursor
+        r._row_cursor = cursor
         r._column_map_lower = column_map_lower
         r._column_names = column_names
         return r
@@ -99,7 +99,7 @@ class Row:
                 ``column_map``.
         """
         if converter_map:
-            self._values = self._apply_output_converters_optimized(values, converter_map)
+            self._row_values = self._apply_output_converters_optimized(values, converter_map)
         elif (
             converter_map is None
             and cursor
@@ -107,15 +107,15 @@ class Row:
             and cursor.connection._output_converters
         ):
             # Support direct Row construction without a pre-computed converter map.
-            self._values = self._apply_output_converters(values, cursor)
+            self._row_values = self._apply_output_converters(values, cursor)
         else:
-            self._values = values
+            self._row_values = values
 
         if uuid_str_indices:
             self._stringify_uuids(uuid_str_indices)
 
         self._column_map = column_map
-        self._cursor = cursor
+        self._row_cursor = cursor
         # Lowercase map is pre-built once per result set in the cursor and shared
         # across all rows. None when lowercase is off (the default) — zero cost.
         self._column_map_lower = column_map_lower
@@ -130,13 +130,13 @@ class Row:
         Convert uuid.UUID values at the given column indices to uppercase str in-place.
 
         This is only called when native_uuid=False. It operates directly on
-        self._values to avoid creating an extra list copy.
+        self._row_values to avoid creating an extra list copy.
         """
-        vals = self._values
+        vals = self._row_values
         # If values are still the original list (no converters), we need a mutable copy
         if not isinstance(vals, list):
             vals = list(vals)
-            self._values = vals
+            self._row_values = vals
 
         for i in indices:
             v = vals[i]
@@ -223,20 +223,20 @@ class Row:
     def __getitem__(self, index) -> Any:
         """Allow accessing by numeric index (row[0]) or column name (row["col"])."""
         if type(index) is int:
-            return self._values[index]
+            return self._row_values[index]
         if isinstance(index, str):
             # A row built without a column map has no named columns, so any
             # string key is simply absent (KeyError), never a TypeError.
             if self._column_map is not None and index in self._column_map:
-                return self._values[self._column_map[index]]
+                return self._row_values[self._column_map[index]]
             # O(1) case-insensitive lookup when lowercase is enabled
             if self._column_map_lower is not None:
                 idx = self._column_map_lower.get(index.lower())
                 if idx is not None:
-                    return self._values[idx]
+                    return self._row_values[idx]
             raise KeyError(f"Row has no column '{index}'")
         if isinstance(index, (int, slice)):
-            return self._values[index]
+            return self._row_values[index]
         raise TypeError(
             f"Row indices must be integers, slices, or strings, not {type(index).__name__}"
         )
@@ -254,13 +254,21 @@ class Row:
         # Handle lowercase attribute access - if lowercase is enabled,
         # try to match attribute names case-insensitively
         if name in self._column_map:
-            return self._values[self._column_map[name]]
+            return self._row_values[self._column_map[name]]
 
         # O(1) case-insensitive lookup when lowercase is enabled
         if self._column_map_lower is not None:
             idx = self._column_map_lower.get(name.lower())
             if idx is not None:
-                return self._values[idx]
+                return self._row_values[idx]
+
+        # RUST-PORT: the internal slots are named _row_values / _row_cursor so a
+        # column named _values or _cursor resolves to the column above. The old
+        # names stay readable here for callers that use them.
+        if name == "_values":
+            return self._row_values
+        if name == "_cursor":
+            return self._row_cursor
 
         raise AttributeError(f"Row has no attribute '{name}'")
 
@@ -319,18 +327,18 @@ class Row:
         This is the key change needed to fix the tests.
         """
         if isinstance(other, list):
-            return self._values == other
+            return self._row_values == other
         if isinstance(other, Row):
-            return self._values == other._values
+            return self._row_values == other._row_values
         return super().__eq__(other)
 
     def __len__(self) -> int:
         """Return the number of values in the row"""
-        return len(self._values)
+        return len(self._row_values)
 
     def __iter__(self) -> Any:
         """Allow iteration through values"""
-        return iter(self._values)
+        return iter(self._row_values)
 
     def __str__(self) -> str:
         """Return string representation of the row"""
@@ -356,7 +364,7 @@ class Row:
 
     def __repr__(self) -> str:
         """Return a detailed string representation for debugging"""
-        return repr(tuple(self._values))
+        return repr(tuple(self._row_values))
 
 
 class RowMapping(Mapping):

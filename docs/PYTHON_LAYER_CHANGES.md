@@ -238,3 +238,16 @@ and now uses about 1.3 us (measured with the native calls stubbed).
   SQLSTATE 42000 but raises `ConversionDataError`, a `DataError` that is also
   a `ProgrammingError`. 2628 -> 22001 is in `src/diag.rs` and
   `_server_sqlstate.py`.
+
+## Row internals and executemany rows (common_issues, RUST-PORT)
+
+- `row.py` `Row`: the internal slots are `_row_values` and `_row_cursor` (were
+  `_values` and `_cursor`), so a column named `_values` or `_cursor` resolves to
+  the column. `__getattr__` still answers `row._values` and `row._cursor` when no
+  column has that name, so upstream callers and tests read the same values.
+  `_mapping` stays a property: a column named `_mapping` is read with
+  `row["_mapping"]`, as documented on `Row._mapping`.
+- `cursor.py` `_bulk_row_iterator`: reads `item._row_values` (follows the
+  slot rename above).
+- `cursor.py` `executemany`: a first row that is a `str` or `bytes` raises
+  `TypeError`. A set of strings used to insert each string as a row.

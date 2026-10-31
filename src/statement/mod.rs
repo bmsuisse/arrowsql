@@ -118,6 +118,9 @@ pub struct SqlHandle {
 /// Close the statement's cursor; with `free` also retire the handle. Returns
 /// whether the handle had already been freed.
 fn close_cursor(py: Python<'_>, stmt: &Arc<StmtShared>, free: bool) -> bool {
+    // Closing from another thread while an execution runs cancels it first;
+    // otherwise the slot lock below would wait for the statement to finish.
+    stmt.cancel_execution();
     py.detach(|| {
         let mut slot = stmt.conn.slot.lock();
         wire::discard_if_owner(&mut slot, stmt.id);
