@@ -14,9 +14,10 @@
 
 use std::mem::{Discriminant, discriminant};
 
+use mssql_tds::datatypes::decoder::DecimalParts;
 use mssql_tds::datatypes::sqltypes::SqlType;
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyList, PyTuple, PyType};
 
 use super::exec::execute_batch;
 use super::stmt_of;
@@ -28,6 +29,47 @@ use crate::params::py_types::py_to_sql_type;
 const MAX_INLINE_CHARS: usize = 4000;
 /// Longest binary value that still binds inline.
 const MAX_INLINE_BYTES: usize = 8000;
+
+/// SQL Server's maximum DECIMAL precision.
+const MAX_DECIMAL_DIGITS: usize = 38;
+
+/// A `decimal.Decimal` as a NUMERIC cell, read from its plain `str()` form.
+/// `None` for anything else (subclasses, exponent notation, NaN, more than 38
+/// digits), which the general converter then handles or rejects.
+fn decimal_cell(value: &Bound<'_, PyAny>, decimal_type: &Bound<'_, PyType>) -> Option<SqlType> {
+    if !value.get_type().is(decimal_type) {
+        return None;
+    }
+    let text = value.str().ok()?;
+    let text = text.to_str().ok()?;
+    let unsigned = text.strip_prefix('-');
+    let (mut magnitude, mut int_digits, mut scale) = (0u128, 0usize, 0usize);
+    let mut seen_point = false;
+    let mut digit_count = 0usize;
+    for byte in unsigned.unwrap_or(text).bytes() {
+        match byte {
+            b'0'..=b'9' => {
+                digit_count += 1;
+                magnitude = magnitude * 10 + u128::from(byte - b'0');
+                if seen_point {
+                    scale += 1;
+                } else if magnitude != 0 {
+                    int_digits += 1;
+                }
+            }
+            b'.' if !seen_point => seen_point = true,
+            _ => return None,
+        }
+    }
+    let int_digits = int_digits.max(1);
+    let precision = int_digits + scale;
+    if digit_count == 0 || digit_count > MAX_DECIMAL_DIGITS || precision > MAX_DECIMAL_DIGITS {
+        return None;
+    }
+    let positive = unsigned.is_none() || magnitude == 0;
+    // Both fit in u8: they are at most 38.
+    Some(SqlType::Numeric(Some(DecimalParts::new(positive, precision as u8, scale as u8, magnitude))))
+}
 
 /// What a column holds. Cells of one column must share a kind.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -79,6 +121,8 @@ impl ColumnScan {
 
 /// Converts every row, or `None` when the batch needs the general path.
 fn convert_rows(rows: &Bound<'_, PyAny>, ncols: usize) -> Option<(Vec<Vec<SqlType>>, Vec<Vec<bool>>)> {
+    let decimal_type = rows.py().import("decimal").and_then(|module| module.getattr("Decimal")).ok()?;
+    let decimal_type = decimal_type.cast_into::<PyType>().ok()?;
     let mut scans: Vec<ColumnScan> = (0..ncols).map(|_| ColumnScan::default()).collect();
     let (mut cells, mut nulls) = (Vec::new(), Vec::new());
     let mut push_row = |row: &Bound<'_, PyAny>| -> Option<()> {
@@ -86,7 +130,10 @@ fn convert_rows(rows: &Bound<'_, PyAny>, ncols: usize) -> Option<(Vec<Vec<SqlTyp
         let mut null_row = Vec::with_capacity(ncols);
         let mut convert = |index: usize, value: Bound<'_, PyAny>| -> Option<()> {
             let is_null = value.is_none();
-            let cell = py_to_sql_type(&value).ok()?;
+            let cell = match decimal_cell(&value, &decimal_type) {
+                Some(cell) => cell,
+                None => py_to_sql_type(&value).ok()?,
+            };
             if !scans[index].accept(&cell, is_null) {
                 return None;
             }
