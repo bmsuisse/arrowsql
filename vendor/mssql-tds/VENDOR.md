@@ -79,5 +79,13 @@ Local patches (search for `VENDOR PATCH`):
    sends `std::process::id()` instead of 0, as the ODBC driver does, so
    `sys.dm_exec_sessions.host_process_id` identifies the client process.
 
+9. Bulk serializer allocation/per-byte cleanups (marked `RUST-PORT`):
+   `src/datatypes/tds_value_serializer.rs` writes BINARY/VARBINARY payloads
+   with one `write_async`, pads BINARY/CHAR/NCHAR from static zero/space
+   chunks, streams UTF-16LE (NVARCHAR/NCHAR/JSON/NTEXT) through a stack buffer
+   instead of collecting a `Vec<u16>`, and writes VECTOR f32 data in chunks;
+   `src/datatypes/decoder.rs` `read_guid` reads into a `[u8; 16]` stack array.
+   Wire output is unchanged.
+
 To drop the vendored copy, delete this directory and the `[patch]` section
 in ../../Cargo.toml once the fix is in the pinned upstream rev.

@@ -34,6 +34,68 @@ pub const PLP_UNKNOWN_LEN: u64 = 0xFFFFFFFFFFFFFFFE;
 /// PLP chunk terminator (zero-length chunk).
 pub const PLP_TERMINATOR: u32 = 0x00000000;
 
+// RUST-PORT: bulk-write helpers replacing per-byte / per-code-unit writer calls.
+const PAD_CHUNK: usize = 256;
+static ZERO_PAD: [u8; PAD_CHUNK] = [0u8; PAD_CHUNK];
+static ASCII_SPACE_PAD: [u8; PAD_CHUNK] = [0x20u8; PAD_CHUNK];
+static UTF16_SPACE_PAD: [u8; PAD_CHUNK] = {
+    let mut a = [0u8; PAD_CHUNK];
+    let mut i = 0;
+    while i < PAD_CHUNK {
+        a[i] = 0x20;
+        i += 2;
+    }
+    a
+};
+
+/// Write `count` bytes taken from a static pad pattern (length `PAD_CHUNK`).
+async fn write_pad<'a, 'b>(
+    writer: &'a mut PacketWriter<'b>,
+    pattern: &'static [u8; PAD_CHUNK],
+    mut count: usize,
+) -> TdsResult<()>
+where
+    'b: 'a,
+{
+    while count > 0 {
+        let n = count.min(PAD_CHUNK);
+        writer.write_async(&pattern[..n]).await?;
+        count -= n;
+    }
+    Ok(())
+}
+
+/// Number of UTF-16 code units `s` encodes to.
+fn utf16_len(s: &str) -> usize {
+    s.chars().map(char::len_utf16).sum()
+}
+
+/// Stream `s` as UTF-16LE through a stack buffer (no intermediate `Vec<u16>`).
+/// Chunk boundaries fall on code-unit boundaries, so surrogate pairs are
+/// emitted as consecutive units and may straddle chunks safely.
+async fn write_utf16le_str<'a, 'b>(writer: &'a mut PacketWriter<'b>, s: &str) -> TdsResult<()>
+where
+    'b: 'a,
+{
+    const BUF: usize = 512;
+    let mut buf = [0u8; BUF];
+    let mut n = 0;
+    for u in s.encode_utf16() {
+        let b = u.to_le_bytes();
+        buf[n] = b[0];
+        buf[n + 1] = b[1];
+        n += 2;
+        if n == BUF {
+            writer.write_async(&buf).await?;
+            n = 0;
+        }
+    }
+    if n > 0 {
+        writer.write_async(&buf[..n]).await?;
+    }
+    Ok(())
+}
+
 // TDS type byte constants for string types
 const NVARCHAR: u8 = TdsDataType::NVarChar as u8; // 0xE7
 const NCHAR: u8 = TdsDataType::NChar as u8; // 0xEF
@@ -1306,23 +1368,17 @@ impl TdsValueSerializer {
         } else if ctx.is_fixed_length {
             // Fixed-length BINARY(n): Write exactly n bytes (no length prefix)
             // Write actual data
-            for &byte in value {
-                writer.write_byte_async(byte).await?;
-            }
+            writer.write_async(value).await?;
 
             // Pad with zeros to reach fixed size
             let padding_needed = schema_size.saturating_sub(data_len);
-            for _ in 0..padding_needed {
-                writer.write_byte_async(0u8).await?;
-            }
+            write_pad(writer, &ZERO_PAD, padding_needed).await?;
         } else {
             // Variable-length VARBINARY(n): Write 2-byte length prefix + data (no padding)
             writer.write_u16_async(data_len as u16).await?;
 
             // Write actual data
-            for &byte in value {
-                writer.write_byte_async(byte).await?;
-            }
+            writer.write_async(value).await?;
         }
         Ok(())
     }
@@ -1346,8 +1402,7 @@ impl TdsValueSerializer {
         })?;
 
         // Encode as UTF-16LE (no BOM needed for NVARCHAR)
-        let utf16_data: Vec<u16> = json_str.encode_utf16().collect();
-        let byte_len = utf16_data.len() * 2; // Each u16 is 2 bytes
+        let byte_len = utf16_len(json_str) * 2; // Each u16 is 2 bytes
 
         // JSON uses PLP encoding with UTF-16LE for NVARCHAR type
         // Write PLP_UNKNOWN_LEN (0xFFFFFFFFFFFFFFFE)
@@ -1359,9 +1414,7 @@ impl TdsValueSerializer {
             writer.write_u32_async(byte_len as u32).await?;
 
             // Write UTF-16LE encoded data
-            for code_unit in utf16_data {
-                writer.write_u16_async(code_unit).await?;
-            }
+            write_utf16le_str(writer, json_str).await?;
         }
 
         // Write terminator (4 bytes of 0x00)
@@ -1579,16 +1632,13 @@ impl TdsValueSerializer {
                 } else {
                     // Need to convert UTF-8 to UTF-16LE
                     let utf8_str = value.to_utf8_string();
-                    let utf16_vec: Vec<u16> = utf8_str.encode_utf16().collect();
-                    let utf16_byte_len = utf16_vec.len() * 2;
+                    let utf16_byte_len = utf16_len(&utf8_str) * 2;
 
                     // Write data length (4 bytes)
                     writer.write_u32_async(utf16_byte_len as u32).await?;
 
                     // Write UTF-16LE data
-                    for code_unit in &utf16_vec {
-                        writer.write_u16_async(*code_unit).await?;
-                    }
+                    write_utf16le_str(writer, &utf8_str).await?;
                 }
             } else {
                 // TEXT - single-byte encoding
@@ -1626,14 +1676,10 @@ impl TdsValueSerializer {
             let padding_chars = schema_char_count.saturating_sub(char_count);
             if is_unicode {
                 // Pad with UTF-16 space (0x0020)
-                for _ in 0..padding_chars {
-                    writer.write_u16_async(0x0020).await?;
-                }
+                write_pad(writer, &UTF16_SPACE_PAD, padding_chars * 2).await?;
             } else {
                 // Pad with ASCII space (0x20)
-                for _ in 0..padding_chars {
-                    writer.write_byte_async(0x20).await?;
-                }
+                write_pad(writer, &ASCII_SPACE_PAD, padding_chars).await?;
             }
         } else {
             // Variable-length types (NVARCHAR(n), VARCHAR(n)): Write length prefix + data
@@ -1820,8 +1866,7 @@ impl TdsValueSerializer {
         'b: 'a,
     {
         // Encode to UTF-16LE
-        let utf16_data: Vec<u16> = utf8_str.encode_utf16().collect();
-        let char_count = utf16_data.len();
+        let char_count = utf16_len(utf8_str);
         let byte_len = char_count * 2;
 
         // Check schema constraints
@@ -1843,32 +1888,24 @@ impl TdsValueSerializer {
                 writer.write_u32_async(byte_len as u32).await?;
 
                 // Write UTF-16LE data
-                for code_unit in &utf16_data {
-                    writer.write_u16_async(*code_unit).await?;
-                }
+                write_utf16le_str(writer, utf8_str).await?;
             }
 
             writer.write_u32_async(PLP_TERMINATOR).await?;
         } else if ctx.is_fixed_length {
             // Fixed-length types (NCHAR(n)): Write exactly n characters with padding
             // Write actual data
-            for code_unit in &utf16_data {
-                writer.write_u16_async(*code_unit).await?;
-            }
+            write_utf16le_str(writer, utf8_str).await?;
 
             // Pad with UTF-16 space (0x0020)
             let padding_chars = schema_char_count.saturating_sub(char_count);
-            for _ in 0..padding_chars {
-                writer.write_u16_async(0x0020).await?;
-            }
+            write_pad(writer, &UTF16_SPACE_PAD, padding_chars * 2).await?;
         } else {
             // Variable-length types (NVARCHAR(n)): Write character count + data
             writer.write_u16_async(char_count as u16).await?;
 
             // Write UTF-16LE data
-            for code_unit in &utf16_data {
-                writer.write_u16_async(*code_unit).await?;
-            }
+            write_utf16le_str(writer, utf8_str).await?;
         }
 
         Ok(())
@@ -1903,9 +1940,12 @@ impl TdsValueSerializer {
         // Values
         match &value.data {
             VectorData::Float32(vs) => {
-                for f in vs {
-                    // Write f32 as i32 little-endian (bit-compatible)
-                    writer.write_i32_async((*f).to_bits() as i32).await?;
+                let mut buf = [0u8; 512];
+                for chunk in vs.chunks(buf.len() / 4) {
+                    for (i, f) in chunk.iter().enumerate() {
+                        buf[i * 4..i * 4 + 4].copy_from_slice(&f.to_bits().to_le_bytes());
+                    }
+                    writer.write_async(&buf[..chunk.len() * 4]).await?;
                 }
             }
             VectorData::Float16(_) => {
@@ -1998,9 +2038,7 @@ impl TdsValueSerializer {
 
             // Pad with ASCII space (0x20) to reach fixed size
             let padding_count = schema_char_count.saturating_sub(char_count);
-            for _ in 0..padding_count {
-                writer.write_byte_async(0x20).await?;
-            }
+            write_pad(writer, &ASCII_SPACE_PAD, padding_count).await?;
         } else {
             // Variable-length VARCHAR(n): Write length prefix + data
             // Length prefix is byte count (2 bytes)
