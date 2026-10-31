@@ -185,3 +185,12 @@ The Rust side already reads a `None` entry as "no hint" (`params::parse_hint`).
   reports any error.
 - The diagnostics / rowcount / description tail of `executemany` moved to
   `Cursor._finish_executemany` so both paths share it.
+
+## Close on a dead connection
+
+- `connection.py` `Connection.close`: a rollback that fails with SQLSTATE
+  `08S01` (the session was killed or the link dropped) is not re-raised from
+  `close()`. The server already ended that transaction, and close() is
+  cleanup. Upstream raises `OperationalError` here
+  (tests/common_issues/test_dead_connection.py marks it upstream_bug). An
+  explicit `rollback()` after a kill still raises.

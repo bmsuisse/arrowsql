@@ -2253,7 +2253,10 @@ class Connection:
                     try:
                         self._conn.rollback()
                     except RuntimeError as e:
-                        rollback_error = e
+                        # RUST-PORT: a dead link (08S01) has no transaction left
+                        # to end, so close() is not failed by it; upstream raises.
+                        if not str(e).startswith("SQLSTATE:08S01:"):
+                            rollback_error = e
                 # TODO: Check potential race conditions in case of multithreaded scenarios
                 # Close the connection
                 try:

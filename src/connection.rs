@@ -393,7 +393,14 @@ fn sanitise(client: &mut SyncClient, transaction_already_rolled_back: bool) -> P
         return Ok(());
     }
     if !transaction_already_rolled_back && client.has_active_transaction() {
-        client.block_on(|c| c.rollback_transaction(None, None)).map_err(|e| tds_error(&e, "HY000"))?;
+        if let Err(e) = client.block_on(|c| c.rollback_transaction(None, None)) {
+            // A killed session only shows as dead once something is sent on
+            // it; the server already ended its transaction, so this is not
+            // a close failure either.
+            if !client.is_connection_dead() {
+                return Err(tds_error(&e, "HY000"));
+            }
+        }
     }
     Ok(())
 }
