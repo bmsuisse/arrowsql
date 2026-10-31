@@ -447,6 +447,61 @@ class _ResultLayout:  # pylint: disable=too-few-public-methods
         self.uuid_indices = None
 
 
+_SQL_TO_C_TYPE = {
+        ddbc_sql_const.SQL_CHAR.value: ddbc_sql_const.SQL_C_CHAR.value,
+        ddbc_sql_const.SQL_VARCHAR.value: ddbc_sql_const.SQL_C_CHAR.value,
+        ddbc_sql_const.SQL_LONGVARCHAR.value: ddbc_sql_const.SQL_C_CHAR.value,
+        ddbc_sql_const.SQL_WCHAR.value: ddbc_sql_const.SQL_C_WCHAR.value,
+        ddbc_sql_const.SQL_WVARCHAR.value: ddbc_sql_const.SQL_C_WCHAR.value,
+        ddbc_sql_const.SQL_WLONGVARCHAR.value: ddbc_sql_const.SQL_C_WCHAR.value,
+        ddbc_sql_const.SQL_DECIMAL.value: ddbc_sql_const.SQL_C_NUMERIC.value,
+        ddbc_sql_const.SQL_NUMERIC.value: ddbc_sql_const.SQL_C_NUMERIC.value,
+        ddbc_sql_const.SQL_BIT.value: ddbc_sql_const.SQL_C_BIT.value,
+        ddbc_sql_const.SQL_TINYINT.value: ddbc_sql_const.SQL_C_TINYINT.value,
+        ddbc_sql_const.SQL_SMALLINT.value: ddbc_sql_const.SQL_C_SHORT.value,
+        ddbc_sql_const.SQL_INTEGER.value: ddbc_sql_const.SQL_C_LONG.value,
+        ddbc_sql_const.SQL_BIGINT.value: ddbc_sql_const.SQL_C_SBIGINT.value,
+        ddbc_sql_const.SQL_REAL.value: ddbc_sql_const.SQL_C_FLOAT.value,
+        ddbc_sql_const.SQL_FLOAT.value: ddbc_sql_const.SQL_C_DOUBLE.value,
+        ddbc_sql_const.SQL_DOUBLE.value: ddbc_sql_const.SQL_C_DOUBLE.value,
+        ddbc_sql_const.SQL_BINARY.value: ddbc_sql_const.SQL_C_BINARY.value,
+        ddbc_sql_const.SQL_VARBINARY.value: ddbc_sql_const.SQL_C_BINARY.value,
+        ddbc_sql_const.SQL_LONGVARBINARY.value: ddbc_sql_const.SQL_C_BINARY.value,
+        ddbc_sql_const.SQL_SS_UDT.value: ddbc_sql_const.SQL_C_BINARY.value,
+        ddbc_sql_const.SQL_TYPE_DATE.value: ddbc_sql_const.SQL_C_TYPE_DATE.value,
+        ddbc_sql_const.SQL_TYPE_TIME.value: ddbc_sql_const.SQL_C_TYPE_TIME.value,
+        ddbc_sql_const.SQL_TYPE_TIMESTAMP.value: ddbc_sql_const.SQL_C_TYPE_TIMESTAMP.value,
+        ddbc_sql_const.SQL_SS_TIME2.value: ddbc_sql_const.SQL_C_TYPE_TIME.value,
+        ddbc_sql_const.SQL_DATETIMEOFFSET.value: ddbc_sql_const.SQL_C_SS_TIMESTAMPOFFSET.value,
+        ddbc_sql_const.SQL_DATE.value: ddbc_sql_const.SQL_C_TYPE_DATE.value,
+        ddbc_sql_const.SQL_TIME.value: ddbc_sql_const.SQL_C_TYPE_TIME.value,
+        ddbc_sql_const.SQL_TIMESTAMP.value: ddbc_sql_const.SQL_C_TYPE_TIMESTAMP.value,
+        ddbc_sql_const.SQL_GUID.value: ddbc_sql_const.SQL_C_GUID.value,
+        ddbc_sql_const.SQL_SS_XML.value: ddbc_sql_const.SQL_C_WCHAR.value,
+        ddbc_sql_const.SQL_SS_VARIANT.value: ddbc_sql_const.SQL_C_BINARY.value,
+}
+
+
+def _decimal_precision_scale(exponent: int, num_digits: int) -> Tuple[int, int]:
+    """SQL (precision, scale) for a finite Decimal with the given tuple exponent and digit count."""
+    if exponent >= 0:
+        # digits=314, exp=2 ---> '31400' --> precision=5, scale=0
+        return num_digits + exponent, 0
+    if -exponent <= num_digits:
+        # digits=3140, exp=-3 ---> '3.140' --> precision=4, scale=3
+        return num_digits, -exponent
+    # digits=3140, exp=-5 ---> '0.03140' --> precision=5, scale=5
+    return -exponent, -exponent
+
+
+def _max_binary_len(rows: Any, col_index: int) -> int:
+    """Longest bytes/bytearray value in one column across all rows (0 if none)."""
+    return max(
+        (len(r[col_index]) for r in rows if isinstance(r[col_index], (bytes, bytearray))),
+        default=0,
+    )
+
+
 class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-methods
     """
     Represents a database cursor, which is used to manage the context of a fetch operation.
@@ -525,7 +580,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         # Default number of rows to fetch at a time is 1, user can change it
         self.arraysize = 1
         self.buffer_length: int = 1024  # Default buffer length for string data
-        self._result_set_empty: bool = False  # Add this initialization
         self.last_executed_stmt: str = ""  # Stores the last statement executed by this cursor
         self.is_stmt_prepared: List[bool] = [
             False
@@ -568,81 +622,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         )
         self.messages: List[Tuple[str, str]] = []  # Store diagnostic messages
 
-    def _is_unicode_string(self, param: str) -> bool:
-        """
-        Check if a string contains non-ASCII characters.
-
-        Args:
-            param: The string to check.
-
-        Returns:
-            True if the string contains non-ASCII characters, False otherwise.
-        """
-        return not param.isascii()
-
-    def _parse_date(self, param: str) -> Optional[datetime.date]:
-        """
-        Attempt to parse a string as a date.
-
-        Args:
-            param: The string to parse.
-
-        Returns:
-            A datetime.date object if parsing is successful, else None.
-        """
-        formats = ["%Y-%m-%d"]
-        for fmt in formats:
-            try:
-                return datetime.datetime.strptime(param, fmt).date()
-            except ValueError:
-                continue
-        return None
-
-    def _parse_datetime(self, param: str) -> Optional[datetime.datetime]:
-        """
-        Attempt to parse a string as a datetime, smalldatetime, datetime2, timestamp.
-
-        Args:
-            param: The string to parse.
-
-        Returns:
-            A datetime.datetime object if parsing is successful, else None.
-        """
-        formats = [
-            "%Y-%m-%dT%H:%M:%S.%f",  # ISO 8601 datetime with fractional seconds
-            "%Y-%m-%dT%H:%M:%S",  # ISO 8601 datetime
-            "%Y-%m-%d %H:%M:%S.%f",  # Datetime with fractional seconds
-            "%Y-%m-%d %H:%M:%S",  # Datetime without fractional seconds
-        ]
-        for fmt in formats:
-            try:
-                return datetime.datetime.strptime(param, fmt)  # Valid datetime
-            except ValueError:
-                continue  # Try next format
-
-        return None  # If all formats fail, return None
-
-    def _parse_time(self, param: str) -> Optional[datetime.time]:
-        """
-        Attempt to parse a string as a time.
-
-        Args:
-            param: The string to parse.
-
-        Returns:
-            A datetime.time object if parsing is successful, else None.
-        """
-        formats = [
-            "%H:%M:%S",  # Time only
-            "%H:%M:%S.%f",  # Time with fractional seconds
-        ]
-        for fmt in formats:
-            try:
-                return datetime.datetime.strptime(param, fmt).time()
-            except ValueError:
-                continue
-        return None
-
     def _get_numeric_data(self, param: decimal.Decimal) -> Any:
         """
         Get the data for a numeric parameter.
@@ -666,22 +645,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         if isinstance(exponent, str):
             raise ValueError("Cannot bind non-finite Decimal (NaN/Infinity) as SQL NUMERIC")
 
-        # Calculate the SQL precision & scale
-        #   precision = no. of significant digits
-        #   scale     = no. digits after decimal point
-        if exponent >= 0:
-            # digits=314, exp=2 ---> '31400' --> precision=5, scale=0
-            precision = num_digits + exponent
-            scale = 0
-        elif (-1 * exponent) <= num_digits:
-            # digits=3140, exp=-3 ---> '3.140' --> precision=4, scale=3
-            precision = num_digits
-            scale = exponent * -1
-        else:
-            # digits=3140, exp=-5 ---> '0.03140' --> precision=5, scale=5
-            # TODO: double check the precision calculation here with SQL documentation
-            precision = exponent * -1
-            scale = exponent * -1
+        precision, scale = _decimal_precision_scale(exponent, num_digits)
 
         if precision > 38:
             raise ValueError(
@@ -835,7 +799,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         i: int,
         min_val: Optional[Any] = None,
         max_val: Optional[Any] = None,
-        decimal_as_numeric: bool = False,
     ) -> Tuple[int, int, int, int, bool]:
         """
         Map a Python data type to the corresponding SQL type,
@@ -844,11 +807,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             - param: The parameter to map.
             - parameters_list: The list of parameters to bind.
             - i: The index of the parameter in the list.
-            - decimal_as_numeric: When True, bind a Decimal as SQL_NUMERIC regardless of
-              value, skipping the MONEY/SMALLMONEY-range VARCHAR shortcut. The execute()
-              path sets this so a money-range Decimal compared against a numeric column
-              does not overflow (GH-740). executemany() leaves it False because it
-              string-binds Decimals for the whole batch (GH-503).
         Returns:
             - A tuple containing the SQL type, C type, column size, and decimal digits.
         """
@@ -960,13 +918,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 )
                 raise ValueError("Cannot bind non-finite Decimal (NaN/Infinity) as SQL NUMERIC")
 
-            # Calculate the SQL precision (same logic as _get_numeric_data)
-            if exponent >= 0:
-                precision = num_digits + exponent
-            elif (-1 * exponent) <= num_digits:
-                precision = num_digits
-            else:
-                precision = exponent * -1
+            precision, _ = _decimal_precision_scale(exponent, num_digits)
             logger.debug(
                 "_map_sql_type: DECIMAL precision calculated - index=%d, precision=%d",
                 i,
@@ -984,12 +936,8 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                     f"The maximum precision supported by SQL Server is 38, but got {precision}."
                 )
 
-            # Detect MONEY / SMALLMONEY range. Skipped on the execute() path
-            # (decimal_as_numeric=True), where a money-range Decimal must bind as
-            # SQL_NUMERIC so a comparison against a smaller numeric column returns no
-            # match instead of overflowing (GH-740). executemany keeps the VARCHAR
-            # shortcut because it string-binds Decimals for the batch (GH-503).
-            if not decimal_as_numeric and SMALLMONEY_MIN <= param <= SMALLMONEY_MAX:
+            # MONEY/SMALLMONEY range binds as VARCHAR (executemany string-binds Decimals, GH-503).
+            if SMALLMONEY_MIN <= param <= SMALLMONEY_MAX:
                 logger.debug("_map_sql_type: DECIMAL -> SMALLMONEY - index=%d", i)
                 # smallmoney
                 parameters_list[i] = format(param, "f")
@@ -1000,7 +948,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                     0,
                     False,
                 )
-            if not decimal_as_numeric and MONEY_MIN <= param <= MONEY_MAX:
+            if MONEY_MIN <= param <= MONEY_MAX:
                 logger.debug("_map_sql_type: DECIMAL -> MONEY - index=%d", i)
                 # money
                 parameters_list[i] = format(param, "f")
@@ -1056,7 +1004,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 )
 
             # String mapping logic here
-            is_unicode = self._is_unicode_string(param)
+            is_unicode = not param.isascii()
 
             # Computes UTF-16 code units (handles surrogate pairs)
             utf16_len = sum(2 if ord(c) > 0xFFFF else 1 for c in param)
@@ -1429,51 +1377,9 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         """Reset input sizes after execution"""
         self._inputsizes = None
 
-    # Pre-built constant lookup table — avoids rebuilding ~30 entries on every call.
-    # Used by setinputsizes fallback path (PR #549 fast path doesn't need this).
-    _SQL_TO_C_TYPE = None
-
-    @classmethod
-    def _get_sql_to_c_type_map(cls):
-        if cls._SQL_TO_C_TYPE is None:
-            cls._SQL_TO_C_TYPE = {
-                ddbc_sql_const.SQL_CHAR.value: ddbc_sql_const.SQL_C_CHAR.value,
-                ddbc_sql_const.SQL_VARCHAR.value: ddbc_sql_const.SQL_C_CHAR.value,
-                ddbc_sql_const.SQL_LONGVARCHAR.value: ddbc_sql_const.SQL_C_CHAR.value,
-                ddbc_sql_const.SQL_WCHAR.value: ddbc_sql_const.SQL_C_WCHAR.value,
-                ddbc_sql_const.SQL_WVARCHAR.value: ddbc_sql_const.SQL_C_WCHAR.value,
-                ddbc_sql_const.SQL_WLONGVARCHAR.value: ddbc_sql_const.SQL_C_WCHAR.value,
-                ddbc_sql_const.SQL_DECIMAL.value: ddbc_sql_const.SQL_C_NUMERIC.value,
-                ddbc_sql_const.SQL_NUMERIC.value: ddbc_sql_const.SQL_C_NUMERIC.value,
-                ddbc_sql_const.SQL_BIT.value: ddbc_sql_const.SQL_C_BIT.value,
-                ddbc_sql_const.SQL_TINYINT.value: ddbc_sql_const.SQL_C_TINYINT.value,
-                ddbc_sql_const.SQL_SMALLINT.value: ddbc_sql_const.SQL_C_SHORT.value,
-                ddbc_sql_const.SQL_INTEGER.value: ddbc_sql_const.SQL_C_LONG.value,
-                ddbc_sql_const.SQL_BIGINT.value: ddbc_sql_const.SQL_C_SBIGINT.value,
-                ddbc_sql_const.SQL_REAL.value: ddbc_sql_const.SQL_C_FLOAT.value,
-                ddbc_sql_const.SQL_FLOAT.value: ddbc_sql_const.SQL_C_DOUBLE.value,
-                ddbc_sql_const.SQL_DOUBLE.value: ddbc_sql_const.SQL_C_DOUBLE.value,
-                ddbc_sql_const.SQL_BINARY.value: ddbc_sql_const.SQL_C_BINARY.value,
-                ddbc_sql_const.SQL_VARBINARY.value: ddbc_sql_const.SQL_C_BINARY.value,
-                ddbc_sql_const.SQL_LONGVARBINARY.value: ddbc_sql_const.SQL_C_BINARY.value,
-                ddbc_sql_const.SQL_SS_UDT.value: ddbc_sql_const.SQL_C_BINARY.value,
-                ddbc_sql_const.SQL_TYPE_DATE.value: ddbc_sql_const.SQL_C_TYPE_DATE.value,
-                ddbc_sql_const.SQL_TYPE_TIME.value: ddbc_sql_const.SQL_C_TYPE_TIME.value,
-                ddbc_sql_const.SQL_TYPE_TIMESTAMP.value: ddbc_sql_const.SQL_C_TYPE_TIMESTAMP.value,
-                ddbc_sql_const.SQL_SS_TIME2.value: ddbc_sql_const.SQL_C_TYPE_TIME.value,
-                ddbc_sql_const.SQL_DATETIMEOFFSET.value: ddbc_sql_const.SQL_C_SS_TIMESTAMPOFFSET.value,
-                ddbc_sql_const.SQL_DATE.value: ddbc_sql_const.SQL_C_TYPE_DATE.value,
-                ddbc_sql_const.SQL_TIME.value: ddbc_sql_const.SQL_C_TYPE_TIME.value,
-                ddbc_sql_const.SQL_TIMESTAMP.value: ddbc_sql_const.SQL_C_TYPE_TIMESTAMP.value,
-                ddbc_sql_const.SQL_GUID.value: ddbc_sql_const.SQL_C_GUID.value,
-                ddbc_sql_const.SQL_SS_XML.value: ddbc_sql_const.SQL_C_WCHAR.value,
-                ddbc_sql_const.SQL_SS_VARIANT.value: ddbc_sql_const.SQL_C_BINARY.value,
-            }
-        return cls._SQL_TO_C_TYPE
-
     def _get_c_type_for_sql_type(self, sql_type: int) -> int:
         """Map SQL type to appropriate C type for parameter binding."""
-        return self._get_sql_to_c_type_map().get(sql_type, ddbc_sql_const.SQL_C_DEFAULT.value)
+        return _SQL_TO_C_TYPE.get(sql_type, ddbc_sql_const.SQL_C_DEFAULT.value)
 
     def _create_parameter_types_list(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
@@ -1483,7 +1389,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         i: int,
         min_val: Optional[Any] = None,
         max_val: Optional[Any] = None,
-        decimal_as_numeric: bool = False,
     ) -> Tuple[int, int, int, int, bool]:
         """
         Maps parameter types for the given parameter.
@@ -1505,7 +1410,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             i,
             min_val=min_val,
             max_val=max_val,
-            decimal_as_numeric=decimal_as_numeric,
         )
 
         # If TIME values are being bound via text C-types, normalize them to a
@@ -1836,7 +1740,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         Raises:
             StopIteration: When no more rows are available.
         """
-        self._check_closed()
         row = self.fetchone()
         if row is None:
             raise StopIteration
@@ -2088,39 +1991,20 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         # Return self for method chaining
         return self
 
-    def _prepare_metadata_result_set(  # pylint: disable=too-many-statements
-        self, column_metadata=None, fallback_description=None, specialized_mapping=None
-    ):
-        """
-        Prepares a metadata result set by:
-        1. Retrieving column metadata if not provided
-        2. Initializing the description attribute
-        3. Setting up column name mappings (including any specialized aliases)
-           so the standard fetch methods return rows keyed by catalog columns
-
-        Args:
-            column_metadata (list, optional): Pre-fetched column metadata.
-                                             If None, it will be retrieved.
-            fallback_description (list, optional): Fallback description to use if
-                                                  metadata retrieval fails.
-            specialized_mapping (dict, optional): Custom column mapping for special cases.
-
-        Returns:
-            Cursor: Self, for method chaining
-        """
-        # Retrieve column metadata if not provided
-        if column_metadata is None:
-            column_metadata = []
-            try:
-                ddbc_bindings.DDBCSQLDescribeCol(self.hstmt, column_metadata)
-            except InterfaceError as e:
-                logger.warning(f"Driver interface error during metadata retrieval: {e}")
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                # Log the exception with appropriate context
-                logger.warning(
-                    f"Failed to retrieve column metadata: {e}. "
-                    f"Using standard ODBC column definitions instead.",
-                )
+    def _prepare_metadata_result_set(self, fallback_description=None):
+        """Describe the current catalog result set and wire up its column maps so the
+        standard fetch methods return rows keyed by catalog column names. Returns self."""
+        column_metadata = []
+        try:
+            ddbc_bindings.DDBCSQLDescribeCol(self.hstmt, column_metadata)
+        except InterfaceError as e:
+            logger.warning(f"Driver interface error during metadata retrieval: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # Log the exception with appropriate context
+            logger.warning(
+                f"Failed to retrieve column metadata: {e}. "
+                f"Using standard ODBC column definitions instead.",
+            )
 
         # Initialize the description attribute with the column metadata
         self._initialize_description(column_metadata)
@@ -2145,12 +2029,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         for i, (name, *_) in enumerate(self.description or ()):
             column_map[name] = i
             column_map[name.lower()] = i
-
-        # Some catalog helpers expose additional friendly aliases (e.g. ODBC 2.x
-        # vs 3.x column names) via a specialized mapping. Merge them in so they
-        # resolve to the same column indices.
-        if specialized_mapping:
-            column_map.update(specialized_mapping)
 
         # Route the map through the shared fetch path. The standard fetchone/
         # fetchmany/fetchall methods read these cached maps when constructing Row
@@ -2322,31 +2200,22 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         # Use the helper method to prepare the result set
         return self._prepare_metadata_result_set(fallback_description=fallback_description)
 
-    def rowIdColumns(self, table, catalog=None, schema=None, nullable=True):
-        """
-        Executes SQLSpecialColumns with SQL_BEST_ROWID which creates a result set of
-        columns that uniquely identify a row.
-        """
+    def _special_columns(self, identifier_type, table, catalog, schema, nullable):
         self._check_closed()
         self._reset_cursor()
 
         if not table:
             raise ProgrammingError("Table name must be specified", "HY000")
 
-        # Set the identifier type and options
-        identifier_type = ddbc_sql_const.SQL_BEST_ROWID.value
         scope = ddbc_sql_const.SQL_SCOPE_CURROW.value
         nullable_flag = (
             ddbc_sql_const.SQL_NULLABLE.value if nullable else ddbc_sql_const.SQL_NO_NULLS.value
         )
-
-        # Call the SQLSpecialColumns function
         retcode = ddbc_bindings.DDBCSQLSpecialColumns(
             self.hstmt, identifier_type, catalog, schema, table, scope, nullable_flag
         )
         check_error(ddbc_sql_const.SQL_HANDLE_STMT.value, self.hstmt, retcode)
 
-        # Define fallback description for special columns
         fallback_description = [
             ("scope", int, None, 10, 10, 0, False),
             ("column_name", str, None, 128, 128, 0, False),
@@ -2357,48 +2226,25 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             ("decimal_digits", int, None, 10, 10, 0, True),
             ("pseudo_column", int, None, 10, 10, 0, False),
         ]
-
-        # Use the helper method to prepare the result set
         return self._prepare_metadata_result_set(fallback_description=fallback_description)
+
+    def rowIdColumns(self, table, catalog=None, schema=None, nullable=True):
+        """
+        Executes SQLSpecialColumns with SQL_BEST_ROWID which creates a result set of
+        columns that uniquely identify a row.
+        """
+        return self._special_columns(
+            ddbc_sql_const.SQL_BEST_ROWID.value, table, catalog, schema, nullable
+        )
 
     def rowVerColumns(self, table, catalog=None, schema=None, nullable=True):
         """
         Executes SQLSpecialColumns with SQL_ROWVER which creates a result set of
         columns that are automatically updated when any value in the row is updated.
         """
-        self._check_closed()
-        self._reset_cursor()
-
-        if not table:
-            raise ProgrammingError("Table name must be specified", "HY000")
-
-        # Set the identifier type and options
-        identifier_type = ddbc_sql_const.SQL_ROWVER.value
-        scope = ddbc_sql_const.SQL_SCOPE_CURROW.value
-        nullable_flag = (
-            ddbc_sql_const.SQL_NULLABLE.value if nullable else ddbc_sql_const.SQL_NO_NULLS.value
+        return self._special_columns(
+            ddbc_sql_const.SQL_ROWVER.value, table, catalog, schema, nullable
         )
-
-        # Call the SQLSpecialColumns function
-        retcode = ddbc_bindings.DDBCSQLSpecialColumns(
-            self.hstmt, identifier_type, catalog, schema, table, scope, nullable_flag
-        )
-        check_error(ddbc_sql_const.SQL_HANDLE_STMT.value, self.hstmt, retcode)
-
-        # Same fallback description as rowIdColumns
-        fallback_description = [
-            ("scope", int, None, 10, 10, 0, False),
-            ("column_name", str, None, 128, 128, 0, False),
-            ("data_type", int, None, 10, 10, 0, False),
-            ("type_name", str, None, 128, 128, 0, False),
-            ("column_size", int, None, 10, 10, 0, False),
-            ("buffer_length", int, None, 10, 10, 0, False),
-            ("decimal_digits", int, None, 10, 10, 0, True),
-            ("pseudo_column", int, None, 10, 10, 0, False),
-        ]
-
-        # Use the helper method to prepare the result set
-        return self._prepare_metadata_result_set(fallback_description=fallback_description)
 
     def statistics(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
@@ -2693,20 +2539,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                     "executemany: Converted %d rows from pyformat to qmark", len(seq_of_parameters)
                 )
 
-        # Apply timeout if set (non-zero)
-        if self._timeout > 0:
-            try:
-                timeout_value = int(self._timeout)
-                ret = ddbc_bindings.DDBCSQLSetStmtAttr(
-                    self.hstmt,
-                    ddbc_sql_const.SQL_ATTR_QUERY_TIMEOUT.value,
-                    timeout_value,
-                )
-                check_error(ddbc_sql_const.SQL_HANDLE_STMT.value, self.hstmt, ret)
-                logger.debug(f"Set query timeout to {self._timeout} seconds")
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.warning(f"Failed to set query timeout: {e}")
-
         # RUST-PORT: plain rows go to the native binding as given. It returns
         # None, having sent nothing, for batches it cannot run exactly as the
         # general path below would (see src/statement/batch_rpc.rs).
@@ -2763,7 +2595,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                     if hasattr(seq_of_parameters, "__getitem__")
                     else []
                 )
-                sample_value, min_val, max_val, _ = self._compute_column_type(column)
+                sample_value, min_val, max_val, max_decimal_len = self._compute_column_type(column)
 
                 # RUST-PORT: a None entry leaves this column to inference.
                 if (
@@ -2805,12 +2637,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                         ddbc_sql_const.SQL_VARBINARY.value,
                         ddbc_sql_const.SQL_LONGVARBINARY.value,
                     ):
-                        # Find the maximum size needed for any row's binary data
-                        max_binary_size = 0
-                        for row in seq_of_parameters:
-                            value = row[col_index]
-                            if value is not None and isinstance(value, (bytes, bytearray)):
-                                max_binary_size = max(max_binary_size, len(value))
+                        max_binary_size = _max_binary_len(seq_of_parameters, col_index)
 
                         # For SQL Server VARBINARY(MAX), we need to use large object binding
                         if column_size > 8000 or max_binary_size > 8000:
@@ -2836,19 +2663,10 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                     parameters_type.append(paraminfo)
                 else:
                     # Use auto-detection for columns without explicit types
-                    column = (
-                        [row[col_index] for row in seq_of_parameters]
-                        if hasattr(seq_of_parameters, "__getitem__")
-                        else []
-                    )
                     # RUST-PORT: one declaration serves every row, so a column that mixes
                     # value kinds (int, str, bytes, ...), e.g. into SQL_VARIANT, runs row by row.
                     if self._column_mixes_kinds(column):
                         any_mixed = True
-                    sample_value, min_val, max_val, max_decimal_len = self._compute_column_type(
-                        column
-                    )
-
                     dummy_row = list(sample_row)
                     paraminfo = self._create_parameter_types_list(
                         sample_value,
@@ -2895,12 +2713,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                         ddbc_sql_const.SQL_VARBINARY.value,
                         ddbc_sql_const.SQL_LONGVARBINARY.value,
                     ):
-                        # Find the maximum size needed for any row's binary data
-                        max_binary_size = 0
-                        for row in seq_of_parameters:
-                            value = row[col_index]
-                            if value is not None and isinstance(value, (bytes, bytearray)):
-                                max_binary_size = max(max_binary_size, len(value))
+                        max_binary_size = _max_binary_len(seq_of_parameters, col_index)
 
                         # For SQL Server VARBINARY(MAX), we need to use large object binding
                         if max_binary_size > 8000:
@@ -3047,7 +2860,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 self._cached_converter_map = self._build_converter_map()
                 self._uuid_str_indices = self._compute_uuid_str_indices()
             else:
-                self.rowcount = ddbc_bindings.DDBCSQLRowCount(self.hstmt)
                 self._clear_rownumber()
                 self._cached_column_map = None
                 self._cached_column_map_lower = None
@@ -3183,11 +2995,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 self._next_row_index += len(rows_data)
                 self._rownumber = self._next_row_index - 1
 
-            # Centralize rowcount assignment after fetch
-            if len(rows_data) == 0 and self._next_row_index == 0:
-                self.rowcount = 0
-            else:
-                self.rowcount = self._next_row_index
+            self.rowcount = self._next_row_index
 
             # Get column and converter maps
             column_map, converter_map, column_map_lower = self._get_column_and_converter_maps()
@@ -3261,11 +3069,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             self._next_row_index += len(rows_data)
             self._rownumber = self._next_row_index - 1
 
-        # Centralize rowcount assignment after fetch
-        if len(rows_data) == 0 and self._next_row_index == 0:
-            self.rowcount = 0
-        else:
-            self.rowcount = self._next_row_index
+        self.rowcount = self._next_row_index
 
         # Get column and converter maps (RUST-PORT: cached maps are valid while the
         # converter generation and the description are unchanged)
@@ -3337,11 +3141,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             self._next_row_index += num_fetched
             self._rownumber = self._next_row_index - 1
 
-        # Centralize rowcount assignment after fetch
-        if num_fetched == 0 and self._next_row_index == 0:
-            self.rowcount = 0
-        else:
-            self.rowcount = self._next_row_index
+        self.rowcount = self._next_row_index
 
         return batch
 
@@ -3505,10 +3305,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         if num_fetched > 0 and self._has_result_set:
             self._next_row_index += num_fetched
             self._rownumber = self._next_row_index - 1
-        if num_fetched == 0 and self._next_row_index == 0:
-            self.rowcount = 0
-        else:
-            self.rowcount = self._next_row_index
+        self.rowcount = self._next_row_index
         return table
 
     def arrow_stream(self, batch_size: int = 65536, prefetch: int = 2) -> "ddbc_bindings.ArrowStream":
@@ -3802,12 +3599,6 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 "not installed. Install the optional extra: "
                 "pip install 'arrowsql[async-preview]'"
             ) from exc
-
-    @classmethod
-    def _bulkcopy_core_and_validate(cls, table_name, batch_size, timeout):
-        """Validate the shared args, then import the ``mssql_py_core`` fallback engine."""
-        cls._bulkcopy_validate(table_name, batch_size, timeout)
-        return cls._bulkcopy_import_core()
 
     # RUST-PORT: bulk copy runs in-process on this cursor's connection.
     def _native_bulk_handle(self, function_name):
@@ -4436,30 +4227,29 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             )
 
         try:
-            if mode == "relative":
-                if value == 0:
-                    return
-
-                # For forward-only cursors, use multiple SQL_FETCH_NEXT calls
-                # This matches pyodbc's approach for skip operations
-                for i in range(value):
-                    ret = ddbc_bindings.DDBCSQLFetchScroll(
-                        self.hstmt, ddbc_sql_const.SQL_FETCH_NEXT.value, 0, row_data
-                    )
-                    if ret == ddbc_sql_const.SQL_NO_DATA.value:
-                        raise IndexError(
-                            "Cannot scroll to specified position: end of result set reached"
-                        )
-
-                # Update position tracking
-                self._rownumber = self._rownumber + value
-                self._next_row_index = self._rownumber + 1
-                logger.debug(
-                    "scroll: Scroll complete - new_rownumber=%d, next_row_index=%d",
-                    self._rownumber,
-                    self._next_row_index,
-                )
+            if value == 0:
                 return
+
+            # For forward-only cursors, use multiple SQL_FETCH_NEXT calls
+            # This matches pyodbc's approach for skip operations
+            for i in range(value):
+                ret = ddbc_bindings.DDBCSQLFetchScroll(
+                    self.hstmt, ddbc_sql_const.SQL_FETCH_NEXT.value, 0, row_data
+                )
+                if ret == ddbc_sql_const.SQL_NO_DATA.value:
+                    raise IndexError(
+                        "Cannot scroll to specified position: end of result set reached"
+                    )
+
+            # Update position tracking
+            self._rownumber = self._rownumber + value
+            self._next_row_index = self._rownumber + 1
+            logger.debug(
+                "scroll: Scroll complete - new_rownumber=%d, next_row_index=%d",
+                self._rownumber,
+                self._next_row_index,
+            )
+            return
 
         except Exception as e:  # pylint: disable=broad-exception-caught
             if isinstance(e, (IndexError, NotSupportedError)):

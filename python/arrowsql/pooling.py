@@ -6,7 +6,6 @@ This module provides connection pooling functionality for the mssql_python packa
 
 import atexit
 import threading
-from typing import Dict
 
 from arrowsql import ddbc_bindings
 from arrowsql.logging import logger
@@ -25,7 +24,6 @@ class PoolingManager:
     _initialized: bool = False
     _pools_closed: bool = False  # Track if pools have been closed
     _lock: threading.Lock = threading.Lock()
-    _config: Dict[str, int] = {"max_size": 100, "idle_timeout": 600}
 
     @classmethod
     def enable(cls, max_size: int = 100, idle_timeout: int = 600) -> None:
@@ -67,8 +65,6 @@ class PoolingManager:
             # the ODBC provider (an explicit pooling() before selecting a
             # provider would otherwise lock in the default prematurely).
             ddbc_bindings.enable_pooling(max_size, idle_timeout)
-            cls._config["max_size"] = max_size
-            cls._config["idle_timeout"] = idle_timeout
             cls._enabled = True
             # Re-arm the disable guard: enable_pooling() calls setAccepting(true)
             # on the native manager, so the Python state must mirror that a

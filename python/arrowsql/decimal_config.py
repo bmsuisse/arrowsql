@@ -49,22 +49,6 @@ def _setDecimalSeparator(separator: str, settings: "Settings", set_in_cpp_func=N
         set_in_cpp_func(separator)
 
 
-def _getDecimalSeparator(settings: "Settings") -> str:
-    """
-    Internal implementation for getting the decimal separator.
-
-    Not intended for direct external use — the public API is exposed via
-    ``mssql_python.getDecimalSeparator`` (created by ``create_decimal_separator_functions``).
-
-    Args:
-        settings (Settings): The settings object to read from
-
-    Returns:
-        str: The current decimal separator character
-    """
-    return settings.decimal_separator
-
-
 def create_decimal_separator_functions(settings: "Settings"):
     """
     Factory function to create decimal separator getter/setter bound to specific settings.
@@ -109,6 +93,6 @@ def create_decimal_separator_functions(settings: "Settings"):
         Returns:
             str: The current decimal separator character
         """
-        return _getDecimalSeparator(settings)
+        return settings.decimal_separator
 
     return setter, getter

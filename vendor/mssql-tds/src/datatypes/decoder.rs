@@ -2160,11 +2160,10 @@ impl GenericDecoder {
                     "Invalid GUID length: expected 16 bytes, got {length}"
                 )));
             }
-            let mut bytes = safe_vec![0u8; length as usize, "read_guid"];
+            // RUST-PORT: stack array instead of a heap allocation per GUID.
+            let mut bytes = [0u8; 16];
             reader.read_bytes(&mut bytes).await?;
-            let unique_id = uuid::Uuid::from_slice_le(&bytes).map_err(|e| {
-                crate::error::Error::ProtocolError(format!("Failed to parse UUID: {e}"))
-            })?;
+            let unique_id = uuid::Uuid::from_bytes_le(bytes);
             Ok(ColumnValues::Uuid(unique_id))
         } else {
             Ok(ColumnValues::Null)

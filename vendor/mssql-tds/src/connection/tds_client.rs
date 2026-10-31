@@ -9284,6 +9284,9 @@ impl TdsClient {
         Self::note_on_error_ignored(on_error);
 
         self.begin_command();
+        // RUST-PORT: takes no cancel handle; one left by an earlier request
+        // (e.g. a cancelled stream) must not cancel this one.
+        self.cancel_handle = None;
         let reconnect_elapsed = self.check_and_reconnect(timeout, cancel).await?;
         let budget = Self::deduct_timeout(timeout, reconnect_elapsed);
         let resolved = budget.into_timeout()?;
@@ -9321,6 +9324,9 @@ impl TdsClient {
             ));
         }
         self.begin_command();
+        // RUST-PORT: takes no cancel handle; one left by an earlier request
+        // (e.g. a cancelled stream) must not cancel this one.
+        self.cancel_handle = None;
         let transaction = TransactionManagementRequest::new(
             TransactionManagementType::Save(name),
             &self.execution_context,
@@ -9350,6 +9356,9 @@ impl TdsClient {
             ));
         }
         self.begin_command();
+        // RUST-PORT: takes no cancel handle; one left by an earlier request
+        // (e.g. a cancelled stream) must not cancel this one.
+        self.cancel_handle = None;
         let transaction = TransactionManagementRequest::new(
             TransactionManagementType::Commit {
                 name,
@@ -9382,6 +9391,9 @@ impl TdsClient {
             ));
         }
         self.begin_command();
+        // RUST-PORT: takes no cancel handle; one left by an earlier request
+        // (e.g. a cancelled stream) must not cancel this one.
+        self.cancel_handle = None;
         let transaction = TransactionManagementRequest::new(
             TransactionManagementType::Rollback {
                 name,

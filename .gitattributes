@@ -1,0 +1,6 @@
+# GitHub language statistics (linguist).
+# tests/upstream is Microsoft's mssql-python test suite, copied in unchanged.
+tests/upstream/** linguist-vendored
+# vendor/mssql-tds is the TDS client this driver is built on, carried with local
+# patches (vendor/mssql-tds/VENDOR.md): count it as this repository's Rust.
+vendor/mssql-tds/** linguist-vendored=false

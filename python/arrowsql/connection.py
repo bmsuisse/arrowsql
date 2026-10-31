@@ -64,6 +64,7 @@ from arrowsql.constants import (
     _KEY_PWD,
     _KEY_TRUSTED_CONNECTION,
     _AuthInternal,
+    SQL_WMETADATA,
 )
 
 if TYPE_CHECKING:
@@ -89,8 +90,6 @@ class TokenProvider(Protocol):
         ...
 
 
-# Add SQL_WMETADATA constant for metadata decoding configuration
-SQL_WMETADATA: int = -99  # Special flag for column name decoding
 INFO_TYPE_STRING_THRESHOLD: int = 10000  # Legacy fallback for unlisted information types
 
 # ODBC integers have fixed widths and native byte order; handles are pointer-sized.
@@ -212,6 +211,10 @@ _GETINFO_RETURN_TYPES = MappingProxyType(
 UTF16_ENCODINGS: frozenset[str] = frozenset(["utf-16le", "utf-16be"])
 
 # Optional "NATIVE:<n>:" carries the SQL Server error number (bindings that have it).
+# Connection._cursors until the first cursor: empty, and shared by every
+# connection that never opens one.
+_NO_CURSORS: frozenset = frozenset()
+
 # Enum values read on every connect.
 _SQL_CHAR = ConstantsDDBC.SQL_CHAR.value
 _SQL_WCHAR = ConstantsDDBC.SQL_WCHAR.value
@@ -265,9 +268,7 @@ def _raise_connection_error(e: RuntimeError) -> None:
     ) from None
 
 
-def _validate_utf16_wchar_compatibility(
-    encoding: str, wchar_type: int, context: str = "SQL_WCHAR"
-) -> None:
+def _validate_utf16_wchar_compatibility(encoding: str, context: str = "SQL_WCHAR") -> None:
     """
     Validates UTF-16 encoding compatibility with SQL_WCHAR.
 
@@ -275,7 +276,6 @@ def _validate_utf16_wchar_compatibility(
 
     Args:
         encoding: The encoding string (already normalized to lowercase)
-        wchar_type: The SQL_WCHAR constant value to check against
         context: Context string for error messages ('SQL_WCHAR', 'SQL_WCHAR ctype', etc.)
 
     Raises:
@@ -325,8 +325,6 @@ def _validate_encoding(encoding: str) -> bool:
         bool: True if encoding is valid, False otherwise.
 
     Note:
-        Uses LRU cache to avoid repeated expensive codecs.lookup() calls.
-        Cache size is limited to 128 entries which should cover most use cases.
         Also validates that encoding name only contains safe characters.
     """
     # Basic security checks - prevent obvious attacks
@@ -374,20 +372,6 @@ class Connection:
             # Multiple operations...
         finally:
             conn.close()
-
-    Methods:
-        __init__(database: str) -> None:
-        connect_to_db() -> None:
-        cursor() -> Cursor:
-        commit() -> None:
-        rollback() -> None:
-        close() -> None:
-        __enter__() -> Connection:
-        __exit__() -> None:
-        setencoding(encoding=None, ctype=None) -> None:
-        setdecoding(sqltype, encoding=None, ctype=None) -> None:
-        getdecoding(sqltype) -> dict:
-        set_attr(attribute, value) -> None:
     """
 
     # DB-API 2.0 Exception attributes
@@ -403,6 +387,68 @@ class Connection:
     InternalError = InternalError
     ProgrammingError = ProgrammingError
     NotSupportedError = NotSupportedError
+
+    # Per-connection defaults that __init__ only changes for some connections;
+    # class attributes spare a pooled connect the instance stores.
+
+    _timeout: int = 0
+
+    _decoding_generation: int = 0
+
+    # Auth type for acquiring fresh tokens at bulk copy time.
+    # We intentionally do NOT cache the token — a fresh one is acquired
+    # each time bulkcopy() is called to avoid expired-token errors.
+    _auth_type: Optional[str] = None
+
+    # Credential constructor kwargs (e.g. user-assigned MSI client_id)
+    # captured at __init__ time before remove_sensitive_params strips UID
+    # from self.connection_str. bulkcopy() re-uses these when acquiring a
+    # fresh token; re-parsing self.connection_str at that point would miss
+    # them because UID is already gone.
+    _credential_kwargs: Optional[Dict[str, str]] = None
+
+    # User-supplied token provider for custom Entra ID authentication.
+    # Stored so bulk copy can call .get_token() for a fresh JWT later.
+    _token_provider: Optional["TokenProvider"] = None
+
+    # POSIX timestamp (seconds) at which the current access token expires,
+    # captured from the credential's AccessToken result. None when unknown.
+    # The token is a pre-connect ODBC attribute and cannot be refreshed on
+    # a live connection — this is exposed for diagnostics/logging only.
+    # A custom token_provider may report a float POSIX timestamp, so the
+    # hint is Optional[float] (int is accepted under the numeric tower).
+    _token_expires_on: Optional[float] = None
+
+    # Composite, identity-aware pool key. Empty means "key the native pool
+    # on the connection string" (legacy behavior, used for non-token auth).
+    # For Entra access-token auth it is set to connStr + identity so that
+    # distinct identities never share a pooled connection.
+    _pool_key: str = ""
+
+    # Optional deferred-attrs callback handed to the native layer. When set,
+    # native invokes it *only* when it actually opens a physical connection
+    # (a pool miss or a non-pooled connect), so a same-identity pool hit
+    # skips token acquisition entirely. None means "no deferred
+    # token" — the token (if any) is already in self._attrs_before.
+    #
+    # NOTE: This is an internal, private callback and is intentionally NOT
+    # the public ``token_provider=`` credential parameter. It returns the
+    # full connect-attrs dict lazily; hence the distinct name
+    # ``_token_factory``.
+    _token_factory: Optional[Callable[..., Any]] = None
+
+    # RUST-PORT: (spn, sts_url, auth_method) -> JWT callable for the
+    # federated Entra flows the native login drives itself.
+    _fedauth_factory: Optional[Callable[..., Any]] = None
+
+    # Cursors created by cursor() (weak references: a cursor nobody holds
+    # is collected without explicit deletion). The shared empty placeholder
+    # is replaced by a WeakSet on the first cursor.
+    _cursors: Any = _NO_CURSORS
+
+    _converters_generation: int = 0
+
+    _searchescape: Optional[str] = None
 
     def __init__(
         self,
@@ -532,8 +578,9 @@ class Connection:
         # 0 = disabled. Only inject the login timeout when the caller asked for
         # one (> 0) and did not already set it explicitly via attrs_before (an
         # explicit attrs_before value wins).
-        self._timeout = 0
-        login_timeout = self._validate_timeout(timeout, kind="Login timeout")
+        login_timeout = (
+            0 if timeout == 0 and type(timeout) is int else self._validate_timeout(timeout, kind="Login timeout")
+        )
         if login_timeout > 0:
             self._attrs_before.setdefault(ConstantsDDBC.SQL_ATTR_LOGIN_TIMEOUT.value, login_timeout)
 
@@ -550,62 +597,9 @@ class Connection:
         # Windows where the driver returns raw bytes in the server's native
         # code page (e.g. CP-1252) that may fail to decode as UTF-8.
         self._decoding_settings = {
-            _SQL_CHAR: {
-                "encoding": "utf-16le",
-                "ctype": _SQL_WCHAR,
-            },
-            _SQL_WCHAR: {
-                "encoding": "utf-16le",
-                "ctype": _SQL_WCHAR,
-            },
-            SQL_WMETADATA: {
-                "encoding": "utf-16le",
-                "ctype": _SQL_WCHAR,
-            },
+            sqltype: {"encoding": "utf-16le", "ctype": _SQL_WCHAR}
+            for sqltype in (_SQL_CHAR, _SQL_WCHAR, SQL_WMETADATA)
         }
-        self._decoding_generation = 0
-
-        # Auth type for acquiring fresh tokens at bulk copy time.
-        # We intentionally do NOT cache the token — a fresh one is acquired
-        # each time bulkcopy() is called to avoid expired-token errors.
-        self._auth_type = None
-        # Credential constructor kwargs (e.g. user-assigned MSI client_id)
-        # captured at __init__ time before remove_sensitive_params strips UID
-        # from self.connection_str. bulkcopy() re-uses these when acquiring a
-        # fresh token; re-parsing self.connection_str at that point would miss
-        # them because UID is already gone.
-        self._credential_kwargs: Optional[Dict[str, str]] = None
-        # User-supplied token provider for custom Entra ID authentication.
-        # Stored so bulk copy can call .get_token() for a fresh JWT later.
-        self._token_provider: Optional["TokenProvider"] = None
-        # POSIX timestamp (seconds) at which the current access token expires,
-        # captured from the credential's AccessToken result. None when unknown.
-        # The token is a pre-connect ODBC attribute and cannot be refreshed on
-        # a live connection — this is exposed for diagnostics/logging only.
-        # A custom token_provider may report a float POSIX timestamp, so the
-        # hint is Optional[float] (int is accepted under the numeric tower).
-        self._token_expires_on: Optional[float] = None
-
-        # Composite, identity-aware pool key. Empty means "key the native pool
-        # on the connection string" (legacy behavior, used for non-token auth).
-        # For Entra access-token auth it is set to connStr + identity so that
-        # distinct identities never share a pooled connection.
-        self._pool_key: str = ""
-
-        # Optional deferred-attrs callback handed to the native layer. When set,
-        # native invokes it *only* when it actually opens a physical connection
-        # (a pool miss or a non-pooled connect), so a same-identity pool hit
-        # skips token acquisition entirely. None means "no deferred
-        # token" — the token (if any) is already in self._attrs_before.
-        #
-        # NOTE: This is an internal, private callback and is intentionally NOT
-        # the public ``token_provider=`` credential parameter. It returns the
-        # full connect-attrs dict lazily; hence the distinct name
-        # ``_token_factory``.
-        self._token_factory = None
-        # RUST-PORT: (spn, sts_url, auth_method) -> JWT callable for the
-        # federated Entra flows the native login drives itself.
-        self._fedauth_factory = None
 
         # Custom token_provider= parameter — takes priority, mutually exclusive
         # with Authentication= in the connection string.
@@ -803,20 +797,8 @@ class Connection:
 
         self._closed = False
 
-        # Using WeakSet which automatically removes cursors when they are no
-        # longer in use
-        # It is a set that holds weak references to its elements.
-        # When an object is only weakly referenced, it can be garbage
-        # collected even if it's still in the set.
-        # It prevents memory leaks by ensuring that cursors are cleaned up
-        # when no longer in use without requiring explicit deletion.
-        # TODO: Think and implement scenarios for multi-threaded access
-        # to cursors
-        self._cursors = weakref.WeakSet()
-
         # Initialize output converters dictionary and its lock for thread safety
         self._output_converters = {}
-        self._converters_generation = 0
         self._converters_lock = threading.Lock()
 
         # Initialize encoding/decoding settings lock for thread safety
@@ -829,7 +811,6 @@ class Connection:
         self._encoding_lock = threading.Lock()
 
         # Initialize search escape character
-        self._searchescape = None
 
         # Safety net for the raw access-token pattern: a caller may pass
         # SQL_COPT_SS_ACCESS_TOKEN directly in attrs_before with no
@@ -1047,8 +1028,24 @@ class Connection:
                 the normalized parameter dictionary.
         """
 
-        # Reject embedded NUL (\x00) up front, for both the base string and every
-        # kwargs value. The ODBC layer terminates the connection string at the
+        # Steps 1-5 depend on the arguments alone: a pool checkout with the same
+        # arguments reuses the result instead of parsing again.
+        try:
+            cache_key = (
+                (connection_str, tuple((k, str(v)) for k, v in kwargs.items()))
+                if kwargs
+                else connection_str
+            )
+            cached = _CONN_STR_CACHE.get(cache_key)
+        except TypeError:
+            cache_key = cached = None
+        if cached is not None:
+            if logger._cached_level <= logging.INFO:
+                logger.info("Final connection string: %s", sanitize_connection_string(cached[0]))
+            return cached[0], dict(cached[1])
+
+        # Reject embedded NUL (\x00) (cached arguments passed this check), for
+        # both the base string and every kwargs value. The ODBC layer terminates the connection string at the
         # first NUL (SQL_NTS), so anything after it is silently dropped; worse,
         # the identity-aware pool key joins the connection string and the
         # per-identity discriminator with a NUL separator, so a NUL smuggled into
@@ -1069,21 +1066,6 @@ class Connection:
                     ddbc_error="Embedded NUL in connection parameter.",
                 )
 
-        # Steps 1-5 depend on the arguments alone: a pool checkout with the same
-        # arguments reuses the result instead of parsing again.
-        try:
-            cache_key = (
-                (connection_str, tuple((k, str(v)) for k, v in kwargs.items()))
-                if kwargs
-                else connection_str
-            )
-            cached = _CONN_STR_CACHE.get(cache_key)
-        except TypeError:
-            cache_key = cached = None
-        if cached is not None:
-            if logger._cached_level <= logging.INFO:
-                logger.info("Final connection string: %s", sanitize_connection_string(cached[0]))
-            return cached[0], dict(cached[1])
         warned = False
 
         # Step 1: Parse base connection string with allowlist validation
@@ -1293,10 +1275,7 @@ class Connection:
         )
         if self._closed:
             logger.debug("setencoding: Connection is closed")
-            raise InterfaceError(
-                driver_error="Connection is closed",
-                ddbc_error="Connection is closed",
-            )
+        self._check_open()
 
         # Set default encoding if not provided
         if encoding is None:
@@ -1318,10 +1297,6 @@ class Connection:
         # Normalize encoding to casefold for more robust Unicode handling
         encoding = encoding.casefold()
         logger.debug("setencoding: Encoding normalized to %s", encoding)
-
-        # Early validation if ctype is already specified as SQL_WCHAR
-        if ctype == ConstantsDDBC.SQL_WCHAR.value:
-            _validate_utf16_wchar_compatibility(encoding, ctype, "SQL_WCHAR")
 
         # Set default ctype based on encoding if not provided
         if ctype is None:
@@ -1350,7 +1325,7 @@ class Connection:
 
         # Final validation: SQL_WCHAR ctype only supports UTF-16 encodings (without BOM)
         if ctype == ConstantsDDBC.SQL_WCHAR.value:
-            _validate_utf16_wchar_compatibility(encoding, ctype, "SQL_WCHAR")
+            _validate_utf16_wchar_compatibility(encoding, "SQL_WCHAR")
 
         if encoding != "utf-16le" or ctype != ConstantsDDBC.SQL_WCHAR.value:
             warnings.warn(
@@ -1397,11 +1372,7 @@ class Connection:
             This method is thread-safe and can be called from multiple threads concurrently.
             Returns a copy of the settings to prevent external modification.
         """
-        if self._closed:
-            raise InterfaceError(
-                driver_error="Connection is closed",
-                ddbc_error="Connection is closed",
-            )
+        self._check_open()
 
         # Thread-safe read with lock to prevent race conditions
         with self._encoding_lock:
@@ -1453,11 +1424,7 @@ class Connection:
             cnxn.setdecoding(mssql_python.SQL_WCHAR, encoding='utf-16le',
                            ctype=mssql_python.SQL_WCHAR)
         """
-        if self._closed:
-            raise InterfaceError(
-                driver_error="Connection is closed",
-                ddbc_error="Connection is closed",
-            )
+        self._check_open()
 
         # Validate sqltype
         valid_sqltypes = [
@@ -1505,7 +1472,7 @@ class Connection:
 
         # Validate SQL_WCHAR encoding compatibility
         if sqltype == ConstantsDDBC.SQL_WCHAR.value:
-            _validate_utf16_wchar_compatibility(encoding, sqltype, "SQL_WCHAR sqltype")
+            _validate_utf16_wchar_compatibility(encoding, "SQL_WCHAR sqltype")
 
         # SQL_WMETADATA can use any valid encoding (UTF-8, UTF-16, etc.)
         # No restriction needed here - let users configure as needed
@@ -1534,7 +1501,7 @@ class Connection:
 
         # Validate SQL_WCHAR ctype encoding compatibility
         if ctype == ConstantsDDBC.SQL_WCHAR.value:
-            _validate_utf16_wchar_compatibility(encoding, ctype, "SQL_WCHAR ctype")
+            _validate_utf16_wchar_compatibility(encoding, "SQL_WCHAR ctype")
 
         # Store the decoding settings for the specified sqltype (thread-safe with lock)
         with self._encoding_lock:
@@ -1578,11 +1545,7 @@ class Connection:
             This method is thread-safe and can be called from multiple threads concurrently.
             Returns a copy of the settings to prevent external modification.
         """
-        if self._closed:
-            raise InterfaceError(
-                driver_error="Connection is closed",
-                ddbc_error="Connection is closed",
-            )
+        self._check_open()
 
         # Validate sqltype
         valid_sqltypes = [
@@ -1646,8 +1609,7 @@ class Connection:
 
         if not is_valid:
             # Use the already sanitized values for logging
-            logger.debug(
-                "warning",
+            logger.warning(
                 f"Invalid attribute or value: {sanitized_attr}={sanitized_val}, {error_message}",
             )
             raise ProgrammingError(
@@ -1695,8 +1657,7 @@ class Connection:
                 self._searchescape = escape_char
             except Exception as e:
                 # Log the exception for debugging, but do not expose sensitive info
-                logger.debug(
-                    "warning",
+                logger.warning(
                     "Failed to retrieve search escape character, using default '\\'. "
                     "Exception: %s",
                     type(e).__name__,
@@ -1733,7 +1694,7 @@ class Connection:
             )
 
         cursor = Cursor(self, timeout=self._timeout)
-        self._cursors.add(cursor)  # Track the cursor
+        self._track_cursor(cursor)  # Track the cursor
         logger.debug("cursor: Cursor created successfully - total_cursors=%d", len(self._cursors))
         return cursor
 
@@ -1892,11 +1853,6 @@ class Connection:
         """
         cursor = self.cursor()
         try:
-            # Add the cursor to our tracking set BEFORE execution
-            # This ensures it's tracked even if execution fails
-            self._cursors.add(cursor)
-
-            # Now execute the query
             cursor.execute(sql, *args)
             return cursor
         except Exception:
@@ -2018,12 +1974,10 @@ class Connection:
                     # Close the cursor regardless of whether it's reused or new
                     cursor.close()
                     logger.debug(
-                        "debug",
                         "Automatically closed cursor after batch execution error",
                     )
                 except Exception as close_err:
-                    logger.debug(
-                        "warning",
+                    logger.warning(
                         f"Error closing cursor after execution failure: {close_err}",
                     )
             # Re-raise the original exception
@@ -2259,7 +2213,6 @@ class Connection:
         if getattr(self, "_cursors", None):
             # Convert to list to avoid modification during iteration
             cursors_to_close = list(self._cursors)
-            close_errors = []
 
             for cursor in cursors_to_close:
                 try:
@@ -2267,16 +2220,7 @@ class Connection:
                         cursor.close()
                 except Exception as e:  # pylint: disable=broad-exception-caught
                     # Collect errors but continue closing other cursors
-                    close_errors.append(f"Error closing cursor: {e}")
                     logger.warning(f"Error closing cursor: {e}")
-
-            # If there were errors closing cursors, log them but continue
-            if close_errors:
-                logger.debug(
-                    "warning",
-                    "Encountered %d errors while closing cursors",
-                    len(close_errors),
-                )
 
             # Clear the cursor set explicitly to release any internal
             # references
@@ -2324,6 +2268,19 @@ class Connection:
 
         if logger._cached_level <= logging.INFO:
             logger.info("Connection closed successfully.")
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise InterfaceError(
+                driver_error="Connection is closed",
+                ddbc_error="Connection is closed",
+            )
+
+    def _track_cursor(self, cursor: Cursor) -> None:
+        """Remember `cursor` so close() closes it too."""
+        if self._cursors is _NO_CURSORS:
+            self._cursors = weakref.WeakSet()
+        self._cursors.add(cursor)
 
     def _remove_cursor(self, cursor: Cursor) -> None:
         """

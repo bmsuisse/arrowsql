@@ -133,7 +133,7 @@ pub struct Session {
     /// that batch obey it, so cancelling a drain means cancelling this.
     owner_handle: Option<Arc<CancelHandle>>,
     cursors: HashMap<u64, CursorState>,
-    param_types: HashMap<String, Vec<(String, String)>>,
+    param_types: HashMap<String, Arc<[(String, String)]>>,
     /// When the TDS login finished (pool `max_lifetime`).
     born: Instant,
 }
@@ -297,7 +297,7 @@ impl Session {
             return;
         }
         let described = match self.param_types.get(sql) {
-            Some(types) => types.clone(),
+            Some(types) => Arc::clone(types),
             None => {
                 let Some(client) = self.client.as_mut() else { return };
                 let query = format!(
@@ -320,7 +320,7 @@ impl Session {
                     return;
                 }
                 let ncols = rows.cells.len().checked_div(rows.rows).unwrap_or(0).max(1);
-                let types: Vec<(String, String)> = rows
+                let types: Arc<[(String, String)]> = rows
                     .cells
                     .chunks(ncols)
                     .filter_map(|row| {
@@ -330,7 +330,7 @@ impl Session {
                 if self.param_types.len() >= PARAM_TYPE_CACHE_SIZE {
                     self.param_types.clear();
                 }
-                self.param_types.insert(sql.to_string(), types.clone());
+                self.param_types.insert(sql.to_string(), Arc::clone(&types));
                 types
             }
         };
@@ -696,7 +696,7 @@ impl Session {
                 let params = types
                     .into_iter()
                     .enumerate()
-                    .map(|(j, t)| RpcParameter::new(Some(format!("@P{}", j + 1)), StatusFlags::NONE, t))
+                    .map(|(j, t)| RpcParameter::new(Some(crate::params::param_name(j + 1)), StatusFlags::NONE, t))
                     .collect();
                 Ok((i, params))
             });

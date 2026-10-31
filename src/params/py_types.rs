@@ -19,6 +19,7 @@ use mssql_tds::datatypes::sql_vector::SqlVector;
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::error::Error;
 use pyo3::prelude::*;
+use pyo3::types::{PyDateAccess, PyTimeAccess};
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyMemoryView,
@@ -1251,100 +1252,25 @@ fn py_to_column_value_internal(
     }
 
     // Check for datetime types (must check PyDateTime before PyDate since datetime is a subclass of date)
-    if py_obj.is_instance_of::<PyDateTime>() {
-        // Extract components from Python datetime
-        let year = py_obj
-            .getattr("year")
-            .and_then(|v| v.extract::<i32>())
-            .map_err(|e| Error::UsageError(format!("Failed to get year from datetime: {}", e)))?;
+    if let Ok(dt) = py_obj.cast::<PyDateTime>() {
+        let year = dt.get_year();
+        let month = dt.get_month();
+        let day = dt.get_day();
+        let hour = dt.get_hour();
+        let minute = dt.get_minute();
+        let second = dt.get_second();
+        let microsecond = dt.get_microsecond();
 
-        let month = py_obj
-            .getattr("month")
-            .and_then(|v| v.extract::<u8>())
-            .map_err(|e| Error::UsageError(format!("Failed to get month from datetime: {}", e)))?;
-
-        let day = py_obj
-            .getattr("day")
-            .and_then(|v| v.extract::<u8>())
-            .map_err(|e| Error::UsageError(format!("Failed to get day from datetime: {}", e)))?;
-
-        let hour = py_obj
-            .getattr("hour")
-            .and_then(|v| v.extract::<u8>())
-            .map_err(|e| Error::UsageError(format!("Failed to get hour from datetime: {}", e)))?;
-
-        let minute = py_obj
-            .getattr("minute")
-            .and_then(|v| v.extract::<u8>())
-            .map_err(|e| Error::UsageError(format!("Failed to get minute from datetime: {}", e)))?;
-
-        let second = py_obj
-            .getattr("second")
-            .and_then(|v| v.extract::<u8>())
-            .map_err(|e| Error::UsageError(format!("Failed to get second from datetime: {}", e)))?;
-
-        let microsecond = py_obj
-            .getattr("microsecond")
-            .and_then(|v| v.extract::<u32>())
-            .map_err(|e| {
-                Error::UsageError(format!("Failed to get microsecond from datetime: {}", e))
-            })?;
-
-        // Calculate days since 1900-01-01
-        // Use Python's date.toordinal() which gives days since 0001-01-01 (1-based)
-        // Then subtract the ordinal of 1900-01-01
-        let py = py_obj.py();
-        let datetime_module = PyModule::import(py, "datetime")
-            .map_err(|e| Error::UsageError(format!("Failed to import datetime module: {}", e)))?;
-
-        let date_class = datetime_module
-            .getattr("date")
-            .map_err(|e| Error::UsageError(format!("Failed to get date class: {}", e)))?;
-
-        // Create date for 1900-01-01
-        let base_date = date_class
-            .call1((1900, 1, 1))
-            .map_err(|e| Error::UsageError(format!("Failed to create base date: {}", e)))?;
-
-        let base_ordinal = base_date
-            .call_method0("toordinal")
-            .and_then(|v| v.extract::<i32>())
-            .map_err(|e| Error::UsageError(format!("Failed to get base ordinal: {}", e)))?;
-
-        // Get ordinal of the current datetime's date part
-        let current_date = date_class
-            .call1((year, month, day))
-            .map_err(|e| Error::UsageError(format!("Failed to create current date: {}", e)))?;
-
-        let current_ordinal = current_date
-            .call_method0("toordinal")
-            .and_then(|v| v.extract::<i32>())
-            .map_err(|e| Error::UsageError(format!("Failed to get current ordinal: {}", e)))?;
-
-        let days = current_ordinal - base_ordinal;
+        // 0-based days since 0001-01-01, and days since 1900-01-01.
+        let days_from_year_one = days_from_year_one(year, month, day);
+        let days = days_from_year_one as i32 - DAYS_FROM_YEAR_ONE_TO_1900;
 
         // Check if target is DateTimeOffset, SmallDateTime or DateTime2 to determine which format to use
         if let Some(meta) = target_metadata {
             if meta.sql_type == SqlDbType::DateTimeOffset {
                 // Convert to DATETIMEOFFSET format
                 // DATETIMEOFFSET uses DATETIME2 + timezone offset (i16, minutes from UTC)
-                // Calculate days from year 1 using Python's toordinal
-                let current_ordinal = current_date
-                    .call_method0("toordinal")
-                    .and_then(|v| v.extract::<u32>())
-                    .map_err(|e| {
-                        Error::UsageError(format!(
-                            "Failed to get current ordinal for DATETIMEOFFSET: {}",
-                            e
-                        ))
-                    })?;
-
-                // Python's toordinal() returns 1 for 0001-01-01, so subtract 1 to get 0-based days
-                let days_dto = current_ordinal.checked_sub(1).ok_or_else(|| {
-                    Error::UsageError(
-                        "Date ordinal is 0, expected >= 1 for DATETIMEOFFSET".to_string(),
-                    )
-                })?;
+                let days_dto = days_from_year_one;
 
                 // Convert to 100-nanosecond units (DATETIME2/TIME uses 100ns precision)
                 let time_nanoseconds = (hour as u64) * 36_000_000_000
@@ -1391,21 +1317,7 @@ fn py_to_column_value_internal(
             } else if meta.sql_type == SqlDbType::DateTime2 {
                 // Convert to DATETIME2 format
                 // DATETIME2 uses days since 0001-01-01 (0-based) instead of days since 1900-01-01
-                // Calculate days from year 1 using Python's toordinal
-                let current_ordinal = current_date
-                    .call_method0("toordinal")
-                    .and_then(|v| v.extract::<u32>())
-                    .map_err(|e| {
-                        Error::UsageError(format!(
-                            "Failed to get current ordinal for DATETIME2: {}",
-                            e
-                        ))
-                    })?;
-
-                // Python's toordinal() returns 1 for 0001-01-01, so subtract 1 to get 0-based days
-                let days_dt2 = current_ordinal.checked_sub(1).ok_or_else(|| {
-                    Error::UsageError("Date ordinal is 0, expected >= 1 for DATETIME2".to_string())
-                })?;
+                let days_dt2 = days_from_year_one;
 
                 // Convert to 100-nanosecond units (DATETIME2/TIME uses 100ns precision)
                 let time_nanoseconds = (hour as u64) * 36_000_000_000
@@ -1483,55 +1395,18 @@ fn py_to_column_value_internal(
         ));
     }
 
-    if py_obj.is_instance_of::<PyDate>() {
-        // Convert Python date object to SqlDate
-        // Python's toordinal() is 1-based (date(1,1,1).toordinal() == 1)
-        // SQL Server DATE needs 0-based days since 0001-01-01, so subtract 1
-        match py_obj.call_method0("toordinal") {
-            Ok(ordinal_obj) => {
-                if let Ok(ordinal) = ordinal_obj.extract::<u32>() {
-                    // Convert from 1-based ordinal to 0-based days
-                    let days = ordinal.checked_sub(1).ok_or_else(|| {
-                        Error::UsageError("Date ordinal is 0, expected >= 1".to_string())
-                    })?;
-                    return Ok(ColumnValues::Date(
-                        mssql_tds::datatypes::column_values::SqlDate::create(days)?,
-                    ));
-                }
-            }
-            Err(e) => {
-                return Err(Error::UsageError(format!(
-                    "Failed to get ordinal from date object: {}",
-                    e
-                )));
-            }
-        }
+    if let Ok(date) = py_obj.cast::<PyDate>() {
+        let days = days_from_year_one(date.get_year(), date.get_month(), date.get_day());
+        return Ok(ColumnValues::Date(
+            mssql_tds::datatypes::column_values::SqlDate::create(days)?,
+        ));
     }
 
-    if py_obj.is_instance_of::<PyTime>() {
-        // Convert Python time object to SqlTime
-        // Extract hour, minute, second, microsecond from Python time
-        let hour = py_obj
-            .getattr("hour")
-            .and_then(|v| v.extract::<u8>())
-            .map_err(|e| Error::UsageError(format!("Failed to get hour from time: {}", e)))?;
-
-        let minute = py_obj
-            .getattr("minute")
-            .and_then(|v| v.extract::<u8>())
-            .map_err(|e| Error::UsageError(format!("Failed to get minute from time: {}", e)))?;
-
-        let second = py_obj
-            .getattr("second")
-            .and_then(|v| v.extract::<u8>())
-            .map_err(|e| Error::UsageError(format!("Failed to get second from time: {}", e)))?;
-
-        let microsecond = py_obj
-            .getattr("microsecond")
-            .and_then(|v| v.extract::<u32>())
-            .map_err(|e| {
-                Error::UsageError(format!("Failed to get microsecond from time: {}", e))
-            })?;
+    if let Ok(time) = py_obj.cast::<PyTime>() {
+        let hour = time.get_hour();
+        let minute = time.get_minute();
+        let second = time.get_second();
+        let microsecond = time.get_microsecond();
 
         // Convert to 100-nanosecond units (SQL Server TIME uses 100ns precision)
         // time_100ns = hour * 3600 * 10^7 + minute * 60 * 10^7 + second * 10^7 + microsecond * 10
@@ -1631,6 +1506,22 @@ fn py_to_column_value_internal(
 
 /// Ticks-per-day for SQL Server DATETIME (300 ticks/sec × 86400 sec/day).
 const DATETIME_TICKS_PER_DAY: u64 = 25_920_000;
+
+/// Days from 0001-01-01 to 1900-01-01 (`date(1900, 1, 1).toordinal() - 1`).
+const DAYS_FROM_YEAR_ONE_TO_1900: i32 = 693_595;
+
+/// 0-based days since 0001-01-01 in the proleptic Gregorian calendar, for a
+/// date Python has already validated (`date.toordinal() - 1`).
+fn days_from_year_one(year: i32, month: u8, day: u8) -> u32 {
+    const CUMULATIVE: [u32; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    let y = (year - 1) as u32;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let mut days = 365 * y + y / 4 - y / 100 + y / 400 + CUMULATIVE[(month - 1) as usize] + day as u32 - 1;
+    if leap && month > 2 {
+        days += 1;
+    }
+    days
+}
 
 /// Convert time components to SQL Server DATETIME days + 1/300s ticks.
 ///

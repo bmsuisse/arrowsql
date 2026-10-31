@@ -86,7 +86,7 @@ fn make_row(py: Python<'_>, row_type: &Bound<'_, PyType>, values: *mut ffi::PyOb
 }
 
 /// Rows `from..from+count` of `buf` as a list of `Row` objects (or tuples).
-fn rows_range<'py>(
+pub fn rows_range<'py>(
     py: Python<'py>,
     buf: &RowBuffer,
     ncols: usize,
