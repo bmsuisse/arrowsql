@@ -98,9 +98,6 @@ jobs:
     name: pytest (SQL Server Express, windows-latest)
     runs-on: windows-latest
     timeout-minutes: 60
-    # Advisory: the Windows TLS stack's handshake with SQL Server Express fails
-    # ("tls handshake eof") and is not understood yet; see docs/PACKAGING.md.
-    continue-on-error: true
     env:
       DB_CONNECTION_STRING: "Server=localhost,1433;Database=rs_ci;Uid=sa;Pwd=Ci-Test-Passw0rd-123;Encrypt=no;TrustServerCertificate=yes"
     steps:
@@ -123,6 +120,13 @@ jobs:
             pip install --only-binary=:all: "$req" || echo "::warning::no wheel for $req"
           done
           maturin develop
+      - name: TLS diagnostics (certificate, SChannel protocols, ERRORLOG)
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem Cert:\LocalMachine\My | Format-List Subject, NotAfter, SignatureAlgorithm, HasPrivateKey
+          Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols' -Recurse -ErrorAction SilentlyContinue | Out-String
+          Get-ChildItem 'C:\Program Files\Microsoft SQL Server\*\MSSQL\Log\ERRORLOG' -ErrorAction SilentlyContinue | ForEach-Object { Select-String -Path $_ -Pattern 'certificate|TLS|SSL|encrypt' | Select-Object -First 20 }
       - name: Create the test database
         shell: bash
         run: |
