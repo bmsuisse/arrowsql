@@ -1,4 +1,4 @@
-"""Agent mode (``mssql_python.agent``): bounded typed text previews and JSON errors.
+"""Agent mode (``arrowsql.agent``): bounded typed text previews and JSON errors.
 
 Rust-port only: the renderer is ``ddbc_bindings.AgentRender``. Covers the output
 contract (typed header, strict byte ceiling, row/cell limits, escaping, footer
@@ -13,9 +13,9 @@ import subprocess
 import sys
 
 import pytest
-from mssql_python import ddbc_bindings
-from mssql_python.agent import error_json, query, query_cursor, render_cursor
-from mssql_python.exceptions import DatabaseError, OperationalError, ProgrammingError
+from arrowsql import ddbc_bindings
+from arrowsql.agent import error_json, query, query_cursor, render_cursor
+from arrowsql.exceptions import DatabaseError, OperationalError, ProgrammingError
 
 pytestmark = pytest.mark.skipif(
     not hasattr(ddbc_bindings, "AgentRender"), reason="agent mode is Rust-port only"
@@ -487,7 +487,7 @@ def run_cli(conn_str, *args, stdin=None, env_name="MSSQL_CONNECTION_STRING", mod
     env = {k: v for k, v in os.environ.items() if k not in ("MSSQL_CONNECTION_STRING", "DB_CONNECTION_STRING")}
     if env_name:
         env[env_name] = conn_str
-    command = [sys.executable, "-m", "mssql_python.agent"] if module else list(args)
+    command = [sys.executable, "-m", "arrowsql.agent"] if module else list(args)
     return subprocess.run(
         command + (list(args) if module else []),
         input=stdin,
@@ -566,7 +566,7 @@ def test_cli_timeout_is_json(conn_str):
 
 
 def test_console_script_is_installed(conn_str):
-    script = os.path.join(os.path.dirname(sys.executable), "mssql-rs-agent")
+    script = os.path.join(os.path.dirname(sys.executable), "arrowsql-agent")
     if not os.path.exists(script):
         pytest.skip("package not installed with its console script")
     done = run_cli(conn_str, script, "-c", "SELECT 1 AS a", module=False)

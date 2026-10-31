@@ -44,7 +44,7 @@ arrow = ["pyarrow>=14"]
 azure = ["azure-identity"]
 
 [project.scripts]
-mssql-rs-agent = "mssql_python.agent:main"
+arrowsql-agent = "arrowsql.agent:main"
 
 [project.urls]
 Homepage = "https://github.com/bmsuisse/arrowsql"

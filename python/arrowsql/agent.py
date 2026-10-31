@@ -7,10 +7,10 @@ lazily and rendered to text in Rust (``ddbc_bindings.AgentRender``) without
 building Python row objects; fetching stops once the row or byte limit is
 reached, so a capped preview of a huge table stays cheap.
 
-    from mssql_python.agent import query
+    from arrowsql.agent import query
     print(query(conn_str, "SELECT TOP 5 name, create_date FROM sys.objects"))
 
-CLI: ``python -m mssql_python.agent -c "SELECT 1 AS answer"`` or ``mssql-rs-agent``.
+CLI: ``python -m arrowsql.agent -c "SELECT 1 AS answer"`` or ``arrowsql-agent``.
 Success goes to stdout (exit 0), error JSON to stderr (exit 1), bad
 arguments to stderr as JSON (exit 2). SQL is sent unchanged and a failed
 statement is never rewritten or retried.
@@ -539,7 +539,7 @@ class _Parser(argparse.ArgumentParser):
 
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(
-        prog="mssql-rs-agent",
+        prog="arrowsql-agent",
         description="SQL Server query to a bounded typed preview (TSV by default); errors are JSON on stderr.",
     )
     source = parser.add_mutually_exclusive_group()

@@ -33,7 +33,7 @@ const NOTE_RESERVE: usize = 96;
 const MESSAGE_CHARS: usize = 400;
 
 /// Collects the output of one statement under a byte ceiling.
-#[pyclass(name = "AgentRender", module = "mssql_python.ddbc_bindings")]
+#[pyclass(name = "AgentRender", module = "arrowsql.ddbc_bindings")]
 pub struct AgentRender {
     format: Format,
     max_bytes: usize,
