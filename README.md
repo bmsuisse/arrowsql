@@ -182,12 +182,11 @@ publishing to PyPI is gated by `.github/workflows/release.yml`.
 | Linux x86_64, glibc (manylinux_2_28) | yes | native | SQL Server 2022 |
 | Linux aarch64, glibc (manylinux_2_28) | yes | native (arm runner) | no (no arm64 server image) |
 | Linux x86_64 / aarch64, musl (musllinux_1_2) | yes | Alpine container | no |
-| Linux ppc64le, s390x, glibc (manylinux_2_28) | yes | QEMU container | no |
 | macOS arm64 / x86_64 | yes | native | no (server-free tests) |
 | Windows x64 | yes | native | SQL Server Express |
 | Windows arm64 | yes | native (arm runner) | no (server-free tests) |
 
-`aio` is Unix-only (needs `loop.add_reader`). Not built: 32-bit targets (i686,
+`aio` is Unix-only (needs `loop.add_reader`). Not built: ppc64le, s390x (cross images unusable with --find-interpreter, see docs/PACKAGING.md), 32-bit targets (i686,
 armv7: the vendored `mssql-tds` uses 64-bit `usize` constants) and PyPy.
 
 Python: CPython 3.10 to 3.15 plus free-threaded 3.14t and 3.15t where an

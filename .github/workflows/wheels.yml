@@ -5,8 +5,7 @@ name: Wheels
 # calls this workflow (workflow_call) and owns the publish job.
 #
 # Every wheel gets an install-and-import smoke test: natively on the runner
-# types that match the target, in a container for musl, and under QEMU for the
-# cross-built targets (armv7, ppc64le, s390x).
+# types that match the target and in an Alpine container for musl.
 
 on:
   pull_request:
@@ -54,8 +53,6 @@ jobs:
           - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, manylinux: "2_28", smoke: native }
           - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, manylinux: musllinux_1_2, smoke: container, platform: linux/amd64, image: "python:3.13-alpine" }
           - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, manylinux: musllinux_1_2, smoke: container, platform: linux/arm64, image: "python:3.13-alpine" }
-          - { runner: ubuntu-latest, target: powerpc64le-unknown-linux-gnu, manylinux: "2_28", interp: "-i /opt/python/cp310-cp310/bin/python -i /opt/python/cp311-cp311/bin/python -i /opt/python/cp312-cp312/bin/python -i /opt/python/cp313-cp313/bin/python -i /opt/python/cp314-cp314/bin/python -i /opt/python/cp315-cp315/bin/python -i /opt/python/cp314-cp314t/bin/python -i /opt/python/cp315-cp315t/bin/python", smoke: container, platform: linux/ppc64le, image: "python:3.13-slim" }
-          - { runner: ubuntu-latest, target: s390x-unknown-linux-gnu, manylinux: "2_28", interp: "-i /opt/python/cp310-cp310/bin/python -i /opt/python/cp311-cp311/bin/python -i /opt/python/cp312-cp312/bin/python -i /opt/python/cp313-cp313/bin/python -i /opt/python/cp314-cp314/bin/python -i /opt/python/cp315-cp315/bin/python -i /opt/python/cp314-cp314t/bin/python -i /opt/python/cp315-cp315t/bin/python", smoke: container, platform: linux/s390x, image: "python:3.13-slim" }
     steps:
       - uses: actions/checkout@v4
       # No `-z pack-relative-relocs` here: it is only added by scripts/build.sh --release
@@ -68,7 +65,7 @@ jobs:
           # --find-interpreter would also pick up the images' PyPy builds, which this
           # crate does not support (PyUnicode_1BYTE_DATA is missing from PyPy's C API).
           before-script-linux: find /usr/local/bin /usr/bin /opt/python -maxdepth 1 \( -name 'pypy*' -o -name 'pp3*' \) -exec rm -rf {} + 2>/dev/null || true
-          args: --release --out dist ${{ matrix.interp || '--find-interpreter' }}
+          args: --release --out dist --find-interpreter
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}-${{ matrix.manylinux }}

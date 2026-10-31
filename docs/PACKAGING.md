@@ -21,7 +21,6 @@ and an sdist as workflow artifacts and import-tests every wheel. It never publis
 | x86_64-unknown-linux-gnu, manylinux_2_28 | ubuntu-latest, maturin-action container | 3.10-3.15, 3.14t, 3.15t | native, 3.13 and 3.14t |
 | aarch64-unknown-linux-gnu, manylinux_2_28 | ubuntu-24.04-arm, container | same | native, 3.13 and 3.14t |
 | x86_64 / aarch64 unknown-linux-musl, musllinux_1_2 | ubuntu-latest / ubuntu-24.04-arm, container | same | `python:3.13-alpine` container |
-| powerpc64le / s390x unknown-linux-gnu, manylinux_2_28 | ubuntu-latest, rust-cross cross container | same | QEMU `python:3.13-slim` |
 | x86_64-apple-darwin | macos-15-intel | 3.10-3.15, 3.14t, 3.15t | native, 3.13 and 3.14t |
 | aarch64-apple-darwin | macos-15 | same | native, 3.13 and 3.14t |
 | x86_64-pc-windows-msvc | windows-latest | same | native, 3.13 |
@@ -32,7 +31,7 @@ Every Linux wheel also gets `auditwheel show` and `twine check`. The Linux jobs 
 images' PyPy builds (`before-script-linux`) because `--find-interpreter` would otherwise
 build for them and PyPy's C API lacks `PyUnicode_1BYTE_DATA`.
 
-Not built: i686 and armv7 (Linux glibc/musl, Windows x86). `vendor/mssql-tds`
+Not built: ppc64le and s390x (the rust-cross cross images ship only target-arch interpreters that cannot run on the x86_64 host, and `--find-interpreter` then also picks their PyPy, which does not compile; would need per-target `-i` sysconfig plumbing). i686 and armv7 (Linux glibc/musl, Windows x86). `vendor/mssql-tds`
 `datatypes/decoder.rs` defines `SQL_PLP_*` as `usize` literals above `u32::MAX`, which
 fail to compile on 32-bit targets (`overflowing_literals`); the PLP length logic would
 need a `u64` rewrite. PyPy and manylinux2014/i686 are likewise out.
