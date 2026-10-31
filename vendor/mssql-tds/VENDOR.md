@@ -25,6 +25,13 @@ Local patches (search for `VENDOR PATCH`):
    Covered by tests/port/test_tls.py.
 3. `src/connection/tds_client.rs` `execute_sp_executesql`: build the parameter
    declaration from a reference instead of cloning every parameter.
+4. `src/connection/tds_client.rs`, trigger row counts: (a)
+   `statement_count_before_trigger_count`: a counted DONEINPROC directly
+   followed by a counted plain DONE (a trigger's count, then the batch
+   statement's) swap, so the statement's count is the first update-count
+   result and `SQLRowCount` after execute is not the trigger's. (b)
+   `observe_prepared_batch_done`: per-RPC counts take the last DONEINPROC
+   instead of summing, so executemany does not add trigger rows.
 
 To drop the vendored copy, delete this directory and the `[patch]` section
 in ../../Cargo.toml once the fix is in the pinned upstream rev.

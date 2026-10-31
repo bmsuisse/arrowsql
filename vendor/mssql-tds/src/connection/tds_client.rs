@@ -2091,11 +2091,16 @@ impl TdsClient {
             ));
         }
         if done.status.contains(DoneStatus::COUNT) && done.cur_cmd != CurrentCommand::Select {
-            row.rows_affected = Some(
+            // VENDOR PATCH: an RPC's counts arrive as DONEINPROCs, trigger
+            // statements before the statement that fired them, so the last one
+            // is the statement's own; summing counted the trigger's rows too.
+            row.rows_affected = Some(if in_proc {
+                done.row_count
+            } else {
                 row.rows_affected
                     .unwrap_or(0)
-                    .saturating_add(done.row_count),
-            );
+                    .saturating_add(done.row_count)
+            });
         }
         if in_proc {
             return Ok(());
@@ -5601,6 +5606,7 @@ impl TdsClient {
             }
 
             let token = self.next_response_token(&parser_context).await?;
+            let token = self.statement_count_before_trigger_count(token, &parser_context).await?;
             // `Tokens` moves into the match below; capture the one distinction
             // the shared DONE arm erases — only an RPC emits DONEINPROC, and
             // only there is the MORE flag ambiguous.
@@ -6006,6 +6012,61 @@ impl TdsClient {
             return Err(self.end_walk_on_read_error(error));
         }
         Ok(token)
+    }
+
+    /// VENDOR PATCH: a trigger without SET NOCOUNT ON sends its own DONEINPROC
+    /// count before the DONE of the statement that fired it, so the first
+    /// update-count result of `INSERT ...` would be the trigger's. When a
+    /// counted DONEINPROC is directly followed by a counted plain DONE (a batch
+    /// statement; inside an RPC every statement is a DONEINPROC), the two swap
+    /// places: the statement's count is the first result and the trigger's
+    /// follows, so `SQLRowCount` after execute is the statement's own count.
+    async fn statement_count_before_trigger_count(
+        &mut self,
+        token: Tokens,
+        parser_context: &ParserContext,
+    ) -> TdsResult<Tokens> {
+        let Tokens::DoneInProc(inner) = &token else { return Ok(token) };
+        if self.prepared_batch.is_some()
+            || !inner.has_more()
+            || inner.has_error()
+            || !inner.status.contains(DoneStatus::COUNT)
+            || inner.cur_cmd == CurrentCommand::Select
+        {
+            return Ok(token);
+        }
+        let next = match self.next_response_token(parser_context).await {
+            Ok(next) => next,
+            Err(error) => {
+                self.fail_rpc_terminator_look_ahead(&error);
+                return Err(error);
+            }
+        };
+        match next {
+            Tokens::Done(mut outer)
+                if outer.status.contains(DoneStatus::COUNT)
+                    && !outer.has_error()
+                    && outer.cur_cmd != CurrentCommand::Select =>
+            {
+                let trigger = DoneToken {
+                    status: if outer.has_more() {
+                        DoneStatus::MORE | DoneStatus::COUNT
+                    } else {
+                        DoneStatus::COUNT
+                    },
+                    cur_cmd: inner.cur_cmd,
+                    row_count: inner.row_count,
+                };
+                self.parked_token = Some(Box::new(Tokens::DoneInProc(trigger)));
+                // The trigger's result still follows, so the batch stays open.
+                outer.status |= DoneStatus::MORE;
+                Ok(Tokens::Done(outer))
+            }
+            other => {
+                self.parked_token = Some(Box::new(other));
+                Ok(token)
+            }
+        }
     }
 
     /// Resolves whether an RPC response has anything left after the no-row
