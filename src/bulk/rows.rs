@@ -528,9 +528,11 @@ fn to_bool(cell: &Bound<'_, PyAny>) -> Result<bool, String> {
     }
     if let Ok(text) = cell.cast::<PyString>() {
         let text = text.to_str().map_err(|err| err.to_string())?;
-        return match text.to_lowercase().as_str() {
-            "0" | "false" => Ok(false),
-            "1" | "true" => Ok(true),
+        return match text {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            t if t.eq_ignore_ascii_case("false") => Ok(false),
+            t if t.eq_ignore_ascii_case("true") => Ok(true),
             _ => Err(format!("Cannot convert string '{text}' to BIT. Valid values: '0', '1', 'true', 'false'")),
         };
     }
@@ -691,16 +693,24 @@ fn parse_decimal(text: &str, dest: &BulkCopyColumnMetadata, round: bool) -> Resu
     let too_wide = || format!("Decimal value exceeds target precision {} of column '{}'", dest.precision, dest.column_name);
     let to_scale = shift + i64::from(dest.scale);
     let scaled = if to_scale >= 0 {
-        let factor = 10u128.checked_pow(u32::try_from(to_scale).map_err(|_| too_wide())?).ok_or_else(too_wide)?;
+        let factor = wire::checked_pow10(u32::try_from(to_scale).map_err(|_| too_wide())?).ok_or_else(too_wide)?;
         digits.checked_mul(factor).ok_or_else(too_wide)?
     } else {
-        match 10u128.checked_pow(u32::try_from(-to_scale).unwrap_or(u32::MAX)) {
-            Some(divisor) if digits % divisor == 0 => digits / divisor,
+        match wire::checked_pow10(u32::try_from(-to_scale).unwrap_or(u32::MAX)) {
             _ if digits == 0 => 0,
-            Some(divisor) if round => {
+            Some(divisor) => {
                 let (quotient, remainder) = (digits / divisor, digits % divisor);
-                let round_up = remainder * 2 > divisor || (remainder * 2 == divisor && quotient % 2 == 1);
-                quotient + u128::from(round_up)
+                if remainder == 0 {
+                    quotient
+                } else if round {
+                    let round_up = remainder * 2 > divisor || (remainder * 2 == divisor && quotient % 2 == 1);
+                    quotient + u128::from(round_up)
+                } else {
+                    return Err(format!(
+                        "Input decimal scale exceeds target scale {} of column '{}'",
+                        dest.scale, dest.column_name
+                    ));
+                }
             }
             None if round => 0,
             _ => {
@@ -711,7 +721,7 @@ fn parse_decimal(text: &str, dest: &BulkCopyColumnMetadata, round: bool) -> Resu
             }
         }
     };
-    let limit = 10u128.checked_pow(u32::from(dest.precision)).ok_or_else(too_wide)?;
+    let limit = wire::checked_pow10(u32::from(dest.precision)).ok_or_else(too_wide)?;
     if scaled >= limit {
         return Err(too_wide());
     }
@@ -726,10 +736,10 @@ fn to_money(cell: &Bound<'_, PyAny>, dest: &BulkCopyColumnMetadata) -> Result<i1
     let overflow = || format!("Value {text} out of range for column '{}'", dest.column_name);
     let to_scale = shift + 4;
     let scaled = if to_scale >= 0 {
-        let factor = 10u128.checked_pow(u32::try_from(to_scale).map_err(|_| overflow())?).ok_or_else(overflow)?;
+        let factor = wire::checked_pow10(u32::try_from(to_scale).map_err(|_| overflow())?).ok_or_else(overflow)?;
         digits.checked_mul(factor).ok_or_else(overflow)?
     } else {
-        match 10u128.checked_pow(u32::try_from(-to_scale).unwrap_or(u32::MAX)) {
+        match wire::checked_pow10(u32::try_from(-to_scale).unwrap_or(u32::MAX)) {
             Some(divisor) => {
                 let (quotient, remainder) = (digits / divisor, digits % divisor);
                 let round_up = remainder * 2 > divisor || (remainder * 2 == divisor && quotient % 2 == 1);

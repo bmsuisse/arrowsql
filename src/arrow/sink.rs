@@ -338,11 +338,11 @@ impl Column {
     }
 
     fn uuid(&mut self, value: Uuid) {
-        let mut buf = [0u8; 36];
-        let text = value.hyphenated().encode_upper(&mut buf);
         if self.kind == Kind::Binary {
             return self.text(value.as_bytes());
         }
+        let mut buf = [0u8; 36];
+        let text = value.hyphenated().encode_upper(&mut buf);
         self.text(text.as_bytes());
     }
 
