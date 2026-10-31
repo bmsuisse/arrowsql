@@ -2053,6 +2053,16 @@ impl TdsClient {
         })
     }
 
+    /// Errors the server has raised so far for the parameter set currently
+    /// producing results (for example a `RAISERROR` ahead of its first row).
+    pub fn current_parameter_set_errors(&self) -> Vec<SqlErrorInfo> {
+        self.prepared_batch
+            .as_ref()
+            .and_then(|batch| batch.current.as_ref())
+            .map(|row| row.errors.clone())
+            .unwrap_or_default()
+    }
+
     /// Index of the parameter set currently producing results, if any.
     pub fn current_parameter_set(&self) -> Option<usize> {
         self.prepared_batch
@@ -2472,12 +2482,26 @@ impl TdsClient {
             SqlType::NVarcharMax(Some(SqlString::from_utf8_string(params_list_as_string))),
         );
 
-        let positional_parameters = Some(vec![statement_parameter, params_parameter]);
+        let mut positional = vec![statement_parameter, params_parameter];
+        // The names are already in the declaration, which sp_executesql
+        // matches by position. Sending them as well makes the server look
+        // each one up by name, which is quadratic in the parameter count.
+        // Output parameters keep their names so callers can find them.
+        let by_position = !self.should_encrypt_parameters()
+            && named_params
+                .iter()
+                .all(|p| !p.is_output() && !p.is_data_at_exec());
+        let named_parameters = if by_position {
+            positional.extend(named_params);
+            None
+        } else {
+            Some(named_params)
+        };
 
         SqlRpc::new(
             RpcType::ProcId(RpcProcs::ExecuteSql),
-            positional_parameters,
-            Some(named_params),
+            Some(positional),
+            named_parameters,
             database_collation,
             &self.execution_context,
         )

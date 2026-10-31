@@ -167,3 +167,16 @@ The Rust side already reads a `None` entry as "no hint" (`params::parse_hint`).
   any value, so `None`, `""` or `b"1234"` are accepted and a later
   `fetchmany()` fails. Setting a non-int raises `TypeError`, a negative int
   raises `ValueError`, and the last valid value is kept.
+
+## executemany fast path
+
+- `Cursor.executemany` (`RUST-PORT`): list/tuple batches without
+  `setinputsizes` first go to `ddbc_bindings.SQLExecuteManyRows`
+  (`src/statement/batch_rpc.rs`), which converts the rows as given. It returns
+  `None`, having sent nothing, for batches it cannot run exactly like the
+  general path (ragged rows, a column mixing kinds, strings over 4000 chars or
+  binaries over 8000 bytes, Decimals next to NULLs, unsupported types, or a
+  non-native handle such as a test mock); the general path then runs and
+  reports any error.
+- The diagnostics / rowcount / description tail of `executemany` moved to
+  `Cursor._finish_executemany` so both paths share it.

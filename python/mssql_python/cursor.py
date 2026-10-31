@@ -2623,6 +2623,27 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.warning(f"Failed to set query timeout: {e}")
 
+        # RUST-PORT: plain rows go to the native binding as given. It returns
+        # None, having sent nothing, for batches it cannot run exactly as the
+        # general path below would (see src/statement/batch_rpc.rs).
+        fast_executemany = getattr(ddbc_bindings, "SQLExecuteManyRows", None)
+        if (
+            fast_executemany is not None
+            and not self._inputsizes
+            and isinstance(seq_of_parameters, (list, tuple))
+            and isinstance(self.hstmt, ddbc_bindings.SqlHandle)
+        ):
+            with perf_phase("py::executemany::cpp_call"):
+                ret = fast_executemany(self.hstmt, operation, seq_of_parameters)
+            if ret is not None:
+                logger.debug(
+                    "Executing batch query with %d parameter sets (%d columns per row)",
+                    len(seq_of_parameters),
+                    len(seq_of_parameters[0]),
+                )
+                self._finish_executemany(operation, ret)
+                return
+
         # Get sample row for parameter type detection and validation
         sample_row = (
             seq_of_parameters[0]
@@ -2891,6 +2912,10 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 encoding_settings,
             )
 
+        self._finish_executemany(operation, ret)
+
+    def _finish_executemany(self, operation, ret):
+        """RUST-PORT: diagnostics, row count and description after an executemany call."""
         # Capture any diagnostic messages after execution
         with perf_phase("py::executemany::diag_records"):
             if self.hstmt:
@@ -2933,6 +2958,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         finally:
             # Reset input sizes after execution
             self._reset_inputsizes()
+
 
     def fetchone(self) -> Union[None, Row]:
         """

@@ -192,6 +192,9 @@ fn integer_digits(text: &str) -> usize {
 /// Gives every cell of a numeric column one DECIMAL(precision, scale) type
 /// that holds all of them exactly. Fails when the common precision exceeds 38.
 fn unify_decimal(rows: &mut [Vec<SqlType>], col: usize, is_null: &[bool]) -> TdsResult<()> {
+    if rows.iter().zip(is_null).all(|(row, &null)| null || decimal_parts(&row[col]).is_some()) {
+        return unify_decimal_parts(rows, col, is_null);
+    }
     let texts = rows
         .iter()
         .zip(is_null)
@@ -211,6 +214,42 @@ fn unify_decimal(rows: &mut [Vec<SqlType>], col: usize, is_null: &[bool]) -> Tds
         row[col] = match text {
             Some(text) => SqlType::Decimal(Some(DecimalParts::from_string(&text, precision, scale)?)),
             None => SqlType::Decimal(None),
+        };
+    }
+    Ok(())
+}
+
+fn decimal_parts(t: &SqlType) -> Option<&DecimalParts> {
+    match t {
+        SqlType::Decimal(Some(p)) | SqlType::Numeric(Some(p)) => Some(p),
+        _ => None,
+    }
+}
+
+/// [`unify_decimal`] for a column of Decimal cells only: rescales the
+/// magnitudes without formatting them as text.
+fn unify_decimal_parts(rows: &mut [Vec<SqlType>], col: usize, is_null: &[bool]) -> TdsResult<()> {
+    let (mut scale, mut int_digits) = (0u8, 1u8);
+    for part in rows.iter().filter_map(|row| decimal_parts(&row[col])) {
+        scale = scale.max(part.scale);
+        int_digits = int_digits.max(part.precision.saturating_sub(part.scale));
+    }
+    let precision = usize::from(int_digits) + usize::from(scale);
+    if precision > MAX_DECIMAL_PRECISION {
+        return Err(Error::TypeConversionError(format!(
+            "values in one column need a numeric precision of {precision}, above the maximum of {MAX_DECIMAL_PRECISION}"
+        )));
+    }
+    // At most 38, so it fits in u8.
+    let precision = precision as u8;
+    for (row, &null) in rows.iter_mut().zip(is_null) {
+        row[col] = match decimal_parts(&row[col]) {
+            Some(p) if !null => {
+                // Below 10^precision < 2^127, so the rescaled magnitude cannot overflow.
+                let magnitude = p.magnitude() * 10u128.pow(u32::from(scale - p.scale));
+                SqlType::Decimal(Some(DecimalParts::new(p.is_positive, precision, scale, magnitude)))
+            }
+            _ => SqlType::Decimal(None),
         };
     }
     Ok(())
@@ -411,6 +450,26 @@ mod tests {
         assert_eq!(decimal_text_of(&out[0]), "1.5");
         assert_eq!(decimal_text_of(&out[1]), "7.0");
         assert!(matches!(out[2], SqlType::Decimal(None)));
+    }
+
+    #[test]
+    fn decimal_only_column_is_rescaled_to_common_precision_and_scale() {
+        let (out, _) = normalized(
+            vec![dec("5.5", 2, 1), dec("-123.25", 5, 2), SqlType::Decimal(None)],
+            &[false, false, true],
+        )
+        .unwrap();
+        assert_eq!(decimal_text_of(&out[0]), "5.50");
+        assert_eq!(decimal_text_of(&out[1]), "-123.25");
+        assert!(matches!(&out[0], SqlType::Decimal(Some(p)) if p.precision == 5 && p.scale == 2));
+        assert!(matches!(out[2], SqlType::Decimal(None)));
+    }
+
+    #[test]
+    fn decimal_only_column_above_38_digits_is_rejected() {
+        let huge = dec(&"9".repeat(37), 37, 0);
+        let tiny = dec("0.0000000001", 10, 10);
+        assert!(normalized(vec![huge, tiny], &[false, false]).is_err());
     }
 
     #[test]
