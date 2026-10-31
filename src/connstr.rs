@@ -270,8 +270,8 @@ pub fn build_context_with(
     } else if let AuthKeyword::Federated(method) = keyword {
         let factory = federated.ok_or_else(|| {
             format!(
-                "Authentication={} needs a token factory; connect through mssql_python.connect \
-                 (requires azure-identity: pip install mssql-python-rs[azure])",
+                "Authentication={} needs a token factory; connect through arrowsql.connect \
+                 (requires azure-identity: pip install arrowsql[azure])",
                 first(&map, &["authentication"]).unwrap_or_default()
             )
         })?;
@@ -283,7 +283,7 @@ pub fn build_context_with(
     } else if let AuthKeyword::Token(name) = keyword {
         return Err(format!(
             "Authentication={name} needs an access token acquired before connecting \
-             (requires azure-identity: pip install mssql-python-rs[azure])"
+             (requires azure-identity: pip install arrowsql[azure])"
         ));
     } else if let AuthKeyword::Unsupported(why) = keyword {
         return Err(why.to_string());

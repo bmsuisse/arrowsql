@@ -9,7 +9,7 @@ import decimal
 import uuid as _uuid
 from collections.abc import Mapping
 from typing import Any
-from mssql_python.logging import logger
+from arrowsql.logging import logger
 
 
 class Row:
@@ -172,7 +172,7 @@ class Row:
             # If no converter found for the SQL type but the value is a string or bytes,
             # try the WVARCHAR converter as a fallback
             if converter is None and isinstance(value, (str, bytes)):
-                from mssql_python.constants import ConstantsDDBC
+                from arrowsql.constants import ConstantsDDBC
 
                 converter = cursor.connection.get_output_converter(ConstantsDDBC.SQL_WVARCHAR.value)
 
@@ -343,7 +343,7 @@ class Row:
     def __str__(self) -> str:
         """Return string representation of the row"""
         # Local import to avoid circular dependency
-        from mssql_python import getDecimalSeparator
+        from arrowsql import getDecimalSeparator
 
         parts = []
         for value in self:

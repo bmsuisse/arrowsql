@@ -16,13 +16,13 @@ from __future__ import annotations
 import sys
 from typing import Callable, Dict, Optional
 
-from mssql_python.constants import (
+from arrowsql.constants import (
     AuthType,
     _KEY_AUTHENTICATION,
     _KEY_PWD,
     _KEY_UID,
 )
-from mssql_python.exceptions import InterfaceError
+from arrowsql.exceptions import InterfaceError
 
 _SQL_PASSWORD = "sqlpassword"
 _AD_PASSWORD = "activedirectorypassword"
@@ -58,7 +58,7 @@ _KNOWN = (
 # that allows the username/password (ROPC) grant without an app registration.
 _PASSWORD_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
 
-_AZURE_HINT = "Install the optional dependency: pip install mssql-python-rs[azure]"
+_AZURE_HINT = "Install the optional dependency: pip install arrowsql[azure]"
 
 
 def _require_azure_identity(mode: str) -> None:
@@ -85,7 +85,7 @@ def make_password_token_factory(username: str, password: str) -> Callable[[str, 
         # pylint: disable=import-outside-toplevel
         from azure.identity import UsernamePasswordCredential
         from azure.core.exceptions import ClientAuthenticationError
-        from mssql_python.auth import _parse_tenant_id
+        from arrowsql.auth import _parse_tenant_id
 
         if not spn:
             raise RuntimeError("ActiveDirectoryPassword: empty SPN from server")
@@ -142,7 +142,7 @@ def prepare(parsed_params: Dict[str, str]) -> Optional[Callable[[str, str, str],
         if mode == _AD_PASSWORD:
             return make_password_token_factory(uid, pwd)
         # pylint: disable=import-outside-toplevel
-        from mssql_python.auth import ServicePrincipalAuth
+        from arrowsql.auth import ServicePrincipalAuth
 
         return ServicePrincipalAuth.make_token_factory(uid, pwd)
     except ValueError as e:

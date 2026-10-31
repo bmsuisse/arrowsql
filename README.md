@@ -1,9 +1,10 @@
-# mssql-rs (mssql-python on a Rust core)
+# arrowsql (mssql-python on a Rust core)
 
 [mssql-python](https://github.com/microsoft/mssql-python) with its C++/ODBC
 core replaced by Rust: a PyO3 extension over Microsoft's native TDS crate
 [`mssql-tds`](https://github.com/microsoft/mssql-rs). No ODBC driver, no
-unixODBC, same Python API (`import mssql_python`).
+unixODBC, same Python API: `import arrowsql`, or keep `import mssql_python`
+(a compatibility alias for existing code).
 
 Status: work in progress (alpha, not yet on PyPI). The upstream Python layer is vendored unchanged
 where possible, and the upstream test suite is the compatibility bar.
@@ -16,11 +17,11 @@ where possible, and the upstream test suite is the compatibility bar.
 - A zero-dependency Arrow API: `fetchall_arrow()`, `fetchmany_arrow()` and
   `arrow_stream()` return objects that DuckDB, polars and pyarrow read
   directly via the Arrow PyCapsule interface.
-- Partitioned parallel reads: `mssql_python.read_arrow(conn_str, query,
+- Partitioned parallel reads: `arrowsql.read_arrow(conn_str, query,
   partition_on=, partitions=)`.
 - Native bulk copy (rows and Arrow) and parallel loads with
-  `mssql_python.write_arrow(conn_str, table, source, workers=N)`.
-- Native asyncio: `mssql_python.aio` with a built-in pool.
+  `arrowsql.write_arrow(conn_str, table, source, workers=N)`.
+- Native asyncio: `arrowsql.aio` with a built-in pool.
 - Free-threaded CPython (3.15t) support; zero required dependencies.
 - `sqlstate` and `native_error` on every exception
   ([upstream #581](https://github.com/microsoft/mssql-python/issues/581)).
@@ -30,12 +31,12 @@ where possible, and the upstream test suite is the compatibility bar.
 Same API as mssql-python (DB-API 2.0, `?` parameters):
 
 ```python
-import mssql_python
+import arrowsql
 
 # TrustServerCertificate=yes is for local testing only, see "Security note"
 conn_str = "Server=localhost,1433;Database=nyctaxi;Uid=sa;Pwd=...;Encrypt=yes;TrustServerCertificate=yes"
 
-with mssql_python.connect(conn_str) as conn:
+with arrowsql.connect(conn_str) as conn:
     cur = conn.cursor()
     cur.execute("SELECT trip_id, total_amount FROM dbo.yellow_trips WHERE PULocationID = ?", (132,))
     for trip_id, total in cur.fetchmany(10):
@@ -45,9 +46,9 @@ with mssql_python.connect(conn_str) as conn:
 ### Arrow, DuckDB, polars
 
 ```python
-import duckdb, mssql_python
+import duckdb, arrowsql
 
-cur = mssql_python.connect(conn_str).cursor()
+cur = arrowsql.connect(conn_str).cursor()
 
 # Upstream-compatible (needs pyarrow): pyarrow.Table / RecordBatchReader
 table = cur.execute("SELECT * FROM dbo.yellow_trips_100k").arrow()
@@ -61,7 +62,7 @@ stream = cur.execute("SELECT * FROM dbo.yellow_trips").arrow_stream(batch_size=6
 duckdb.sql("SELECT avg(total_amount) FROM stream").show()
 
 # Partitioned parallel read over N connections (integer partition column)
-big = mssql_python.read_arrow(conn_str, "SELECT * FROM dbo.yellow_trips",
+big = arrowsql.read_arrow(conn_str, "SELECT * FROM dbo.yellow_trips",
                               partition_on="trip_id", partitions=8)
 ```
 
@@ -70,14 +71,14 @@ for capsule streams.
 
 ### Async
 
-`mssql_python.aio` is native asyncio on this project's Rust core: waits never
+`arrowsql.aio` is native asyncio on this project's Rust core: waits never
 hold the GIL, `execute` returns the first rows itself, and a pool is built in.
 Cancelling a task (including `asyncio.wait_for` timeouts) cancels the query on
 the server and leaves the connection usable. Unix only (uses `loop.add_reader`).
 
 ```python
 import asyncio
-from mssql_python import aio
+from arrowsql import aio
 
 async def main():
     async with await aio.connect(conn_str) as conn:
@@ -96,7 +97,7 @@ asyncio.run(main())
 
 The sync driver also releases the GIL for all network I/O, so
 `asyncio.to_thread` over it works too. Upstream's private async preview
-(`mssql_python.async_query._AsyncConnection`, backed by Microsoft's
+(`arrowsql.async_query._AsyncConnection`, backed by Microsoft's
 `mssql_py_core`) stays available with the `[async-preview]` extra.
 
 ### Errors
@@ -104,7 +105,7 @@ The sync driver also releases the GIL for all network I/O, so
 ```python
 try:
     cur.execute("INSERT INTO t (id) VALUES (?)", (1,))
-except mssql_python.IntegrityError as exc:
+except arrowsql.IntegrityError as exc:
     print(exc.sqlstate, exc.native_error)  # '23000' 2627
 ```
 
@@ -157,7 +158,9 @@ Parsed natively (`src/connstr.rs`) and by the vendored Python layer.
 
 ### Do not install both packages
 
-The import name is `mssql_python`, the same as Microsoft's
+The import name is `arrowsql`. For drop-in use the wheel also ships a
+`mssql_python` alias package (every `mssql_python.X` is the same module as
+`arrowsql.X`), which has the same name as Microsoft's
 [mssql-python](https://github.com/microsoft/mssql-python). Installing both into one
 environment makes them overwrite each other's files. Use one or the other, in a
 separate virtual environment.
@@ -246,9 +249,9 @@ Methodology, profiles and the compression findings are in
 
 ```bash
 # not on PyPI yet; wheels are CI artifacts (see Support)
-pip install mssql-python-rs-port              # zero required dependencies
-pip install 'mssql-python-rs-port[arrow]'     # + pyarrow for arrow() / bulkcopy_arrow
-pip install 'mssql-python-rs-port[azure]'     # + azure-identity credentials
+pip install arrowsql              # zero required dependencies
+pip install 'arrowsql[arrow]'     # + pyarrow for arrow() / bulkcopy_arrow
+pip install 'arrowsql[azure]'     # + azure-identity credentials
 ```
 
 ## Build and test

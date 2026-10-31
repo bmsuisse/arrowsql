@@ -21,7 +21,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any, Optional
 
-from mssql_python.db_connection import connect
+from arrowsql.db_connection import connect
 
 # Cap on rows per slice. Smaller slices spread work across workers; larger
 # ones amortize per-batch overhead.

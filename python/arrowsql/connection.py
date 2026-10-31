@@ -20,18 +20,18 @@ from types import MappingProxyType
 from typing import Any, Dict, Optional, Union, List, Tuple, Callable, Protocol, TYPE_CHECKING
 import threading
 
-import mssql_python
-from mssql_python.cursor import Cursor
-from mssql_python.helpers import (
+import arrowsql
+from arrowsql.cursor import Cursor
+from arrowsql.helpers import (
     sanitize_user_input,
     validate_attribute_value,
 )
-from mssql_python.connection_string_parser import sanitize_connection_string
-from mssql_python.logging import logger
-from mssql_python import ddbc_bindings
-from mssql_python.pooling import PoolingManager
-from mssql_python.odbc_provider import ProviderManager
-from mssql_python.exceptions import (
+from arrowsql.connection_string_parser import sanitize_connection_string
+from arrowsql.logging import logger
+from arrowsql import ddbc_bindings
+from arrowsql.pooling import PoolingManager
+from arrowsql.odbc_provider import ProviderManager
+from arrowsql.exceptions import (
     Warning,  # pylint: disable=redefined-builtin
     Error,
     InterfaceError,
@@ -44,8 +44,8 @@ from mssql_python.exceptions import (
     NotSupportedError,
     sqlstate_to_exception,
 )
-from mssql_python import _rust_auth
-from mssql_python.auth import (
+from arrowsql import _rust_auth
+from arrowsql.auth import (
     extract_auth_type,
     process_auth_parameters,
     remove_sensitive_params,
@@ -53,10 +53,10 @@ from mssql_python.auth import (
     compute_identity_key,
     compute_token_identity,
 )
-from mssql_python.constants import ConstantsDDBC, GetInfoConstants
-from mssql_python.connection_string_parser import _ConnectionStringParser
-from mssql_python.connection_string_builder import _ConnectionStringBuilder
-from mssql_python.constants import (
+from arrowsql.constants import ConstantsDDBC, GetInfoConstants
+from arrowsql.connection_string_parser import _ConnectionStringParser
+from arrowsql.connection_string_builder import _ConnectionStringBuilder
+from arrowsql.constants import (
     _RESERVED_PARAMETERS,
     _KEY_AUTHENTICATION,
     _KEY_UID,
@@ -66,7 +66,7 @@ from mssql_python.constants import (
 )
 
 if TYPE_CHECKING:
-    from mssql_python.row import Row
+    from arrowsql.row import Row
 
 
 class TokenProvider(Protocol):
@@ -900,8 +900,8 @@ class Connection:
         # Register this connection for cleanup before Python shutdown
         # This ensures ODBC handles are freed in correct order, preventing leaks
         try:
-            if hasattr(mssql_python, "_register_connection"):
-                mssql_python._register_connection(self)
+            if hasattr(arrowsql, "_register_connection"):
+                arrowsql._register_connection(self)
         except AttributeError as e:
             # If registration fails, continue - cleanup will still happen via __del__
             logger.warning(
@@ -964,7 +964,7 @@ class Connection:
         # produce false warnings on valid credentials. The actual call is the
         # source of truth — _get_token_from_credential turns a bad signature
         # (TypeError) into a clear InterfaceError.
-        from mssql_python.auth import acquire_token_from_credential, _user_facing_stacklevel
+        from arrowsql.auth import acquire_token_from_credential, _user_facing_stacklevel
 
         # access-token auth ignores UID/PWD/Trusted_Connection — warn so the
         # user is not surprised that those credentials are silently dropped.

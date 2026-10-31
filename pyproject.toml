@@ -3,7 +3,7 @@ requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "mssql-python-rs-port"
+name = "arrowsql"
 version = "0.1.0"
 description = "mssql-python with its ODBC/C++ core replaced by Rust (PyO3 + mssql-tds)"
 requires-python = ">=3.10"
@@ -44,15 +44,17 @@ arrow = ["pyarrow>=14"]
 azure = ["azure-identity"]
 
 [project.urls]
-Homepage = "https://github.com/bmsuisse/mssql-rs"
-Repository = "https://github.com/bmsuisse/mssql-rs"
-Issues = "https://github.com/bmsuisse/mssql-rs/issues"
-Changelog = "https://github.com/bmsuisse/mssql-rs/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/bmsuisse/arrowsql"
+Repository = "https://github.com/bmsuisse/arrowsql"
+Issues = "https://github.com/bmsuisse/arrowsql/issues"
+Changelog = "https://github.com/bmsuisse/arrowsql/blob/main/CHANGELOG.md"
 Upstream = "https://github.com/microsoft/mssql-python"
 
 [tool.maturin]
 python-source = "python"
-module-name = "mssql_python.ddbc_bindings"
+module-name = "arrowsql.ddbc_bindings"
+# `import mssql_python` keeps working: a thin alias package for arrowsql.
+python-packages = ["mssql_python"]
 features = ["pyo3/extension-module"]
 strip = true
 # The sdist must carry the patched mssql-tds (the Cargo.toml patch section);

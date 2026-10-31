@@ -16,8 +16,8 @@ from typing import Tuple, Dict, NamedTuple, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from azure.core.credentials import TokenCredential
 
-from mssql_python.logging import logger
-from mssql_python.constants import (
+from arrowsql.logging import logger
+from arrowsql.constants import (
     AuthType,
     _AuthInternal,
     _KEY_AUTHENTICATION,
@@ -25,7 +25,7 @@ from mssql_python.constants import (
     _KEY_PWD,
     _KEY_TRUSTED_CONNECTION,
 )
-from mssql_python.exceptions import InterfaceError, OperationalError
+from arrowsql.exceptions import InterfaceError, OperationalError
 
 # Module-level credential instance cache.
 # Reusing credential objects allows the Azure Identity SDK's built-in
@@ -718,7 +718,7 @@ def _user_facing_stacklevel() -> int:
     frame = sys._getframe(1)
     level = 1
     while frame is not None:
-        if not frame.f_globals.get("__name__", "").startswith("mssql_python"):
+        if not frame.f_globals.get("__name__", "").startswith(("arrowsql", "mssql_python")):
             return level
         frame = frame.f_back
         level += 1

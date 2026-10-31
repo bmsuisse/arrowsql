@@ -1,11 +1,16 @@
 # Architecture: Rust `ddbc_bindings`
 
-`python/mssql_python/` is upstream mssql-python's Python layer, nearly
+`python/arrowsql/` is upstream mssql-python's Python layer, nearly
 unchanged (edits: `docs/PYTHON_LAYER_CHANGES.md`). Upstream's C++/pybind11
 module `ddbc_bindings` called the Microsoft ODBC driver. This crate replaces
 it with a PyO3 module of the same name and surface, speaking TDS directly via
 Microsoft's `mssql-tds` crate (microsoft/mssql-rs, MIT, pinned in
 `Cargo.toml`). No ODBC driver or driver manager is involved.
+
+The import name is `arrowsql`. `python/mssql_python/` is a compatibility alias
+(a meta-path finder): `mssql_python` and every `mssql_python.X` resolve to the
+same module objects as `arrowsql` / `arrowsql.X`, so upstream's tests and
+existing code import `mssql_python` unchanged.
 
 ```
 Python (cursor.py / connection.py, upstream)
@@ -191,7 +196,7 @@ Three ways out (see `docs/ARROW_PLAN.md`):
   (`statement::abandon_result`). It holds the Python cursor so a
   temporary cursor isn't freed under it.
 
-`mssql_python.read_arrow()` (`python/mssql_python/arrow_parallel.py`)
+`mssql_python.read_arrow()` (`python/arrowsql/arrow_parallel.py`)
 splits a query on an integer column and reads the ranges over separate
 connections from plain threads; decode is GIL-free so they run in
 parallel. `ArrowTable.concat` joins the parts. One TDS session is capped by

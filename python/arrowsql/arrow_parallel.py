@@ -18,8 +18,8 @@ import re
 import threading
 from typing import Any, List, Optional, Tuple
 
-from mssql_python import ddbc_bindings
-from mssql_python.db_connection import connect
+from arrowsql import ddbc_bindings
+from arrowsql.db_connection import connect
 
 # Slices per worker, and the fewest rows worth a slice (when the row count is known).
 _SLICES_PER_WORKER = 2
