@@ -245,6 +245,48 @@ fn resolve_null_types(ex: &mut Exclusive<'_>, sql: &str, params: &mut ParamSet) 
     Ok(())
 }
 
+/// Msg 257: a parameter's declared type has no implicit conversion to the
+/// target type. Raised at compile time, before the statement does anything.
+const IMPLICIT_CONVERSION_ERROR: u32 = 257;
+
+fn is_implicit_conversion_error(err: &TdsError) -> bool {
+    matches!(err, TdsError::SqlServerError { diagnostics }
+        if diagnostics.errors.iter().any(|e| e.number == IMPLICIT_CONVERSION_ERROR))
+}
+
+/// A NULL the describe query could not type (temp tables are invisible to it)
+/// went out as nvarchar, which has no implicit conversion to binary columns.
+/// Msg 257 happens at compile time, so retrying changes nothing server-side:
+/// try each untyped NULL as varbinary, then all of them, and keep the first
+/// variant the server accepts. `original` is reported if none is.
+fn retry_nulls_as_binary(
+    ex: &mut Exclusive<'_>,
+    sql: String,
+    types: Vec<SqlType>,
+    nulls: &[usize],
+    original: TdsError,
+) -> Result<StatementResult, TdsError> {
+    let mut variants: Vec<Vec<usize>> = nulls.iter().map(|&i| vec![i]).collect();
+    if nulls.len() > 1 {
+        variants.push(nulls.to_vec());
+    }
+    recover(ex.client);
+    for flipped in variants {
+        let mut attempt = types.clone();
+        for &i in &flipped {
+            attempt[i] = SqlType::VarBinary(None, 1);
+        }
+        let rpc = name_positionally(attempt);
+        let opts = options(ex.timeout, ex.cancel);
+        let sql = sql.clone();
+        match ex.client.block_on(|c| c.execute_sp_executesql(sql, rpc, opts)) {
+            Err(err) if is_implicit_conversion_error(&err) => recover(ex.client),
+            other => return other,
+        }
+    }
+    Err(original)
+}
+
 /// Name the CLR UDT behind each SQL_SS_UDT parameter. A failed describe fails
 /// the execute with the server's error, as the UDT name cannot be guessed.
 fn resolve_udt_names(ex: &mut Exclusive<'_>, sql: &str, params: &mut ParamSet) -> Result<(), Vec<DiagRecord>> {
@@ -362,7 +404,15 @@ fn run_command(ex: &mut Exclusive<'_>, command: Command) -> SqlReturn {
                 return SQL_ERROR;
             }
             let opts = options(ex.timeout, ex.cancel);
-            ex.client.block_on(|c| c.execute_sp_executesql(sql, params.into_rpc(), opts))
+            let fallback = (!params.untyped_nulls.is_empty())
+                .then(|| (sql.clone(), params.types.clone(), params.untyped_nulls.clone()));
+            let first = ex.client.block_on(|c| c.execute_sp_executesql(sql, params.into_rpc(), opts));
+            match (first, fallback) {
+                (Err(err), Some((sql, types, nulls))) if is_implicit_conversion_error(&err) => {
+                    retry_nulls_as_binary(ex, sql, types, &nulls, err)
+                }
+                (first, _) => first,
+            }
         }
         Command::Typed(sql, params) => {
             let opts = options(ex.timeout, ex.cancel);
@@ -424,6 +474,49 @@ fn run_batch(ex: &mut Exclusive<'_>, sql: String, mut rows: Vec<Vec<SqlType>>, a
             }
         }
     }
+    // All-NULL columns the describe query could not type (temp tables) stay
+    // nvarchar, which has no implicit conversion to binary columns (Msg 257).
+    let untyped: Vec<usize> = all_null
+        .iter()
+        .copied()
+        .filter(|&c| rows.first().is_some_and(|row| matches!(row[c], SqlType::NVarchar(None, 1))))
+        .collect();
+    if untyped.is_empty() {
+        return run_batch_rows(ex, sql, rows);
+    }
+    let backup = rows.clone();
+    let mut ret = run_batch_rows(ex, sql.clone(), rows);
+    if !failed_with_implicit_conversion(ex, ret) {
+        return ret;
+    }
+    let first_failure = ex.state.diag.clone();
+    let mut variants: Vec<Vec<usize>> = untyped.iter().map(|&c| vec![c]).collect();
+    if untyped.len() > 1 {
+        variants.push(untyped.clone());
+    }
+    for flipped in variants {
+        ex.state.diag.clear();
+        recover(ex.client);
+        let mut rows = backup.clone();
+        for row in rows.iter_mut() {
+            for &c in &flipped {
+                row[c] = SqlType::VarBinary(None, 1);
+            }
+        }
+        ret = run_batch_rows(ex, sql.clone(), rows);
+        if !failed_with_implicit_conversion(ex, ret) {
+            return ret;
+        }
+    }
+    ex.state.diag = first_failure;
+    ret
+}
+
+fn failed_with_implicit_conversion(ex: &Exclusive<'_>, ret: SqlReturn) -> bool {
+    ret != SQL_SUCCESS && ex.state.diag.iter().any(|d| d.native_error == IMPLICIT_CONVERSION_ERROR as i32)
+}
+
+fn run_batch_rows(ex: &mut Exclusive<'_>, sql: String, rows: Vec<Vec<SqlType>>) -> SqlReturn {
     let mut prepared = PreparedStatement::new(sql);
     let mut orphaned = None;
     let mut progress = BatchProgress::default();

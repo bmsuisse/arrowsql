@@ -215,7 +215,8 @@ def test_string_truncation_is_data_error(cursor):
     cursor.execute("CREATE TABLE #trunc_map (n NVARCHAR(3))")
     with pytest.raises(DataError) as excinfo:
         cursor.execute("INSERT INTO #trunc_map VALUES (N'toolong')")
-    assert excinfo.value.driver_error == "Numeric value out of range"
+    # Truncation is SQLSTATE 22001; "Numeric value out of range" is 22003's text.
+    assert excinfo.value.driver_error == "String data, right-truncated"
     assert "would be truncated" in excinfo.value.ddbc_error
 
 
