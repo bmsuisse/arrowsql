@@ -45,7 +45,7 @@ def test_conn_str_repr_redacted():
 def test_logging_module_has_no_bare_except():
     import ast
 
-    src = (_ROOT / "python" / "arrowsql" / "logging.py").read_text()
+    src = (_ROOT / "python" / "arrowsql" / "logging.py").read_text(encoding="utf-8")
     bare = [n.lineno for n in ast.walk(ast.parse(src)) if isinstance(n, ast.ExceptHandler) and n.type is None]
     assert bare == []
 
@@ -69,11 +69,11 @@ def test_workflows_pin_actions_and_restrict_publish():
 
     wf = _ROOT / ".github" / "workflows"
     for f in wf.glob("*.yml"):
-        for line in f.read_text().splitlines():
+        for line in f.read_text(encoding="utf-8").splitlines():
             m = re.search(r"uses:\s*([\w.-]+/[\w./-]+)@(\S+)", line)
             if m:
                 assert re.fullmatch(r"[0-9a-f]{40}", m.group(2)), f"{f.name}: {line.strip()}"
-    release = (wf / "workflow.yml").read_text()
+    release = (wf / "workflow.yml").read_text(encoding="utf-8")
     assert "github.ref == 'refs/heads/main'" in release
     for line in release.splitlines():
         if "needs.plan.outputs.version" in line:

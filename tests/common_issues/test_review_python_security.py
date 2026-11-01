@@ -1,12 +1,32 @@
 """Review r4 fixes in cursor / parameter logging (DB-backed)."""
 
+import logging
+
 import pytest
 
 import mssql_python
 from mssql_python import connect, setup_logging
+from mssql_python.logging import logger
 
 
-def test_debug_log_has_no_sql_literals_or_param_values(conn_str, tmp_path):
+@pytest.fixture
+def reset_logger():
+    """Leave no DEBUG handler behind: a live handler lock breaks fork tests later in the run."""
+
+    def reset():
+        logger._logger.setLevel(logging.CRITICAL)
+        for handler in logger._logger.handlers[:]:
+            handler.close()
+            logger._logger.removeHandler(handler)
+        logger._handlers_initialized = False
+        logger._custom_log_path = None
+
+    reset()
+    yield
+    reset()
+
+
+def test_debug_log_has_no_sql_literals_or_param_values(conn_str, tmp_path, reset_logger):
     log = str(tmp_path / "dbg.log")
     setup_logging(log_file_path=log)
     conn = connect(conn_str)
