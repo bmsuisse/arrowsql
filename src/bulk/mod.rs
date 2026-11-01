@@ -18,6 +18,7 @@
 mod arrow_encode;
 mod arrow_source;
 mod arrow_wire;
+mod parallel;
 mod rows;
 mod wire;
 mod settings;
@@ -305,5 +306,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("BulkUnsupported", m.py().get_type::<BulkUnsupported>())?;
     m.add_function(wrap_pyfunction!(bulk_copy_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(bulk_copy_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(parallel::bulk_copy_arrow_parallel, m)?)?;
     Ok(())
 }

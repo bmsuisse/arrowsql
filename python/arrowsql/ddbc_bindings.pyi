@@ -146,6 +146,19 @@ def DDBCBulkCopyArrow(
     fire_triggers: bool = False,
     use_internal_transaction: bool = False,
 ) -> Dict[str, Any]: ...
+def DDBCBulkCopyArrowParallel(
+    handles: List[Any],
+    table_name: str,
+    source: Any,
+    batch_size: int = 0,
+    timeout: int = 30,
+    column_mappings: Optional[Any] = None,
+    keep_identity: bool = False,
+    check_constraints: bool = False,
+    table_lock: bool = False,
+    keep_nulls: bool = False,
+    fire_triggers: bool = False,
+) -> List[Dict[str, Any]]: ...
 def SQLExecuteManyRows(statementHandle: Any, query: str, rows: Any) -> Optional[int]: ...
 
 # ---------------------------------------------------------------------------
