@@ -32,6 +32,7 @@ use crate::connection::ConnShared;
 use crate::consts::*;
 use crate::diag::DiagRecord;
 pub(crate) use cancel::StmtCancel;
+pub(crate) use wire::DRAIN_BUDGET_BYTES;
 use cursor::StmtState;
 use exec::{Command, execute_command};
 pub(crate) use exec::with_exclusive_wire;
@@ -40,7 +41,7 @@ pub(crate) use exec::with_exclusive_wire;
 pub use cursor::read_rows_into;
 pub use cursor::{BatchSink, diag_records, fetch_into, result_columns};
 pub use odbc::{
-    check_error, describe_col, exec_direct, execute, execute_many, fetch_all, fetch_many,
+    check_error, raise_for, describe_col, exec_direct, execute, execute_many, fetch_all, fetch_many,
     fetch_one, fetch_scroll, free_handle, get_all_diag_records, more_results, num_result_cols,
     reset_stmt, row_count, set_stmt_attr,
 };

@@ -136,7 +136,8 @@ impl AgentRender {
         messages: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<(i16, bool)> {
         let stmt = statement::stmt_of(statement_handle)?;
-        let (columns, generation, _) = statement::result_columns(&stmt)
+        let (columns, generation, _) = py
+            .detach(|| statement::result_columns(&stmt))
             .ok_or_else(|| PyRuntimeError::new_err("No result set to render"))?;
         if self.room() < MIN_TABLE_BYTES {
             self.omitted += 1;

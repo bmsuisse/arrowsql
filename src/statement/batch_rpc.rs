@@ -153,14 +153,7 @@ fn naive_datetime_cell(value: &Bound<'_, PyAny>) -> Option<SqlType> {
         return None;
     }
     let (year, month, day) = (i64::from(dt.get_year()), i64::from(dt.get_month()), i64::from(dt.get_day()));
-    // Howard Hinnant's days_from_civil, shifted from 1970-01-01 to 0001-01-01.
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let year_of_era = y - era * 400;
-    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    let days = era * 146_097 + day_of_era - 719_468 + 719_162;
-    let days = u32::try_from(days).ok()?;
+    let days = u32::try_from(crate::decode::temporal::days_from_civil(year, month, day)).ok()?;
     let seconds = u64::from(dt.get_hour()) * 3600 + u64::from(dt.get_minute()) * 60 + u64::from(dt.get_second());
     Some(SqlType::DateTime2(Some(SqlDateTime2 {
         days,

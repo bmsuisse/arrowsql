@@ -24,13 +24,16 @@ use crate::arrow::sink::ArrowSink;
 use crate::decode::RowBuffer;
 use crate::diag::{self, DiagRecord};
 use crate::params::ParamSet;
-use crate::statement::BatchSink;
+use crate::statement::{BatchSink, DRAIN_BUDGET_BYTES};
 
 /// Rows (and bytes) `execute` reads ahead so small results complete in one hop.
 pub const PREFETCH_BYTES: usize = 4 << 20;
 /// Rows per TDS request in executemany (one round trip each).
 const EXECUTEMANY_CHUNK: usize = 2000;
 const PARAM_TYPE_CACHE_SIZE: usize = 512;
+
+/// Run before a session goes back to the pool: RESETCONNECTION does not touch it.
+const RESET_ISOLATION: &str = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED";
 
 pub type Diag = Vec<DiagRecord>;
 
@@ -138,6 +141,26 @@ pub struct Session {
     born: Instant,
 }
 
+/// Drive `fut` (a read of the owner's batch) and, when `cancel` fires meanwhile,
+/// cancel the handle that batch was started with: reads obey the cancellation
+/// of the execution that opened the batch, not that of the current request.
+async fn obeying<F: std::future::Future>(
+    fut: F,
+    cancel: &OpCancel,
+    owner: Option<&Arc<CancelHandle>>,
+) -> F::Output {
+    tokio::pin!(fut);
+    tokio::select! {
+        out = &mut fut => out,
+        () = cancel.cancelled() => {
+            if let Some(handle) = owner {
+                handle.cancel();
+            }
+            fut.await
+        }
+    }
+}
+
 async fn read_rows<W: mssql_tds::datatypes::row_writer::RowWriter + Send>(
     client: &mut TdsClient,
     sink: &mut W,
@@ -224,6 +247,10 @@ impl Session {
             client.rollback_transaction(None, None).await.ok()?;
         }
         if reset {
+            // The server keeps the isolation level across RESETCONNECTION.
+            client.execute(RESET_ISOLATION.to_string(), ExecuteOptions::new()).await.ok()?;
+            client.close_query().await.ok()?;
+            let _ = client.take_info_messages();
             // RESETCONNECTION rides on the next request: no extra round trip.
             client.prepare_reset_connection(false);
         }
@@ -254,28 +281,15 @@ impl Session {
             if keep {
                 let state = self.cursors.entry(owner).or_default();
                 let drain = drain_into(client, state, self.owner_rows, cancel);
-                match (cancel, self.owner_handle.as_ref()) {
-                    (Some(cancel), Some(handle)) => {
-                        tokio::pin!(drain);
-                        tokio::select! {
-                            () = &mut drain => {}
-                            // The drain may be blocked in a read of the owner's
-                            // batch (e.g. its WAITFOR): cancel that read too.
-                            () = cancel.cancelled() => {
-                                handle.cancel();
-                                drain.await;
-                            }
-                        }
-                    }
-                    _ => drain.await,
+                match cancel {
+                    // The drain may be blocked in a read of the owner's batch
+                    // (e.g. its WAITFOR): cancel that read too.
+                    Some(cancel) => obeying(drain, cancel, self.owner_handle.as_ref()).await,
+                    None => drain.await,
                 }
             }
         }
-        self.owner_rows = false;
-        if client.has_open_batch() {
-            let _ = client.close_query().await;
-            let _ = client.take_info_messages();
-        }
+        self.discard_wire().await;
     }
 
     /// Throw away whatever is still on the wire (close, pool checkin, end of a
@@ -283,12 +297,8 @@ impl Session {
     async fn discard_wire(&mut self) {
         self.owner = None;
         self.owner_rows = false;
-        let Some(client) = self.client.as_mut() else { return };
-        if client.has_open_batch() {
-            if client.cancel_query(5).await.is_err() {
-                let _ = client.close_query().await;
-            }
-            let _ = client.take_info_messages();
+        if let Some(client) = self.client.as_mut() {
+            discard_batch(client).await;
         }
     }
 
@@ -310,32 +320,43 @@ impl Session {
     }
 
     /// Type untyped NULL parameters the way the server infers them (cached).
-    async fn resolve_null_types(&mut self, sql: &str, params: &mut ParamSet) {
+    ///
+    /// The describe is best effort when the server rejects it (the parameters
+    /// then keep their default type), but cancellation, timeouts and transport
+    /// errors fail the statement.
+    async fn resolve_null_types(&mut self, sql: &str, params: &mut ParamSet, cancel: &OpCancel) -> Result<(), Diag> {
         if params.untyped_nulls.is_empty() {
-            return;
+            return Ok(());
         }
         let described = match self.param_types.get(sql) {
             Some(types) => Arc::clone(types),
             None => {
-                let Some(client) = self.client.as_mut() else { return };
+                let client = self.client.as_mut().ok_or_else(closed)?;
                 let query = format!(
                     "EXEC sp_describe_undeclared_parameters @tsql = N'{}'",
                     sql.replace('\'', "''")
                 );
                 let mut rows = RowBuffer::new();
                 let ok = async {
-                    if client.execute(query, ExecuteOptions::new().timeout_secs(self.timeout)).await?
-                        == StatementResult::Rows
-                    {
+                    let options = ExecuteOptions::new().timeout_secs(self.timeout).cancel(&cancel.handle);
+                    if client.execute(query, options).await? == StatementResult::Rows {
                         while client.next_row_into(&mut rows).await? {}
                     }
                     client.close_query().await
                 }
                 .await;
                 let _ = client.take_info_messages();
-                if ok.is_err() {
-                    let _ = client.close_query().await;
-                    return;
+                if let Err(err) = ok {
+                    if cancel.is_cancelled() {
+                        discard_batch(client).await;
+                        return Err(cancelled());
+                    }
+                    if matches!(err, mssql_tds::error::Error::SqlServerError { .. }) {
+                        let _ = client.close_query().await;
+                        return Ok(());
+                    }
+                    discard_batch(client).await;
+                    return Err(diag::records_for_error(&err, "HY000"));
                 }
                 let ncols = rows.cells.len().checked_div(rows.rows).unwrap_or(0).max(1);
                 let types: Arc<[(String, String)]> = rows
@@ -360,6 +381,7 @@ impl Session {
                 params.types[i] = sql_type;
             }
         }
+        Ok(())
     }
 
     /// Execute `command` for `cursor` and read up to `prefetch` rows of the
@@ -383,7 +405,7 @@ impl Session {
         self.prepare_session().await?;
         let (sql, params) = match command {
             Command::Rpc(sql, mut params) => {
-                self.resolve_null_types(&sql, &mut params).await;
+                self.resolve_null_types(&sql, &mut params, cancel).await?;
                 (sql, Some(params.into_rpc()))
             }
             Command::Batch(sql) => (sql, None),
@@ -511,7 +533,12 @@ impl Session {
         }
         let client = self.client.as_mut().ok_or_else(closed)?;
         let mut rows = RowBuffer::new();
-        let read = read_rows(client, &mut rows, |b| b.rows, RowBuffer::byte_size, n, usize::MAX, Some(cancel)).await;
+        let read = obeying(
+            read_rows(client, &mut rows, |b| b.rows, RowBuffer::byte_size, n, usize::MAX, Some(cancel)),
+            cancel,
+            self.owner_handle.as_ref(),
+        )
+        .await;
         match read {
             Ok(done) => {
                 self.owner_rows = !done;
@@ -556,14 +583,19 @@ impl Session {
             return Ok(None);
         }
         let client = self.client.as_mut().ok_or_else(closed)?;
-        let advanced = client.advance().await;
+        let advanced = obeying(client.advance(), cancel, self.owner_handle.as_ref()).await;
         let mut info: Diag = diag::info_records(&client.take_info_messages()).collect();
         let mut out = ExecOut { columns: None, rows: RowBuffer::new(), done: true, rowcount: -1, info: Vec::new() };
         let result = match advanced {
             Ok(StatementResult::Rows) => {
                 let mut failed = false;
                 let columns = Arc::new(crate::decode::hidden::visible_columns(client.get_metadata()));
-                let read = read_rows(client, &mut out.rows, |b| b.rows, RowBuffer::byte_size, prefetch.max(1), PREFETCH_BYTES, Some(cancel)).await;
+                let read = obeying(
+                    read_rows(client, &mut out.rows, |b| b.rows, RowBuffer::byte_size, prefetch.max(1), PREFETCH_BYTES, Some(cancel)),
+                    cancel,
+                    self.owner_handle.as_ref(),
+                )
+                .await;
                 info.extend(diag::info_records(&client.take_info_messages()));
                 match read {
                     Ok(done) => out.done = done,
@@ -644,11 +676,20 @@ impl Session {
             state.drained_pos = 0;
         }
         let finish = |sink: ArrowSink| sink.finish().map_err(|m| vec![DiagRecord::driver("HY000", m)]);
+        // An error that followed the buffered rows ends the fetch like `fetch` does.
+        if let Some(err) = state.drained_error.take() {
+            return Err(err);
+        }
         if self.owner == Some(cursor) && self.owner_rows {
             let client = self.client.as_mut().ok_or_else(closed)?;
             loop {
                 let want = batch_rows.saturating_sub(BatchSink::rows(&sink)).max(1);
-                let read = read_rows(client, &mut sink, |s| BatchSink::rows(s), |s| BatchSink::byte_size(s), want, usize::MAX, Some(cancel)).await;
+                let read = obeying(
+                    read_rows(client, &mut sink, |s| BatchSink::rows(s), |s| BatchSink::byte_size(s), want, usize::MAX, Some(cancel)),
+                    cancel,
+                    self.owner_handle.as_ref(),
+                )
+                .await;
                 match read {
                     Ok(done) => {
                         if BatchSink::rows(&sink) >= batch_rows || done {
@@ -694,7 +735,7 @@ impl Session {
         self.prepare_session().await?;
         if !all_null.is_empty() && !rows.is_empty() {
             let mut probe = ParamSet { types: rows[0].clone(), untyped_nulls: all_null.clone() };
-            self.resolve_null_types(&sql, &mut probe).await;
+            self.resolve_null_types(&sql, &mut probe, cancel).await?;
             for row in rows.iter_mut() {
                 for &c in &all_null {
                     row[c] = probe.types[c].clone();
@@ -760,8 +801,11 @@ impl Session {
         }
     }
 
-    pub async fn commit(&mut self) -> Result<(), Diag> {
-        self.release_wire(0, None).await;
+    pub async fn commit(&mut self, cancel: &OpCancel) -> Result<(), Diag> {
+        self.release_wire(0, Some(cancel)).await;
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
         let client = self.client.as_mut().ok_or_else(closed)?;
         if client.has_active_transaction() {
             client.commit_transaction(None, None).await.map_err(|e| diag::records_for_error(&e, "HY000"))?;
@@ -769,8 +813,11 @@ impl Session {
         Ok(())
     }
 
-    pub async fn rollback(&mut self) -> Result<(), Diag> {
-        self.release_wire(0, None).await;
+    pub async fn rollback(&mut self, cancel: &OpCancel) -> Result<(), Diag> {
+        self.release_wire(0, Some(cancel)).await;
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
         let client = self.client.as_mut().ok_or_else(closed)?;
         if client.has_active_transaction() {
             client.rollback_transaction(None, None).await.map_err(|e| diag::records_for_error(&e, "HY000"))?;
@@ -798,14 +845,31 @@ fn invalid_cursor() -> Diag {
     vec![DiagRecord::new("24000", 0, "[Microsoft][ODBC Driver Manager] Invalid cursor state")]
 }
 
-/// Move everything still on the wire for `state`'s cursor into its buffers.
+fn over_budget_record() -> DiagRecord {
+    DiagRecord::driver(
+        "HY000",
+        format!(
+            "Result set discarded: more than {} MiB were pending when another statement needed the connection",
+            DRAIN_BUDGET_BYTES >> 20
+        ),
+    )
+}
+
+/// Move everything still on the wire for `state`'s cursor into its buffers, up
+/// to `DRAIN_BUDGET_BYTES`: the rest is cut off and reported once the buffered
+/// rows were delivered (like the sync path).
 async fn drain_into(client: &mut TdsClient, state: &mut CursorState, rows_on_wire: bool, cancel: Option<&OpCancel>) {
+    let mut used = state.drained.as_ref().map_or(0, RowBuffer::byte_size);
     if rows_on_wire {
         let mut rows = state.drained.take().unwrap_or_default();
-        if let Err(err) = read_rows(client, &mut rows, |b| b.rows, RowBuffer::byte_size, usize::MAX, usize::MAX, cancel).await {
-            state.drained_error = Some(diag::records_for_error(&err, "HY000"));
-        }
+        let read = read_rows(client, &mut rows, |b| b.rows, RowBuffer::byte_size, usize::MAX, DRAIN_BUDGET_BYTES, cancel).await;
+        used = rows.byte_size();
         state.drained = Some(rows);
+        match read {
+            Ok(true) => {}
+            Ok(false) => return cut_off(client, state).await,
+            Err(err) => state.drained_error = Some(diag::records_for_error(&err, "HY000")),
+        }
     }
     while client.has_open_batch() {
         if cancel.is_some_and(OpCancel::is_cancelled) {
@@ -829,11 +893,27 @@ async fn drain_into(client: &mut TdsClient, state: &mut CursorState, rows_on_wir
             Ok(StatementResult::Rows) => {
                 let columns = Some(Arc::new(crate::decode::hidden::visible_columns(client.get_metadata())));
                 let mut rows = RowBuffer::new();
-                let error = read_rows(client, &mut rows, |b| b.rows, RowBuffer::byte_size, usize::MAX, usize::MAX, cancel)
-                    .await
-                    .err()
-                    .map(|e| diag::records_for_error(&e, "HY000"));
+                let read = read_rows(
+                    client,
+                    &mut rows,
+                    |b| b.rows,
+                    RowBuffer::byte_size,
+                    usize::MAX,
+                    DRAIN_BUDGET_BYTES.saturating_sub(used),
+                    cancel,
+                )
+                .await;
+                used += rows.byte_size();
+                let (error, over) = match read {
+                    Ok(true) => (None, false),
+                    Ok(false) => (Some(vec![over_budget_record()]), true),
+                    Err(e) => (Some(diag::records_for_error(&e, "HY000")), false),
+                };
                 state.queued.push_back(Buffered { columns, rows, rowcount: -1, info, error });
+                if over {
+                    discard_batch(client).await;
+                    break;
+                }
             }
             Err(err) => state.queued.push_back(Buffered {
                 columns: None,
@@ -843,5 +923,21 @@ async fn drain_into(client: &mut TdsClient, state: &mut CursorState, rows_on_wir
                 error: Some(diag::records_for_error(&err, "HY000")),
             }),
         }
+    }
+}
+
+/// The budget ran out inside the cursor's current result: the rest of the
+/// batch is abandoned and the cursor reports it after its buffered rows.
+async fn cut_off(client: &mut TdsClient, state: &mut CursorState) {
+    state.drained_error = Some(vec![over_budget_record()]);
+    discard_batch(client).await;
+}
+
+async fn discard_batch(client: &mut TdsClient) {
+    if client.has_open_batch() {
+        if client.cancel_query(5).await.is_err() {
+            let _ = client.close_query().await;
+        }
+        let _ = client.take_info_messages();
     }
 }

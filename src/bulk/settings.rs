@@ -45,6 +45,9 @@ pub struct SourceShape {
     pub column_count: usize,
     /// Column names, for sources that have them.
     pub names: Option<Vec<String>>,
+    /// Without column mappings, a source wider than the destination is an
+    /// error. Arrow sources keep mssql-rs' behaviour: the extra columns are ignored.
+    pub reject_extra_columns: bool,
 }
 
 /// `None`, `['colA', 'colB']` or `[(0, 'colA'), (1, 'colB')]`.
@@ -119,6 +122,13 @@ pub fn resolve(
 ) -> Result<Vec<Resolved>, String> {
     let eligible = |column: &BulkCopyColumnMetadata| settings.keep_identity || !column.is_identity;
     let mut resolved: Vec<Resolved> = if settings.mappings.is_empty() {
+        let eligible_count = destination.iter().filter(|column| eligible(column)).count();
+        if shape.reject_extra_columns && shape.column_count > eligible_count {
+            return Err(format!(
+                "source has {} columns, destination has {eligible_count}",
+                shape.column_count
+            ));
+        }
         destination
             .iter()
             .enumerate()

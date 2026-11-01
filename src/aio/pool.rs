@@ -104,7 +104,16 @@ impl PoolInner {
             stale.close().await;
         }
         loop {
-            let Some((mut session, since)) = self.idle.lock().pop() else { break };
+            // Under the idle lock, so a concurrent `close` either sees nothing
+            // left to hand out or has not taken the idle list yet.
+            let popped = {
+                let mut idle = self.idle.lock();
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(pool_closed());
+                }
+                idle.pop()
+            };
+            let Some((mut session, since)) = popped else { break };
             if !session.is_open() {
                 continue;
             }
@@ -149,8 +158,21 @@ impl PoolInner {
             session.close().await;
             return;
         }
-        if let Some(session) = session.into_reusable(self.reset).await {
-            self.idle.lock().push((session, Instant::now()));
+        if let Some(mut session) = session.into_reusable(self.reset).await {
+            // `close` may have run during the rollback above: decide under the
+            // idle lock, close a rejected session outside it.
+            let rejected = {
+                let mut idle = self.idle.lock();
+                if self.closed.load(Ordering::Acquire) {
+                    Some(session)
+                } else {
+                    idle.push((session, Instant::now()));
+                    None
+                }
+            };
+            if let Some(mut session) = rejected {
+                session.close().await;
+            }
         }
         for mut stale in self.take_idle_expired() {
             stale.close().await;

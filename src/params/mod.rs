@@ -192,6 +192,10 @@ pub(crate) const DATA_VALUE_ERROR_PREFIX: &str = "data value exception: ";
 /// (a tz offset outside SQL Server's range).
 pub(crate) const RUNTIME_ERROR_PREFIX: &str = "runtime error: ";
 
+/// Prefix of a conversion message raised as `IndexError`: an `executemany` row
+/// narrower or wider than the first (upstream indexes `row[col]` and fails there).
+pub(crate) const INDEX_ERROR_PREFIX: &str = "index error: ";
+
 /// Maps a conversion failure to the Python exception upstream raises for it.
 ///
 /// `TypeConversionError` marks a value the target type cannot represent
@@ -208,6 +212,8 @@ pub fn conversion_error(err: &mssql_tds::error::Error) -> PyErr {
                 data_error(text, false)
             } else if let Some(text) = msg.strip_prefix(RUNTIME_ERROR_PREFIX) {
                 PyRuntimeError::new_err(text.to_string())
+            } else if let Some(text) = msg.strip_prefix(INDEX_ERROR_PREFIX) {
+                pyo3::exceptions::PyIndexError::new_err(text.to_string())
             } else {
                 PyValueError::new_err(msg.clone())
             }

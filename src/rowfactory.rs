@@ -11,7 +11,11 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyInt, PyList, PySlice, PyString, PyTuple, PyType};
 use std::ptr;
 
-#[cfg(not(windows))]
+// `_PyObject_GenericGetAttrWithDict` is private CPython API (present 3.7 - 3.14,
+// not exported on Windows, and free-threaded builds may change it). It is used
+// only where known to exist; any other target falls back to the public, raising
+// `PyObject_GenericGetAttr`, which is slower for column access but equivalent.
+#[cfg(all(not(windows), not(Py_GIL_DISABLED), not(Py_3_15)))]
 unsafe extern "C" {
     fn _PyObject_GenericGetAttrWithDict(
         obj: *mut ffi::PyObject,
@@ -137,7 +141,7 @@ impl RowCore {
     /// access avoids building and discarding an AttributeError.
     fn __getattribute__<'py>(slf: &Bound<'py, Self>, name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
-        #[cfg(not(windows))]
+        #[cfg(all(not(windows), not(Py_GIL_DISABLED), not(Py_3_15)))]
         {
             let found = unsafe { _PyObject_GenericGetAttrWithDict(slf.as_ptr(), name.as_ptr(), ptr::null_mut(), 1) };
             if !found.is_null() {
@@ -147,7 +151,7 @@ impl RowCore {
                 return Err(PyErr::fetch(py));
             }
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, Py_GIL_DISABLED, Py_3_15))]
         {
             let found = unsafe { ffi::PyObject_GenericGetAttr(slf.as_ptr(), name.as_ptr()) };
             if !found.is_null() {

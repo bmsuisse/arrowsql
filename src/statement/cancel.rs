@@ -97,7 +97,9 @@ impl StmtCancel {
             return Deadline(None);
         }
         let this = self.clone();
-        let task = crate::runtime::runtime().spawn(async move {
+        // No runtime (thread limit reached) means no timer: the statement runs without a deadline.
+        let Ok(runtime) = crate::runtime::try_runtime() else { return Deadline(None) };
+        let task = runtime.spawn(async move {
             tokio::time::sleep(Duration::from_secs(u64::from(timeout_secs))).await;
             this.expire();
         });

@@ -276,8 +276,8 @@ fn verify_alive(client: &mut SyncClient) -> bool {
 
 /// Close sessions politely (outside any lock).
 pub fn close_all(clients: Vec<SyncClient>) {
-    for mut client in clients {
-        let _ = client.block_on(|c| c.close_connection());
+    for client in clients {
+        client.close();
     }
 }
 

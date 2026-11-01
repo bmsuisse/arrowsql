@@ -51,22 +51,28 @@ static OWNER_PID: AtomicU32 = AtomicU32::new(0);
 static BUILD: Mutex<()> = Mutex::new(());
 
 pub fn runtime() -> &'static Runtime {
+    try_runtime().expect("failed to start the mssql-rs I/O runtime (thread limit reached?)")
+}
+
+/// The process-wide runtime, or the OS error that stopped it from starting
+/// (thread limit reached).
+pub fn try_runtime() -> std::io::Result<&'static Runtime> {
     let pid = std::process::id();
     if OWNER_PID.load(Ordering::Acquire) == pid {
         // SAFETY: the pointer is a leaked runtime, stored before the pid.
-        return unsafe { &*CURRENT.load(Ordering::Acquire) };
+        return Ok(unsafe { &*CURRENT.load(Ordering::Acquire) });
     }
     let _build = BUILD.lock();
     if OWNER_PID.load(Ordering::Acquire) == pid {
-        return unsafe { &*CURRENT.load(Ordering::Acquire) };
+        return Ok(unsafe { &*CURRENT.load(Ordering::Acquire) });
     }
     // First use in this process, or first use in a child forked after the
     // runtime was built. The previous runtime (if any) is intentionally not
     // dropped; see the module docs.
-    let runtime: &'static Runtime = Box::leak(Box::new(build_runtime()));
+    let runtime: &'static Runtime = Box::leak(Box::new(build_runtime()?));
     CURRENT.store(std::ptr::from_ref(runtime).cast_mut(), Ordering::Release);
     OWNER_PID.store(pid, Ordering::Release);
-    runtime
+    Ok(runtime)
 }
 
 /// Runs in a forked child, which has only the forking thread: a `BUILD` lock
@@ -83,7 +89,7 @@ pub fn forget_after_fork() {
     MAIN_THREAD.with(|m| m.set(0));
 }
 
-fn build_runtime() -> Runtime {
+fn build_runtime() -> std::io::Result<Runtime> {
     let workers = std::thread::available_parallelism()
         .map(|n| n.get().clamp(2, 8))
         .unwrap_or(4);
@@ -92,7 +98,6 @@ fn build_runtime() -> Runtime {
         .thread_name("mssql-rs-io")
         .enable_all()
         .build()
-        .expect("failed to start the mssql-rs I/O runtime (thread limit reached?)")
 }
 
 /// A TDS session together with the current-thread runtime its socket is
@@ -104,17 +109,34 @@ pub struct SyncClient {
     /// kept registered between calls, so a short call only polls it.
     slice: Option<Pin<Box<Sleep>>>,
     io: Runtime,
+    /// The process that opened the socket; a forked child shares it with the parent.
+    pid: u32,
 }
 
 impl SyncClient {
     /// Open a session; its socket belongs to a fresh runtime of its own.
     pub fn connect(context: ClientContext, datasource: &str) -> TdsResult<Self> {
-        let io = Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to start the connection I/O runtime (file descriptor limit reached?)");
+        let io = Builder::new_current_thread().enable_all().build().map_err(|e| {
+            mssql_tds::error::Error::ConnectionError(format!("failed to start the connection I/O runtime: {e}"))
+        })?;
         let client = io.block_on(TdsConnectionProvider {}.create_client(context, datasource, None))?;
-        Ok(Self { client, slice: None, io })
+        Ok(Self { client, slice: None, io, pid: std::process::id() })
+    }
+
+    /// Whether a forked child inherited this session from its parent. The
+    /// socket (and its TLS state) is the parent's: the child must never write
+    /// to it, so it forgets the client instead of closing or sanitising it.
+    pub fn is_foreign(&self) -> bool {
+        self.pid != std::process::id()
+    }
+
+    /// Close the session politely, unless it belongs to the parent process.
+    pub fn close(mut self) {
+        if self.is_foreign() {
+            std::mem::forget(self);
+            return;
+        }
+        let _ = self.block_on(|c| c.close_connection());
     }
 
     /// Drive the future built by `op` to completion on this connection's
@@ -124,7 +146,7 @@ impl SyncClient {
         F: FnOnce(&'a mut TdsClient) -> Fut,
         Fut: Future,
     {
-        let Self { client, slice, io } = self;
+        let Self { client, slice, io, .. } = self;
         let _spin = mssql_tds::connection::transport::busy_poll::ThreadGuard::enter();
         if WATCHED.with(Cell::get).is_null() {
             return io.block_on(op(client));

@@ -58,3 +58,15 @@ fn emit(py: Python<'_>, level: i32, msg: &str) -> PyResult<()> {
     logger.bind(py).call_method1("py_core_log", (level, format!("[DDBC] {msg}")))?;
     Ok(())
 }
+
+/// Emit `msg` as the Python-side `logger.error(msg)` would: tagged `[Python]`
+/// and dropped when the logger's level is above ERROR. For the lines that
+/// `exceptions.py` and `connection.py` used to log.
+pub fn python_error(py: Python<'_>, msg: &str) {
+    let Ok(logger) = LOGGER.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        Ok(PyModule::import(py, "arrowsql.logging")?.getattr("logger")?.unbind())
+    }) else {
+        return;
+    };
+    let _ = logger.bind(py).call_method1("error", (msg,));
+}

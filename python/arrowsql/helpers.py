@@ -44,6 +44,17 @@ def _native_error_from_diag_records(handle: Any, sqlstate: str) -> Optional[int]
     return first
 
 
+_NATIVE_DIAG_FUNCTIONS = {
+    name: getattr(ddbc_bindings, name)
+    for name in ("DDBCSQLCheckError", "DDBCSQLGetAllDiagRecords")
+}
+
+
+def _native_raise_available() -> bool:
+    """False when a test replaced a diagnostic function on ddbc_bindings."""
+    return all(getattr(ddbc_bindings, n, None) is f for n, f in _NATIVE_DIAG_FUNCTIONS.items())
+
+
 def check_error(handle_type: int, handle: Any, ret: int) -> None:
     """
     Check for errors and raise an exception if an error is found.
@@ -57,6 +68,8 @@ def check_error(handle_type: int, handle: Any, ret: int) -> None:
         RuntimeError: If an error is found.
     """
     if ret < 0:
+        if _native_raise_available():
+            ddbc_bindings.DDBCRaiseFor(handle_type, handle, ret)
         logger.debug(
             "check_error: Error detected - handle_type=%d, return_code=%d", handle_type, ret
         )
