@@ -186,6 +186,7 @@ impl StreamCore {
     fn shutdown(&self) {
         self.closing.store(true, Ordering::Release);
         if let Some(handle) = self.producer.lock().unwrap().take() {
+            let mut backoff = Duration::from_micros(50);
             while !handle.is_finished() {
                 // A producer blocked in `send` wakes when the receiver goes;
                 // one blocked inside a read (e.g. on a row lock) never sees the
@@ -196,7 +197,8 @@ impl StreamCore {
                 if let Some(execution) = &self.execution {
                     execution.cancel();
                 }
-                std::thread::sleep(Duration::from_millis(5));
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_millis(5));
             }
             let _ = handle.join();
             if !self.exhausted.load(Ordering::Acquire) {
