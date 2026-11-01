@@ -132,6 +132,35 @@ impl RowCore {
         )))
     }
 
+    /// Normal attribute lookup first (methods, fields, user attributes), then the
+    /// column maps. Where CPython exports its non-raising generic lookup, a column
+    /// access avoids building and discarding an AttributeError.
+    fn __getattribute__<'py>(slf: &Bound<'py, Self>, name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        #[cfg(not(windows))]
+        {
+            let found = unsafe { _PyObject_GenericGetAttrWithDict(slf.as_ptr(), name.as_ptr(), ptr::null_mut(), 1) };
+            if !found.is_null() {
+                return Ok(unsafe { Bound::from_owned_ptr(py, found) });
+            }
+            if !unsafe { ffi::PyErr_Occurred() }.is_null() {
+                return Err(PyErr::fetch(py));
+            }
+        }
+        #[cfg(windows)]
+        {
+            let found = unsafe { ffi::PyObject_GenericGetAttr(slf.as_ptr(), name.as_ptr()) };
+            if !found.is_null() {
+                return Ok(unsafe { Bound::from_owned_ptr(py, found) });
+            }
+            let err = PyErr::fetch(py);
+            if !err.is_instance_of::<PyAttributeError>(py) {
+                return Err(err);
+            }
+        }
+        slf.borrow().column_attr(py, name)
+    }
+
     #[getter(_mapping)]
     fn mapping<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
@@ -224,34 +253,6 @@ impl RowCore {
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let t = PyTuple::type_object(py).call1((self.values.bind(py),))?;
         Ok(t.repr()?.to_string())
-    }
-}
-
-#[cfg(not(windows))]
-#[pymethods]
-impl RowCore {
-    /// Normal attribute lookup first (methods, fields, user attributes), then the
-    /// column maps. The generic lookup runs in its non-raising mode so a column
-    /// access does not build and discard an AttributeError. Windows does not
-    /// export that CPython helper, so there `__getattr__` serves the same lookup.
-    fn __getattribute__<'py>(slf: &Bound<'py, Self>, name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        let py = slf.py();
-        let found = unsafe { _PyObject_GenericGetAttrWithDict(slf.as_ptr(), name.as_ptr(), ptr::null_mut(), 1) };
-        if !found.is_null() {
-            return Ok(unsafe { Bound::from_owned_ptr(py, found) });
-        }
-        if !unsafe { ffi::PyErr_Occurred() }.is_null() {
-            return Err(PyErr::fetch(py));
-        }
-        slf.borrow().column_attr(py, name)
-    }
-}
-
-#[cfg(windows)]
-#[pymethods]
-impl RowCore {
-    fn __getattr__<'py>(&self, py: Python<'py>, name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        self.column_attr(py, name)
     }
 }
 
