@@ -69,6 +69,10 @@ Test locations:
 
 ## Bugs found by the port
 
+- `Cursor.bulkcopy` rejected a Python list of floats for a `vector` column (`Type mismatch ... target SQL
+  type is Vector`). Fixed in `src/params/py_types.rs`; regression test:
+  `test_vector_column_is_either_loaded_or_rejected_cleanly` (runs where the server has `vector`, found
+  by the windows-db CI job).
 - `Cursor.bulkcopy` rejected a Python `str` bound for an `xml` column
   (`Type mismatch for column 'v': converted to String(...) but target SQL type is Xml`). Fixed in
   `src/params/py_types.rs` (`py_to_column_value_internal` now produces `Xml` / `Json` values for
