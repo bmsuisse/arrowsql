@@ -197,9 +197,25 @@ impl RowCore {
 }
 
 /// Allocate a `row_type` instance through `RowCore.__new__` and fill its fields.
+const FIELDS: [&str; 5] =
+    ["_row_values", "_column_map", "_row_cursor", "_column_map_lower", "_column_names"];
+
+/// False when `row_type` (a subclass) overrides any of the field descriptors;
+/// `new_row` then assigns through `setattr` so the override runs.
+pub(crate) fn plain_fields(py: Python<'_>, row_type: &Bound<'_, PyType>) -> PyResult<bool> {
+    let core = py.get_type::<RowCore>();
+    for name in FIELDS {
+        if !row_type.getattr(name)?.is(&core.getattr(name)?) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) fn new_row<'py>(
     py: Python<'py>,
     row_type: *mut ffi::PyTypeObject,
+    plain: bool,
     f: [&Bound<'py, PyAny>; 5],
 ) -> PyResult<Bound<'py, PyAny>> {
     let args = PyTuple::empty(py);
@@ -210,6 +226,12 @@ pub(crate) fn new_row<'py>(
         return Err(PyErr::fetch(py));
     }
     let row = unsafe { Bound::from_owned_ptr(py, ptr) };
+    if !plain {
+        for (name, value) in FIELDS.iter().zip(f) {
+            row.setattr(*name, value)?;
+        }
+        return Ok(row);
+    }
     {
         let core = unsafe { row.cast_unchecked::<RowCore>() };
         let mut c = core.borrow_mut();
@@ -249,6 +271,7 @@ pub fn make_row_fast<'py>(
     new_row(
         py,
         row_type.as_type_ptr(),
+        plain_fields(py, &row_type)?,
         [values, column_map, cursor, column_map_lower.unwrap_or(&none), column_names.unwrap_or(&none)],
     )
 }
@@ -268,9 +291,10 @@ pub fn construct_rows<'py>(
     let none = py.None().into_bound(py);
     let (lower, names) = (column_map_lower.unwrap_or(&none), column_names.unwrap_or(&none));
     let type_ptr = row_type.as_type_ptr();
+    let plain = plain_fields(py, &row_type)?;
     let out = PyList::empty(py);
     for values in rows_data.iter() {
-        out.append(new_row(py, type_ptr, [&values, column_map, cursor, lower, names])?)?;
+        out.append(new_row(py, type_ptr, plain, [&values, column_map, cursor, lower, names])?)?;
     }
     Ok(out)
 }
