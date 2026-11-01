@@ -211,10 +211,10 @@ class _ConnectionStringParser:
                 incomplete_text = connection_str[key_start:current_pos].strip()
                 if incomplete_text:
                     # Without '=' this may be a piece of a value that contained an
-                    # unescaped ';' (a password), so only echo known keywords.
+                    # unescaped ';' (a password), so only echo text that starts with a known keyword.
                     shown = (
                         f"'{incomplete_text}'"
-                        if _ConnectionStringParser.normalize_key(incomplete_text.lower())
+                        if _ConnectionStringParser.normalize_key(incomplete_text.split()[0].lower())
                         else f"at position {key_start}"
                     )
                     errors.append(

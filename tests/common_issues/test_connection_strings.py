@@ -146,7 +146,9 @@ def test_unbraced_password_with_semicolon_is_rejected_not_truncated(conn_str):
 
     with pytest.raises(ConnectionStringParseError) as info:
         connect(s)
-    assert "ss9x" in str(info.value)
+    # The error points at the broken spot but must not echo the password fragment.
+    assert "Incomplete specification" in str(info.value)
+    assert "ss9x" not in str(info.value)
 
 
 def test_wrong_password_for_existing_login_is_operational_error(

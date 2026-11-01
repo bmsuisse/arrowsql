@@ -7,7 +7,11 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load(name):
-    spec = importlib.util.spec_from_file_location(name, _ROOT / "scripts" / f"{name}.py")
+    return _load_path(_ROOT / "scripts" / f"{name}.py", name)
+
+
+def _load_path(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -31,7 +35,8 @@ def test_baseline_error_line_regex():
 
 def test_conn_str_repr_redacted():
     sys_path_conftest = _load  # noqa: F841 - conftest is imported by pytest itself
-    from conftest import _RedactedStr
+    conftest = _load_path(_ROOT / "tests" / "common_issues" / "conftest.py", "ci_conftest")
+    _RedactedStr = conftest._RedactedStr
 
     s = _RedactedStr("Server=x;PWD=hunter2")
     assert "hunter2" not in repr(s) and s == "Server=x;PWD=hunter2"
