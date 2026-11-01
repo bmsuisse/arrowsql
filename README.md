@@ -67,6 +67,43 @@ cur.bulkcopy_arrow("dbo.orders", arrow_table)                          # Arrow -
 arrowsql.write_arrow(conn_str, "dbo.orders", arrow_table, workers=8)   # in parallel
 ```
 
+## Spark / Databricks
+
+`arrowsql.spark` is a Spark 4 Python data source: every Spark task reads its slice of the
+query with arrowsql (Arrow batches, no rows) and writes with the bulk copy. `pyspark` is an
+optional extra (`pip install "arrowsql[spark]"`); arrowsql must be installed on the executors
+too (Databricks: a notebook `%pip install arrowsql`).
+
+```python
+from arrowsql.spark import register
+register(spark)
+
+df = (spark.read.format("arrowsql")
+      .option("connection_string", conn_str)
+      .option("dbtable", "dbo.orders")
+      .option("partitionColumn", "id").option("numPartitions", 8)   # 8 tasks, 8 connections
+      .load())
+df.write.format("arrowsql").option("connection_string", conn_str).option("dbtable", "dbo.orders_copy").mode("append").save()
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `connection_string` (or `url`) | required | ODBC connection string |
+| `dbtable` / `query` | exactly one | table or view name / SELECT (no trailing ORDER BY) |
+| `partitionColumn`, `numPartitions` | one slice | range partitioning on a numeric, date or datetime column; half-open slices, the first also reads NULLs |
+| `lowerBound`, `upperBound` | MIN/MAX on the driver | set both to skip that query; rows outside still land in the end slices |
+| `hashColumns` + `numPartitions` | none | slice `i` = `(CHECKSUM(cols) & 2147483647) % numPartitions = i`; key columns only |
+| `batchSize` | 65536 | rows per Arrow batch |
+| `utf8Strings` | `true` | nvarchar over the wire as UTF-8 |
+| `timestampType` | `ntz` | `ntz`: datetime/datetime2 as `TimestampNTZType`, exact. `timestamp`: Spark JDBC's `TimestampType`, wall clock read (and written) in `timeZone` |
+| `timeZone` | `UTC` | zone for `timestampType=timestamp`; Spark does not pass its session zone to data sources |
+
+Write: `append` bulk-copies each task's batches; `overwrite` runs `TRUNCATE TABLE` once on the
+driver first. Neither is transactional across tasks. Unsigned types are widened (`tinyint` is
+`smallint` in Spark). Examples: [examples/spark_datasource.py](examples/spark_datasource.py)
+(local Spark), [examples/databricks_spark_datasource.py](examples/databricks_spark_datasource.py)
+(notebook).
+
 ## Async and agent mode
 
 - `arrowsql.aio`: native asyncio with a connection pool; cancelling a task cancels the query

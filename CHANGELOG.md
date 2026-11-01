@@ -14,6 +14,13 @@ Version numbers in this project are deliberately three different things:
 
 ## [Unreleased]
 
+### Added
+
+- `arrowsql.spark`: a Spark 4 Python data source (`spark.read.format("arrowsql")`,
+  `df.write.format("arrowsql")`). Tasks read their slice with `read_arrow_stream` (range or
+  hash partitioning, `timestampType`, unsigned widening) and write with the Arrow bulk copy.
+  Optional extra `arrowsql[spark]`; `import arrowsql` does not import pyspark.
+
 ## [0.2.0] - 2026-11-01
 
 ### Added

@@ -205,6 +205,10 @@ connections from plain threads; decode is GIL-free so they run in
 parallel. `ArrowTable.concat` joins the parts. One TDS session is capped by
 SQL Server's serialization rate, so this is the only way past it.
 
+`arrowsql.spark` (`python/arrowsql/spark.py`) is the Spark 4 Python data source: it plans
+slices on the driver and each task runs `read_arrow_stream` / `write_arrow(workers=1)`; no data
+passes through Python code other than Arrow batches.
+
 ## Agent mode
 
 `arrowsql.agent` (`python/arrowsql/agent.py`) returns a bounded, typed text
