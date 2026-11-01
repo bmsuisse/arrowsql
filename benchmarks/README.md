@@ -14,6 +14,22 @@ python benchmarks/report.py                              # latest results -> ben
 
 `run.py` and `report.py` need only a stdlib `python3`; each driver runs in its own venv.
 
+## Reproduce in one command
+
+```
+scripts/bench_reproduce.sh            # full matrix (hours); --quick for a ~20 min smoke run
+scripts/bench_reproduce.sh --quick --drivers rust_port,mssql_python --workloads 'read.taxi_100k.*'
+scripts/bench_reproduce.sh --help
+```
+
+On Linux x86_64 with docker or podman, `uv` and a Rust toolchain, the script starts SQL Server 2022 as container
+`arrowsql-bench` (random SA password in `.env.local`, mode 600; or uses your `DB_CONNECTION_STRING`), downloads and loads the
+NYC taxi January 2024 parquet, builds the release extension, creates the pinned per-driver venvs, runs `run.py`, then
+`report.py`. It is idempotent: re-running skips finished steps. `--no-docker` uses an existing server (set `BCP_HOST_BIN` if
+sqlcmd/bcp are not in a local container), `--skip-setup` only runs and reports, `--dry-run` prints the plan. The container
+name and engine are `BENCH_CONTAINER` (default `mssql-rs` when invoking `run.py` directly) and
+`BENCH_CONTAINER_ENGINE` (`podman` default, `docker`); the script sets them for you.
+
 ## One-time setup
 
 * SQL Server 2022 in podman container `mssql-rs`, credentials in `<main repo>/.env.local`

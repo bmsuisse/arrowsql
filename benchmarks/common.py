@@ -13,7 +13,8 @@ BENCH = Path(__file__).resolve().parent
 ROOT = BENCH.parent
 RESULTS = BENCH / "results"
 DATASETS_JSON = RESULTS / "datasets.json"
-CONTAINER = "mssql-rs"
+CONTAINER = os.environ.get("BENCH_CONTAINER", "mssql-rs")
+ENGINE = os.environ.get("BENCH_CONTAINER_ENGINE", "podman")  # or "docker"
 SQLTOOLS = "/opt/mssql-tools18/bin"
 
 
@@ -94,7 +95,7 @@ def sqlcmd(sql: str, database: str = "nyctaxi", timeout: int = 900) -> str:
         cmd = [f"{host_bin}/sqlcmd", "-S", f"{info.host},{info.port}", *args]
         env = {**os.environ, "LD_LIBRARY_PATH": str(odbc / "lib"), "ODBCSYSINI": str(odbc / "etc")}
     else:
-        cmd = ["podman", "exec", "-i", CONTAINER, f"{SQLTOOLS}/sqlcmd", "-S", "localhost", *args]
+        cmd = [ENGINE, "exec", "-i", CONTAINER, f"{SQLTOOLS}/sqlcmd", "-S", "localhost", *args]
         env = None
     p = subprocess.run(cmd, input=sql, capture_output=True, text=True, timeout=timeout, env=env)
     if p.returncode != 0:

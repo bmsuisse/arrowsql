@@ -21,7 +21,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from common import CONTAINER, SQLTOOLS, sqlcmd
+from common import CONTAINER, ENGINE, SQLTOOLS, sqlcmd
 from drivers.base import Driver
 from drivers.registry import SPECS
 
@@ -44,7 +44,7 @@ class BcpDriver(Driver):
 
     @staticmethod
     def _prefix():
-        return [f"{HOST_BIN}/bcp"] if HOST_BIN else ["podman", "exec", CONTAINER, f"{SQLTOOLS}/bcp"]
+        return [f"{HOST_BIN}/bcp"] if HOST_BIN else [ENGINE, "exec", CONTAINER, f"{SQLTOOLS}/bcp"]
 
     @staticmethod
     def _env():
@@ -69,7 +69,7 @@ class BcpDriver(Driver):
                 for f in self._files:
                     Path(f).unlink(missing_ok=True)
             elif self._files:
-                subprocess.run(["podman", "exec", CONTAINER, "rm", "-f", *sorted(self._files)])
+                subprocess.run([ENGINE, "exec", CONTAINER, "rm", "-f", *sorted(self._files)])
             self.conn = None
 
     def execute(self, sql, params=()):
