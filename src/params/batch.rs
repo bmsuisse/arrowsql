@@ -196,6 +196,14 @@ fn unify_decimal(rows: &mut [Vec<SqlType>], col: usize, is_null: &[bool]) -> Tds
     if rows.iter().zip(is_null).all(|(row, &null)| null || decimal_parts(&row[col]).is_some()) {
         return unify_decimal_parts(rows, col, is_null);
     }
+    if unify_int_decimal_parts(rows, col, is_null)? {
+        return Ok(());
+    }
+    unify_decimal_text(rows, col, is_null)
+}
+
+/// [`unify_decimal`] through exact decimal text; handles float cells.
+fn unify_decimal_text(rows: &mut [Vec<SqlType>], col: usize, is_null: &[bool]) -> TdsResult<()> {
     let texts = rows
         .iter()
         .zip(is_null)
@@ -219,6 +227,66 @@ fn unify_decimal(rows: &mut [Vec<SqlType>], col: usize, is_null: &[bool]) -> Tds
         };
     }
     Ok(())
+}
+
+const POW10: [u128; 39] = {
+    let mut table = [1u128; 39];
+    let mut i = 1;
+    while i < 39 {
+        table[i] = table[i - 1] * 10;
+        i += 1;
+    }
+    table
+};
+
+/// Number of decimal digits of `v`, 0 for 0 (leading zeros are not digits).
+fn digit_count(v: u128) -> usize {
+    POW10.partition_point(|&p| p <= v)
+}
+
+/// [`unify_decimal`] for a column of ints and Decimals without floats, which
+/// is the same text-based unification done on the integer magnitudes. Returns
+/// false, leaving `rows` untouched, when a float cell needs the text path.
+fn unify_int_decimal_parts(rows: &mut [Vec<SqlType>], col: usize, is_null: &[bool]) -> TdsResult<bool> {
+    let (mut scale, mut int_digits) = (0usize, 0usize);
+    for (row, &null) in rows.iter().zip(is_null) {
+        if null {
+            continue;
+        }
+        if let Some(p) = decimal_parts(&row[col]) {
+            let s = usize::from(p.scale);
+            scale = scale.max(s);
+            // A declared scale of at most 38 indexes the table.
+            int_digits = int_digits.max(digit_count(p.magnitude() / POW10[s.min(38)]));
+        } else if let Some(v) = int_value(&row[col]) {
+            int_digits = int_digits.max(digit_count(u128::from(v.unsigned_abs())));
+        } else if matches!(row[col], SqlType::Float(Some(_))) {
+            return Ok(false);
+        }
+    }
+    let precision = (int_digits + scale).max(1);
+    if precision > MAX_DECIMAL_PRECISION {
+        return Err(Error::TypeConversionError(format!(
+            "values in one column need a numeric precision of {precision}, above the maximum of {MAX_DECIMAL_PRECISION}"
+        )));
+    }
+    // Both fit in u8: `precision` is at most 38 and `scale` is at most `precision`.
+    let (precision, scale) = (precision as u8, scale);
+    for (row, &null) in rows.iter_mut().zip(is_null) {
+        let cell = &row[col];
+        row[col] = if null {
+            SqlType::Decimal(None)
+        } else if let Some(p) = decimal_parts(cell) {
+            let magnitude = p.magnitude() * POW10[scale - usize::from(p.scale)];
+            SqlType::Decimal(Some(DecimalParts::new(p.is_positive, precision, scale as u8, magnitude)))
+        } else if let Some(v) = int_value(cell) {
+            let magnitude = u128::from(v.unsigned_abs()) * POW10[scale];
+            SqlType::Decimal(Some(DecimalParts::new(v >= 0, precision, scale as u8, magnitude)))
+        } else {
+            SqlType::Decimal(None)
+        };
+    }
+    Ok(true)
 }
 
 fn decimal_parts(t: &SqlType) -> Option<&DecimalParts> {
@@ -248,7 +316,7 @@ fn unify_decimal_parts(rows: &mut [Vec<SqlType>], col: usize, is_null: &[bool]) 
         row[col] = match decimal_parts(&row[col]) {
             Some(p) if !null => {
                 // Below 10^precision < 2^127, so the rescaled magnitude cannot overflow.
-                let magnitude = p.magnitude() * 10u128.pow(u32::from(scale - p.scale));
+                let magnitude = p.magnitude() * POW10[usize::from(scale - p.scale)];
                 SqlType::Decimal(Some(DecimalParts::new(p.is_positive, precision, scale, magnitude)))
             }
             _ => SqlType::Decimal(None),
@@ -394,6 +462,77 @@ mod tests {
         let nulls: Vec<Vec<bool>> = nulls.iter().map(|&n| vec![n]).collect();
         let all_null = normalize(&mut rows, &nulls)?;
         Ok((rows.into_iter().map(|mut r| r.remove(0)).collect(), all_null))
+    }
+
+    fn parts_of(t: &SqlType) -> Option<(bool, u8, u8, u128)> {
+        match t {
+            SqlType::Decimal(Some(p)) => Some((p.is_positive, p.precision, p.scale, p.magnitude())),
+            SqlType::Decimal(None) => None,
+            _ => panic!("expected a decimal cell"),
+        }
+    }
+
+    /// The int/Decimal fast path must agree with the text path, errors included.
+    #[test]
+    fn int_decimal_fast_path_matches_the_text_path() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for round in 0..400 {
+            let n = 1 + (next() % 6) as usize;
+            let mut cells = Vec::new();
+            let mut nulls = Vec::new();
+            for _ in 0..n {
+                let null = next() % 7 == 0;
+                nulls.push(null);
+                cells.push(match next() % 6 {
+                    0 => SqlType::BigInt(Some(i64::MIN)),
+                    1 => SqlType::Int(Some((next() as i32) >> (next() % 31))),
+                    2 => SqlType::BigInt(Some((next() as i64) >> (next() % 63))),
+                    3 => dec("-0.00", 3, 2),
+                    4 => {
+                        let scale = (next() % 8) as u8;
+                        let digits = 1 + (next() % 30) as usize;
+                        let mut text = String::from(if next() % 2 == 0 { "-" } else { "" });
+                        for i in 0..digits {
+                            text.push(char::from(b'0' + (next() % 10) as u8));
+                            if i + 1 == digits.saturating_sub(scale as usize) && scale > 0 {
+                                text.push('.');
+                            }
+                        }
+                        if scale as usize >= digits {
+                            text = format!("-0.{}", "7".repeat(scale as usize));
+                        }
+                        dec(&text, 38, scale)
+                    }
+                    _ => SqlType::TinyInt(Some((next() % 256) as u8)),
+                });
+            }
+            let nulls: Vec<bool> = nulls;
+            let mut fast: Vec<Vec<SqlType>> = cells.iter().cloned().map(|c| vec![c]).collect();
+            let mut text = fast.clone();
+            let fast_result = unify_int_decimal_parts(&mut fast, 0, &nulls).map(|handled| assert!(handled));
+            let text_result = unify_decimal_text(&mut text, 0, &nulls);
+            assert_eq!(fast_result.is_ok(), text_result.is_ok(), "round {round}: {cells:?}");
+            if fast_result.is_ok() {
+                for (a, b) in fast.iter().zip(&text) {
+                    assert_eq!(parts_of(&a[0]), parts_of(&b[0]), "round {round}: {cells:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn digit_count_matches_text_length() {
+        assert_eq!(digit_count(0), 0);
+        assert_eq!(digit_count(9), 1);
+        assert_eq!(digit_count(10), 2);
+        assert_eq!(digit_count(10u128.pow(38) - 1), 38);
+        assert_eq!(digit_count(10u128.pow(38)), 39);
     }
 
     fn decimal_text_of(t: &SqlType) -> String {

@@ -19,10 +19,10 @@ use mssql_tds::datatypes::sql_vector::SqlVector;
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::error::Error;
 use pyo3::prelude::*;
-use pyo3::types::{PyDateAccess, PyTimeAccess};
+use pyo3::types::{PyDateAccess, PyDeltaAccess, PyTimeAccess, PyTzInfoAccess};
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
-    PyBool, PyByteArray, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyMemoryView,
+    PyBool, PyByteArray, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyInt, PyMemoryView,
     PyModule, PyString, PyTime, PyType,
 };
 
@@ -44,6 +44,19 @@ use crate::params::{DATA_ERROR_PREFIX, DATA_VALUE_ERROR_PREFIX, RUNTIME_ERROR_PR
 static DECIMAL_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static UUID_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static JSON_DUMPS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+static UTC: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static MONEY_QUANTIZER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+fn utc_timezone(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    UTC.get_or_try_init(py, || {
+        Ok(PyModule::import(py, "datetime")?
+            .getattr("timezone")?
+            .getattr("utc")?
+            .unbind())
+    })
+    .map(|utc| utc.bind(py))
+}
 
 fn decimal_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
     DECIMAL_TYPE.import(py, "decimal", "Decimal")
@@ -365,6 +378,19 @@ pub(crate) fn py_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
         return py_decimal_to_sql_type(py_obj);
     }
 
+    // Dates and UUIDs are bindable by construction; skip the is_fallback_bindable walk.
+    if py_obj.is_instance_of::<PyDate>() {
+        return Ok(column_value_to_sql_type(py_to_column_value(py_obj, None)?));
+    }
+    let uuid_class = uuid_type(py_obj.py())
+        .map_err(|error| Error::UsageError(format!("Failed to import UUID: {error}")))?;
+    if py_obj
+        .is_instance(uuid_class)
+        .map_err(|error| Error::UsageError(format!("Failed to inspect UUID value: {error}")))?
+    {
+        return Ok(column_value_to_sql_type(py_to_column_value(py_obj, None)?));
+    }
+
     if !is_fallback_bindable(py_obj)? {
         return Err(Error::UsageError(
             UNSUPPORTED_PARAMETER_TYPE_MESSAGE.to_string(),
@@ -673,6 +699,61 @@ fn hinted_decimal(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<S
     })
 }
 
+/// ROUND_HALF_UP on plain digit text with the output `Decimal.quantize` plus
+/// `format("f")` gives: the sign of a negative zero is kept and a scale of 0
+/// has no point. None for anything but `[-+]digits[.digits]` within the
+/// 100-digit context, which the caller leaves to Python.
+fn round_half_up_text(text: &str, scale: usize) -> Option<String> {
+    let (negative, unsigned) = match text.as_bytes().first()? {
+        b'-' => (true, &text[1..]),
+        b'+' => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let (int_part, frac_part) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    if (int_part.is_empty() && frac_part.is_empty())
+        || !int_part.bytes().chain(frac_part.bytes()).all(|b| b.is_ascii_digit())
+        || frac_part.len() <= scale
+    {
+        return None;
+    }
+    let int_part = int_part.trim_start_matches('0');
+    let mut digits: Vec<u8> = Vec::with_capacity(int_part.len() + scale + 1);
+    digits.push(b'0');
+    digits.extend_from_slice(int_part.as_bytes());
+    digits.extend_from_slice(&frac_part.as_bytes()[..scale]);
+    if frac_part.as_bytes()[scale] >= b'5' {
+        for digit in digits.iter_mut().rev() {
+            if *digit == b'9' {
+                *digit = b'0';
+            } else {
+                *digit += 1;
+                break;
+            }
+        }
+    }
+    // The leading pad digit only survives a carry out of the integer part.
+    let start = usize::from(digits[0] == b'0');
+    let digits = &digits[start..];
+    if digits.len() > 100 {
+        return None;
+    }
+    let split = digits.len() - scale;
+    let mut out = String::with_capacity(digits.len() + 3);
+    if negative {
+        out.push('-');
+    }
+    if split == 0 {
+        out.push('0');
+    } else {
+        out.push_str(std::str::from_utf8(&digits[..split]).ok()?);
+    }
+    if scale > 0 {
+        out.push('.');
+        out.push_str(std::str::from_utf8(&digits[split..]).ok()?);
+    }
+    Some(out)
+}
+
 /// Rounds a plain decimal text to the declared scale, half away from zero, as
 /// SQL Server does when it converts a value to a narrower DECIMAL. Text in
 /// exponent form or already within the scale is returned unchanged.
@@ -680,6 +761,9 @@ fn round_to_scale(text: &str, scale: u8) -> TdsResult<String> {
     let fraction_digits = text.split_once('.').map_or(0, |(_, fraction)| fraction.len());
     if text.contains(['e', 'E']) || fraction_digits <= usize::from(scale) {
         return Ok(text.to_string());
+    }
+    if let Some(rounded) = round_half_up_text(text, usize::from(scale)) {
+        return Ok(rounded);
     }
     let round_error = |error: PyErr| Error::UsageError(format!("Failed to round numeric value: {error}"));
     Python::attach(|py| {
@@ -860,9 +944,11 @@ fn hinted_money(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<Sql
     let decimal = decimal_class
         .call1((value,))
         .map_err(|error| Error::UsageError(format!("Failed to convert money value: {error}")))?;
-    let quantizer = decimal_class
-        .call1(("0.0001",))
-        .map_err(|error| Error::UsageError(format!("Failed to create money scale: {error}")))?;
+    let py = py_obj.py();
+    let quantizer = MONEY_QUANTIZER
+        .get_or_try_init(py, || decimal_class.call1(("0.0001",)).map(Bound::unbind))
+        .map_err(|error| Error::UsageError(format!("Failed to create money scale: {error}")))?
+        .bind(py);
     let scaled = decimal
         .call_method1("quantize", (quantizer,))
         .and_then(|value| value.call_method1("scaleb", (4,)))
@@ -951,10 +1037,15 @@ fn py_datetime_to_sql_type(
     py_obj: &Bound<'_, PyAny>,
     hinted_scale: Option<u8>,
 ) -> TdsResult<SqlType> {
-    let tzinfo = py_obj
-        .getattr("tzinfo")
-        .map_err(|error| Error::UsageError(format!("Failed to get datetime tzinfo: {error}")))?;
-    if tzinfo.is_none() {
+    let naive = if let Ok(dt) = py_obj.cast_exact::<PyDateTime>() {
+        dt.get_tzinfo().is_none()
+    } else {
+        py_obj
+            .getattr("tzinfo")
+            .map_err(|error| Error::UsageError(format!("Failed to get datetime tzinfo: {error}")))?
+            .is_none()
+    };
+    if naive {
         let days = datetime_days(py_obj)?;
         return Ok(SqlType::DateTime2(Some(SqlDateTime2 {
             days,
@@ -972,16 +1063,18 @@ fn py_datetime_to_sql_type(
             "Timezone-aware datetime returned no UTC offset".to_string(),
         ));
     }
-    let offset_seconds = offset
-        .call_method0("total_seconds")
-        .and_then(|value| value.extract::<f64>())
-        .map_err(|error| {
-            Error::UsageError(format!("Failed to get timezone offset seconds: {error}"))
-        })?;
-    let offset_minutes = datetimeoffset_minutes(offset_seconds)?;
-    let datetime = PyModule::import(py_obj.py(), "datetime")
-        .and_then(|module| module.getattr("timezone"))
-        .and_then(|timezone| timezone.getattr("utc"))
+    let offset_minutes = if let Ok(delta) = offset.cast_exact::<PyDelta>() {
+        datetimeoffset_minutes_exact(delta.get_days(), delta.get_seconds(), delta.get_microseconds())?
+    } else {
+        let offset_seconds = offset
+            .call_method0("total_seconds")
+            .and_then(|value| value.extract::<f64>())
+            .map_err(|error| {
+                Error::UsageError(format!("Failed to get timezone offset seconds: {error}"))
+            })?;
+        datetimeoffset_minutes(offset_seconds)?
+    };
+    let datetime = utc_timezone(py_obj.py())
         .and_then(|utc| py_obj.call_method1("astimezone", (utc,)))
         .map_err(|error| {
             // A UTC instant outside 0001..9999 is a value problem, as upstream reports it.
@@ -1003,7 +1096,24 @@ fn py_datetime_to_sql_type(
     })))
 }
 
+/// Days since 0001-01-01 of an exact `datetime.datetime`, by Howard Hinnant's
+/// days_from_civil, so no Python call is needed.
+fn exact_datetime_days(dt: &Bound<'_, PyDateTime>) -> Option<u32> {
+    let (year, month, day) = (i64::from(dt.get_year()), i64::from(dt.get_month()), i64::from(dt.get_day()));
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let year_of_era = y - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    u32::try_from(era * 146_097 + day_of_era - 719_468 + 719_162).ok()
+}
+
 fn datetime_days(py_obj: &Bound<'_, PyAny>) -> TdsResult<u32> {
+    if let Ok(dt) = py_obj.cast_exact::<PyDateTime>()
+        && let Some(days) = exact_datetime_days(dt)
+    {
+        return Ok(days);
+    }
     let ordinal = py_obj
         .call_method0("toordinal")
         .and_then(|value| value.extract::<u32>())
@@ -1011,6 +1121,24 @@ fn datetime_days(py_obj: &Bound<'_, PyAny>) -> TdsResult<u32> {
     ordinal.checked_sub(1).ok_or_else(|| {
         Error::UsageError("Date ordinal is 0, expected a value greater than 0".to_string())
     })
+}
+
+/// Same checks as `datetimeoffset_minutes`, on a timedelta's integer parts.
+/// For |offset| < 1 day the f64 `total_seconds` test is exactly this one.
+fn datetimeoffset_minutes_exact(days: i32, seconds: i32, microseconds: i32) -> TdsResult<i16> {
+    let total = i64::from(days) * 86_400 + i64::from(seconds);
+    if microseconds != 0 || total % 60 != 0 {
+        return Err(Error::UsageError(
+            "DATETIMEOFFSET requires a whole-minute UTC offset".to_string(),
+        ));
+    }
+    let offset_minutes = total / 60;
+    if !(-840..=840).contains(&offset_minutes) {
+        return Err(Error::TypeConversionError(format!(
+            "{RUNTIME_ERROR_PREFIX}Datetimeoffset tz offset out of SQL Server range (-14h to +14h)"
+        )));
+    }
+    Ok(offset_minutes as i16)
 }
 
 fn datetimeoffset_minutes(offset_seconds: f64) -> TdsResult<i16> {
@@ -1048,13 +1176,19 @@ fn time_isoformat(py_obj: &Bound<'_, PyAny>) -> TdsResult<String> {
 /// Converts a `datetime.time` for a TIME parameter. SQL Server TIME carries no
 /// UTC offset, so an aware time is refused rather than bound without it.
 fn py_time_value(py_obj: &Bound<'_, PyAny>, scale: u8) -> TdsResult<SqlTime> {
+    // An exact datetime.time cannot override isoformat, so the validation below
+    // cannot fail for it and the fields are read through the C accessors.
+    if let Ok(time) = py_obj.cast_exact::<PyTime>() {
+        if time.get_tzinfo().is_some() {
+            return Err(aware_time_error());
+        }
+        return Ok(time_from_accessors(time, scale));
+    }
     let tzinfo = py_obj
         .getattr("tzinfo")
         .map_err(|error| Error::UsageError(format!("Failed to get time tzinfo: {error}")))?;
     if !tzinfo.is_none() {
-        return Err(Error::TypeConversionError(
-            "Cannot bind a timezone-aware time: SQL Server TIME has no UTC offset".to_string(),
-        ));
+        return Err(aware_time_error());
     }
     // The text is not bound here, but calling isoformat() keeps a broken override
     // rejected on the TIME path just as on the text path.
@@ -1062,9 +1196,32 @@ fn py_time_value(py_obj: &Bound<'_, PyAny>, scale: u8) -> TdsResult<SqlTime> {
     py_time(py_obj, scale)
 }
 
+fn aware_time_error() -> Error {
+    Error::TypeConversionError(
+        "Cannot bind a timezone-aware time: SQL Server TIME has no UTC offset".to_string(),
+    )
+}
+
+fn time_from_accessors<T: PyTimeAccess>(value: &T, scale: u8) -> SqlTime {
+    let time_nanoseconds = u64::from(value.get_hour()) * 36_000_000_000
+        + u64::from(value.get_minute()) * 600_000_000
+        + u64::from(value.get_second()) * 10_000_000
+        + u64::from(value.get_microsecond()) * 10;
+    SqlTime {
+        time_nanoseconds,
+        scale,
+    }
+}
+
 /// Converts Python time components to the 100-nanosecond units used by TDS,
 /// retaining the scale selected by inference or the caller's hint.
 fn py_time(py_obj: &Bound<'_, PyAny>, scale: u8) -> TdsResult<SqlTime> {
+    if let Ok(time) = py_obj.cast_exact::<PyDateTime>() {
+        return Ok(time_from_accessors(time, scale));
+    }
+    if let Ok(time) = py_obj.cast_exact::<PyTime>() {
+        return Ok(time_from_accessors(time, scale));
+    }
     let component = |name: &str| {
         py_obj
             .getattr(name)
@@ -1460,35 +1617,17 @@ fn py_to_column_value_internal(
         && let Ok(is_instance) = py_obj.is_instance(uuid_class)
         && is_instance
     {
-        // Extract UUID bytes (16 bytes in big-endian RFC 4122 format)
-        // Python's UUID.bytes property returns bytes in big-endian order
-        let bytes_obj = py_obj.getattr("bytes").map_err(|e| {
-            Error::UsageError(format!(
-                "Failed to get 'bytes' attribute from Python UUID object: {}",
-                e
-            ))
-        })?;
-
-        let uuid_bytes = bytes_obj.extract::<Vec<u8>>().map_err(|e| {
-            Error::UsageError(format!(
-                "Failed to extract bytes from Python UUID.bytes property: {}",
-                e
-            ))
-        })?;
-
-        if uuid_bytes.len() != 16 {
-            return Err(Error::UsageError(format!(
-                "Invalid UUID byte length: expected 16, got {}",
-                uuid_bytes.len()
-            )));
-        }
-
-        // Convert Python UUID bytes to Rust uuid::Uuid
-        // Python's UUID.bytes is in RFC 4122 big-endian format
-        let mut uuid_array = [0u8; 16];
-        uuid_array.copy_from_slice(&uuid_bytes);
-        let rust_uuid = uuid::Uuid::from_bytes(uuid_array);
-        return Ok(ColumnValues::Uuid(rust_uuid));
+        // UUID.int is a __slots__ member holding the 128-bit big-endian value.
+        let value: u128 = py_obj
+            .getattr(pyo3::intern!(py, "int"))
+            .and_then(|int| int.extract())
+            .map_err(|e| {
+                Error::UsageError(format!(
+                    "Failed to extract the integer value of a Python UUID: {}",
+                    e
+                ))
+            })?;
+        return Ok(ColumnValues::Uuid(uuid::Uuid::from_u128(value)));
     }
 
     // Unsupported type

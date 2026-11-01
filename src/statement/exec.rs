@@ -239,10 +239,18 @@ fn resolve_null_types(ex: &mut Exclusive<'_>, sql: &str, params: &mut ParamSet) 
         Err(DescribeFailure::Interrupted(records)) => return Err(records),
     };
     for &i in &params.untyped_nulls {
-        let name = format!("@P{}", i + 1);
+        let ordinal = i + 1;
         if let Some(sql_type) = described
             .iter()
-            .find(|param| param.name.eq_ignore_ascii_case(&name))
+            .find(|param| {
+                param.name.get(..2).is_some_and(|prefix| prefix.eq_ignore_ascii_case("@P"))
+                    && param
+                        .name
+                        .get(2..)
+                        .filter(|n| !n.starts_with(['+', '0']))
+                        .and_then(|n| n.parse::<usize>().ok())
+                        == Some(ordinal)
+            })
             .and_then(|param| crate::params::null_types::null_of(&param.system_type))
         {
             params.types[i] = sql_type;

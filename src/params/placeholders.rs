@@ -4,6 +4,10 @@
 //! comments are left alone. The Python layer already converts pyformat to
 //! qmark before calling the bindings.
 
+use std::cell::RefCell;
+use std::fmt::Write;
+use std::sync::Arc;
+
 /// Translate the ODBC procedure-call escape `{call proc(args)}` /
 /// `{? = call proc(args)}` into T-SQL `EXEC`. Other text is unchanged.
 /// The `{d ...}`, `{ts ...}` and `{fn ...}` escapes need no translation: SQL Server parses them itself.
@@ -38,29 +42,38 @@ pub fn translate_call_escape(sql: &str) -> Option<String> {
 
 pub fn rewrite_qmarks(sql: &str) -> (String, usize) {
     // A repeated statement (multirow inserts, loops) skips the scan.
-    static LAST: std::sync::Mutex<Option<(String, String, usize)>> = std::sync::Mutex::new(None);
-    if let Ok(last) = LAST.lock()
-        && let Some((source, rewritten, count)) = last.as_ref()
-        && source == sql
-    {
-        return (rewritten.clone(), *count);
+    // Per thread, so free-threaded callers do not serialise on one lock.
+    type Remembered = Option<(Arc<str>, Arc<str>, usize)>;
+    thread_local! {
+        static LAST: RefCell<Remembered> = const { RefCell::new(None) };
+    }
+    let hit = LAST.with(|last| {
+        let last = last.borrow();
+        match last.as_ref() {
+            Some((source, rewritten, count)) if &**source == sql => Some((rewritten.to_string(), *count)),
+            _ => None,
+        }
+    });
+    if let Some(hit) = hit {
+        return hit;
     }
     let (rewritten, count) = match translate_call_escape(sql) {
         Some(translated) => rewrite_qmarks_plain(&translated),
         None => rewrite_qmarks_plain(sql),
     };
     // Only worth remembering when large enough for the scan to matter.
-    if sql.len() >= 256
-        && let Ok(mut last) = LAST.lock()
-    {
-        *last = Some((sql.to_owned(), rewritten.clone(), count));
+    if sql.len() >= 256 {
+        LAST.with(|last| {
+            *last.borrow_mut() = Some((Arc::from(sql), Arc::from(rewritten.as_str()), count));
+        });
     }
     (rewritten, count)
 }
 
 fn rewrite_qmarks_plain(sql: &str) -> (String, usize) {
     let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len() + 16);
+    let markers = bytes.iter().filter(|&&b| b == b'?').count();
+    let mut out = String::with_capacity(sql.len() + 4 * markers);
     let mut count = 0usize;
     let mut i = 0;
     let mut last = 0;
@@ -120,7 +133,7 @@ fn rewrite_qmarks_plain(sql: &str) -> (String, usize) {
                 count += 1;
                 out.push_str(&sql[last..i]);
                 out.push_str("@P");
-                out.push_str(&count.to_string());
+                let _ = write!(out, "{count}");
                 i += 1;
                 last = i;
             }
@@ -160,6 +173,19 @@ mod tests {
         let (sql, n) = rewrite_qmarks("SELECT ?, '?', [a?], \"b?\" -- ?\n, /* ? /* ? */ */ ?");
         assert_eq!(n, 2);
         assert_eq!(sql, "SELECT @P1, '?', [a?], \"b?\" -- ?\n, /* ? /* ? */ */ @P2");
+    }
+
+    #[test]
+    fn many_markers_and_repeated_large_statements() {
+        let sql = format!("INSERT INTO t VALUES ({})", vec!["?"; 2000].join(","));
+        let expected = format!(
+            "INSERT INTO t VALUES ({})",
+            (1..=2000).map(|i| format!("@P{i}")).collect::<Vec<_>>().join(",")
+        );
+        // The second call is served from the per-thread memo.
+        for _ in 0..2 {
+            assert_eq!(rewrite_qmarks(&sql), (expected.clone(), 2000));
+        }
     }
 
     #[test]
