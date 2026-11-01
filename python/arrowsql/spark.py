@@ -212,18 +212,19 @@ def _source_schema(opts: _Options) -> Any:
 
 
 def _spark_schema(opts: _Options) -> Any:
+    import pyarrow as pa
     from pyspark.sql.pandas.types import from_arrow_schema
     from pyspark.sql.types import StructField, StructType, TimestampNTZType, TimestampType
 
-    struct = from_arrow_schema(_widen(_source_schema(opts)))
-    if opts.timestamp_ntz:
-        return struct
-    return StructType(
-        [
-            StructField(f.name, TimestampType(), f.nullable) if isinstance(f.dataType, TimestampNTZType) else f
-            for f in struct.fields
-        ]
-    )
+    arrow = _widen(_source_schema(opts))
+    fields = []
+    for spark_field, arrow_field in zip(from_arrow_schema(arrow).fields, arrow):
+        # Zone-less timestamps: pyspark 4.0/4.1 map them to TimestampType by default.
+        if pa.types.is_timestamp(arrow_field.type) and arrow_field.type.tz is None:
+            kind = TimestampNTZType() if opts.timestamp_ntz else TimestampType()
+            spark_field = StructField(spark_field.name, kind, spark_field.nullable)
+        fields.append(spark_field)
+    return StructType(fields)
 
 
 def _arrow_schema(schema: Any) -> Any:
