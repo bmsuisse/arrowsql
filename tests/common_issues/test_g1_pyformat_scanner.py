@@ -139,3 +139,48 @@ def test_row_mapping_duplicates_last_wins():
     # a second row sharing the names tuple hits the cache and stays correct
     row2 = Row([7, 8, 9], {"a": 2, "b": 1}, None, None, None, None, names)
     assert dict(row2._mapping) == {"a": 9, "b": 8}
+
+
+def test_fetch_with_output_converter_all_paths(conn):
+    from arrowsql.constants import ConstantsDDBC as K
+
+    conn.add_output_converter(K.SQL_INTEGER.value, lambda v: v * 10)
+    try:
+        cur = conn.cursor()
+        sql = "SELECT 1 AS a, 'x' AS s, CAST(NULL AS INT) AS n, 3 AS a"
+        cur.execute(sql)
+        one = cur.fetchone()
+        cur.execute(sql)
+        many = cur.fetchmany(5)[0]
+        cur.execute(sql)
+        everything = cur.fetchall()[0]
+        for row in (one, many, everything):
+            assert list(row) == [10, "x", None, 30]
+            assert dict(row._mapping) == {"a": 30, "s": "x", "n": None}
+        cur.close()
+    finally:
+        conn.clear_output_converters()
+
+
+def test_executemany_slow_path_decimal_null_and_ragged(conn):
+    import decimal
+
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE #g1 (i INT, d DECIMAL(18,4), s NVARCHAR(10))")
+    rows = [(1, decimal.Decimal("1.5"), "a"), (2, None, "b"), (3, decimal.Decimal("-2.25"), None)]
+    cur.executemany("INSERT INTO #g1 VALUES (?, ?, ?)", rows)
+    cur.execute("SELECT i, d, s FROM #g1 ORDER BY i")
+    assert [tuple(r) for r in cur.fetchall()] == [
+        (1, decimal.Decimal("1.5000"), "a"),
+        (2, None, "b"),
+        (3, decimal.Decimal("-2.2500"), None),
+    ]
+    with pytest.raises(ValueError, match="Inconsistent parameter row size"):
+        cur.executemany("INSERT INTO #g1 VALUES (?, ?, ?)", [(4, None, "x"), (5, None, "y", "extra")])
+    cur.executemany(
+        "INSERT INTO #g1 VALUES (%(i)s, %(d)s, %(s)s)",
+        [{"i": 6, "d": decimal.Decimal("3.5"), "s": "z"}, {"i": 7, "d": None, "s": "y"}],
+    )
+    cur.execute("SELECT COUNT(*) FROM #g1")
+    assert cur.fetchone()[0] == 5
+    cur.close()
