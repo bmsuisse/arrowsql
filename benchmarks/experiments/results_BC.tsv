@@ -1,0 +1,9 @@
+commit	change	metric	result	kept
+base	B: fixed decimal width (precision-derived), 1M rows x 9 decimal(38,2) small values, local	median s (n=5) / upload bytes	5.22 s / 163.4 MB	baseline
+B1	B: adaptive width, same workload, local	median s / bytes	4.47 s / 55.1 MB (-66% bytes; time within noise, box contended)	yes
+B1	B: dec9 small values, WAN 100Mbit/20ms: fixed vs adaptive	median s	13.71 s -> 4.73 s (2.9x)	yes
+B1	B: dec9_wide (values ~1e17 cents, 8-byte magnitude) local	median s / bytes	2.44 -> 2.04 s / 163.4 -> 91.2 MB	yes
+B1	B: dec9_wide WAN	median s	13.72 -> 7.74 s	yes
+B1	B: taxi 1M rows (9x decimal(10,2)) local	median s / bytes	5.42 -> 6.99 s (spread 3.1-9.2 s in both arms: noise) / 164.4 -> 128.3 MB (-22%)	yes
+B1	B: taxi 1M rows WAN	median s	13.75 -> 10.88 s	yes
+B1	B: server correctness: boundaries +-(2^32,2^64,2^96,1e9,1e18, 1e38-1), 0, NULLs, decimal(38,2/0),(20,2),(12,4),(9,2),(28,10), arrow + rows paths	exact varchar compare	0 mismatches; SQL Server 2022 accepts per-value length 5/9/13/17	yes
