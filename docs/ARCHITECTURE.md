@@ -247,7 +247,8 @@ the load is part of the open transaction (upstream opened a second, autonomous
 connection). Because it holds the wire, a source that itself reads the same
 connection cannot be streamed: `Cursor` sources are read first
 (`Cursor._bulk_row_iterator`) and a `cursor.arrow_stream()` is drained before the
-load starts. Other generators that query the same connection from inside the
+load starts (`write_arrow` with several workers loads over its own connections and
+streams it). Other generators that query the same connection from inside the
 load would deadlock.
 
 mssql-tds's `BulkCopy::write_to_server_zerocopy` drives the load from an

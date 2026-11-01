@@ -189,3 +189,83 @@ def test_columnstore_loads_in_parallel_without_table_lock(conn_str, cursor, tabl
     assert result["rows_copied"] == N_ROWS
     assert set(result) >= {"rows_copied", "batch_count", "elapsed_time", "rows_per_second", "workers"}
     assert _stats(cursor, table) == (N_ROWS, sum(range(N_ROWS)), 0, N_ROWS - 1)
+
+
+class _OnlyArray:
+    """Exposes just ``__arrow_c_array__``, like any non-pyarrow batch type."""
+
+    def __init__(self, batch):
+        self._batch = batch
+
+    def __arrow_c_array__(self, requested_schema=None):
+        return self._batch.__arrow_c_array__(requested_schema)
+
+
+@pytest.mark.parametrize("form", ["list", "generator", "array_protocol_only"])
+def test_iterable_of_record_batches(conn_str, cursor, table_name, form):
+    """r5 F9: an iterable of RecordBatch is a documented source, also with workers > 1."""
+    table = f"dbo.{table_name}"
+    _create_heap(cursor, table)
+    batches = _table().to_batches(max_chunksize=1_000)
+    if form == "list":
+        source = batches
+    elif form == "generator":
+        source = (b for b in batches)
+    else:
+        source = [_OnlyArray(b) for b in batches]
+
+    result = write_arrow(conn_str, table, source, workers=4)
+
+    assert result["rows_copied"] == N_ROWS
+    assert _stats(cursor, table) == (N_ROWS, sum(range(N_ROWS)), 0, N_ROWS - 1)
+
+
+def test_iterable_of_record_batches_errors(conn_str, cursor, table_name):
+    table = f"dbo.{table_name}"
+    _create_heap(cursor, table)
+    with pytest.raises(ValueError, match="empty"):
+        write_arrow(conn_str, table, [], workers=3)
+    with pytest.raises(TypeError, match="__arrow_c_array__"):
+        write_arrow(conn_str, table, [1, 2], workers=3)
+    with pytest.raises(TypeError):
+        write_arrow(conn_str, table, 42, workers=3)
+
+
+_RSS_SCRIPT = textwrap.dedent(
+    """
+    import json, os, resource
+    import mssql_python
+    from mssql_python import write_arrow
+
+    conn_str, table, n = os.environ["CONN"], os.environ["TABLE"], int(os.environ["N"])
+    with mssql_python.connect(conn_str, autocommit=True) as conn:
+        cur = conn.cursor()
+        source = cur.execute(
+            f"SELECT TOP ({n}) CAST(ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS BIGINT) AS id, "
+            "REPLICATE(CAST('x' AS NVARCHAR(MAX)), 400) AS name "
+            "FROM sys.all_objects a CROSS JOIN sys.all_objects b"
+        ).arrow_stream(batch_size=4_000)
+        before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        result = write_arrow(conn_str, table, source, workers=4)
+        after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    print(json.dumps({"rows": result["rows_copied"], "grew_kib": after - before}))
+    """
+)
+
+
+def test_native_stream_source_is_not_buffered_in_memory(conn_str, cursor, table_name):
+    """r5 F15: a native result stream is read on demand, not drained before the workers start."""
+    import json
+
+    table = f"dbo.{table_name}"
+    cursor.execute(f"CREATE TABLE {table} (id BIGINT NOT NULL, name NVARCHAR(400) NULL)")
+    cursor.connection.commit()
+    n = 600_000  # ~240 MB of Arrow data in total
+    env = {**os.environ, "CONN": conn_str, "TABLE": table, "N": str(n)}
+    done = subprocess.run(
+        [sys.executable, "-c", _RSS_SCRIPT], env=env, capture_output=True, text=True, timeout=600
+    )
+    assert done.returncode == 0, done.stderr
+    result = json.loads(done.stdout.strip().splitlines()[-1])
+    assert result["rows"] == n
+    assert result["grew_kib"] < 100 * 1024, result  # buffering the source would add ~240 MB
