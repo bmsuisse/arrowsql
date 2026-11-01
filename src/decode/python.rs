@@ -236,7 +236,7 @@ const NON_ASCII_MASK: u64 = 0xFF80_FF80_FF80_FF80;
 /// Narrow UTF-16LE `src` into `dst` (one byte per unit) while checking that
 /// every unit is ASCII. Returns false at the first non-ASCII unit, leaving
 /// `dst` partly written. `src` must hold exactly `2 * dst.len()` bytes.
-fn narrow_ascii_utf16(src: &[u8], dst: &mut [u8]) -> bool {
+pub(super) fn narrow_ascii_utf16(src: &[u8], dst: &mut [u8]) -> bool {
     debug_assert_eq!(src.len(), dst.len() * 2);
     let mut chunks = src.chunks_exact(8);
     let mut out = dst.chunks_exact_mut(4);
