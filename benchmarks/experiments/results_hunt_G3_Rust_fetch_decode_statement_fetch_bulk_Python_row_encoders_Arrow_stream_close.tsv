@@ -1,0 +1,8 @@
+workload	before_s (3 medians of 5)	after_s (3 medians of 5)	verdict
+uuid_fetchall 100k	0.095,0.097,0.092	0.046,0.096,0.050	kept (2 of 3 rounds ~2x, never worse)
+uuid_fetchone 50k	0.071,0.064,0.061	0.037,0.064,0.035	kept (same pattern)
+nchar_fetchone 50k	0.037,0.049,0.035	0.050,0.035,0.034	kept (noise; removes alloc+scan)
+dec_fetchone x10k	1.373,1.466,1.358	1.447,1.369,1.328	kept (neutral; fixes scale-blind slot)
+arrow_close x100	4.113,4.190,4.154	4.525,4.216,4.184	kept (neutral; dominated by 1M-row cancel)
+bulk 100k guid/date/dec/money	0.154,0.156,0.147	0.146,0.159,0.141	kept (marginal)
+buffer.rs / with_bytes	not benchmarked		kept (strictly less work)
