@@ -424,7 +424,16 @@ async def test_pool_checkin_discards_unread_results_fast(conn_str):
 @pytest.mark.asyncio
 async def test_second_cursor_handover_is_cancellable(conn):
     first = conn.cursor()
-    await first.execute(f"SELECT n, REPLICATE('x', 100) AS s FROM {_NUMBERS.format(n=20000000)}")
+    # Rows 513+ are still on the wire after execute's read-ahead, and row 550
+    # takes minutes to produce: the handover blocks on the server (a big result
+    # alone would be cut off at the drain budget within the 0.2 s).
+    await first.execute(
+        "SELECT n, REPLICATE(CAST(N'x' AS nvarchar(max)), 3000) AS pad, "
+        "IIF(n = 550, (SELECT COUNT_BIG(*) FROM sys.all_columns a CROSS JOIN sys.all_columns b "
+        "CROSS JOIN sys.all_columns c WHERE a.column_id + b.column_id + c.column_id > n), 0) AS slow "
+        "FROM (SELECT TOP 700 ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n "
+        "FROM sys.all_columns a CROSS JOIN sys.all_columns b) AS t"
+    )
     second = conn.cursor()
     task = asyncio.ensure_future(second.execute("SELECT 1"))
     await asyncio.sleep(0.2)
