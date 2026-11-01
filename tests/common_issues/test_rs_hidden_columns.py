@@ -2,6 +2,8 @@
 ROWSTAT of a T-SQL FETCH) never reach the user, like msodbcsql and upstream."""
 
 import asyncio
+import importlib.util
+import sys
 import uuid
 
 import pytest
@@ -9,6 +11,7 @@ import pytest
 from mssql_python import connect, ddbc_bindings
 
 RUST = getattr(ddbc_bindings, "__rust_port__", False)
+HAVE_PYARROW = importlib.util.find_spec("pyarrow") is not None
 rust_only = pytest.mark.skipif(not RUST, reason="Arrow / agent / aio are Rust-port only")
 
 
@@ -83,6 +86,7 @@ def test_server_cursor_fetch_has_no_rowstat(cur):
 
 @rust_only
 def test_arrow_paths(conn_str, cur, browse):
+    pytest.importorskip("pyarrow")
     expect = {"name": ["a", "b", "c"], "seven": [7, 7, 7]}
     sql = q_mid(browse)
     cur.execute(sql)
@@ -109,6 +113,7 @@ def test_agent_rendering(conn_str, browse):
 
 
 @rust_only
+@pytest.mark.skipif(sys.platform == "win32", reason="arrowsql.aio is Unix-only")
 def test_aio(conn_str, browse):
     from arrowsql import aio
 
@@ -121,7 +126,9 @@ def test_aio(conn_str, browse):
             cur = await conn.execute(q_mid(browse))
             assert tuple(await cur.fetchone()) == ("a", 7)
             cur = await conn.execute(q_mid(browse))
-            assert as_dict(await cur.fetchall_arrow()) == {"name": ["a", "b", "c"], "seven": [7, 7, 7]}
+            table = await cur.fetchall_arrow()
+            if HAVE_PYARROW:
+                assert as_dict(table) == {"name": ["a", "b", "c"], "seven": [7, 7, 7]}
             assert [tuple(r) for r in await conn.fetch(q_mid(browse))] == [("a", 7), ("b", 7), ("c", 7)]
         finally:
             await conn.close()
