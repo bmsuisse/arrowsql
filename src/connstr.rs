@@ -210,6 +210,8 @@ pub fn build_context_with(
     }
     // 16384 measured 10-15% faster than the 8000 default on large reads
     // (docs/PERFORMANCE_RESEARCH.md §2); an explicit PacketSize still wins.
+    // Microsoft documents 16383 as the maximum under encryption, but the server grants
+    // 16362 for both and 16383 read ~8% slower under TLS (benchmarks/experiments/results_DE.tsv).
     ctx.packet_size = DEFAULT_PACKET_SIZE;
     if let Some(p) = first(&map, &["packet size", "packetsize"])
         && let Ok(p) = p.parse::<u16>()

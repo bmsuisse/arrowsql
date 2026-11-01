@@ -11,6 +11,7 @@
 //! and row fetches can be interleaved on one result.
 
 use std::borrow::Cow;
+use std::mem::MaybeUninit;
 use std::sync::Arc;
 
 use arrow_array::types::{
@@ -27,7 +28,7 @@ use mssql_tds::datatypes::column_values::{
     SqlSmallMoney, SqlTime, SqlXml,
 };
 use mssql_tds::datatypes::decoder::DecimalParts;
-use mssql_tds::datatypes::row_writer::RowWriter;
+use mssql_tds::datatypes::row_writer::{RowWriter, ValueKind};
 use mssql_tds::datatypes::sql_json::SqlJson;
 use mssql_tds::datatypes::sql_string::EncodingType;
 use mssql_tds::datatypes::sql_vector::SqlVector;
@@ -455,6 +456,18 @@ pub struct ArrowSink {
     plan: Plan,
     columns: Vec<Column>,
     rows: usize,
+    pending: Pending,
+    /// Reused landing buffer for MAX values that need a transcode.
+    scratch: Vec<u8>,
+}
+
+/// The value whose destination was handed to the decoder and not committed yet.
+enum Pending {
+    None,
+    /// Wire bytes land in the column's data buffer; `text` values are validated on commit.
+    Direct { col: usize, length: usize, text: bool },
+    /// Wire bytes land in `scratch` and go through the column's decoder on commit.
+    Scratch { col: usize, length: usize, encoding: EncodingType },
 }
 
 impl ArrowSink {
@@ -471,7 +484,7 @@ impl ArrowSink {
                 column
             })
             .collect();
-        ArrowSink { plan: plan.clone(), columns, rows: 0 }
+        ArrowSink { plan: plan.clone(), columns, rows: 0, pending: Pending::None, scratch: Vec::new() }
     }
 
     pub fn finish(self) -> Result<RecordBatch, String> {
@@ -618,6 +631,69 @@ impl RowWriter for ArrowSink {
         self.columns[col].text(text.as_bytes());
     }
     fn end_row(&mut self) {
+        self.pending = Pending::None;
         self.rows += 1;
+    }
+
+    fn value_destination<'a>(
+        &'a mut self,
+        col: usize,
+        kind: ValueKind<'_>,
+        length: usize,
+    ) -> Option<&'a mut [MaybeUninit<u8>]> {
+        let column = &mut self.columns[col];
+        if column.variant {
+            return None;
+        }
+        let Values::Var { data, .. } = &mut column.values else { return None };
+        match kind {
+            ValueKind::Bytes if column.kind == Kind::Binary => {
+                self.pending = Pending::Direct { col, length, text: false };
+            }
+            ValueKind::String(EncodingType::Utf8) if column.kind != Kind::Binary => {
+                self.pending = Pending::Direct { col, length, text: true };
+            }
+            ValueKind::String(encoding) => {
+                self.pending = Pending::Scratch { col, length, encoding: *encoding };
+                self.scratch.clear();
+                self.scratch.reserve(length);
+                return Some(&mut self.scratch.spare_capacity_mut()[..length]);
+            }
+            _ => return None,
+        }
+        data.reserve(length);
+        Some(&mut data.spare_capacity_mut()[..length])
+    }
+
+    fn commit_value(&mut self, col: usize, complete: bool) {
+        let pending = std::mem::replace(&mut self.pending, Pending::None);
+        if !complete {
+            return;
+        }
+        match pending {
+            Pending::Direct { col: pending_col, length, text } if pending_col == col => {
+                let column = &mut self.columns[col];
+                let Values::Var { offsets, data } = &mut column.values else { return };
+                let start = data.len();
+                // SAFETY: the decoder reported `complete`, so the `length` bytes
+                // handed out by `value_destination` are initialized.
+                unsafe { data.set_len(start + length) };
+                if text && std::str::from_utf8(&data[start..]).is_err() {
+                    let fixed = String::from_utf8_lossy(&data[start..]).into_owned();
+                    data.truncate(start);
+                    data.extend_from_slice(fixed.as_bytes());
+                }
+                offsets.push(data.len() as i64);
+                column.valid.push(true);
+            }
+            Pending::Scratch { col: pending_col, length, encoding } if pending_col == col => {
+                let mut scratch = std::mem::take(&mut self.scratch);
+                // SAFETY: as above, for the scratch buffer.
+                unsafe { scratch.set_len(length) };
+                self.columns[col].encoded(&scratch, encoding);
+                self.scratch = scratch;
+            }
+            _ => {}
+        }
     }
 }

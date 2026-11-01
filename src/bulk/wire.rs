@@ -254,6 +254,10 @@ pub fn put_narrow_text(out: &mut Vec<u8>, dest: &BulkCopyColumnMetadata, layout:
     if text.is_ascii() {
         return put_narrow_bytes(out, dest, layout, text.as_bytes());
     }
+    // A UTF-8 collation stores the Arrow bytes as they are.
+    if dest.collation.is_some_and(|collation| collation.utf8()) {
+        return put_narrow_bytes(out, dest, layout, text.as_bytes());
+    }
     let encoded = match dest.collation {
         Some(collation) => encode_narrow(text, collation).bytes,
         None => text.chars().flat_map(|c| std::iter::repeat_n(u8::try_from(u32::from(c)).unwrap_or(b'?'), c.len_utf16().max(1))).collect(),
