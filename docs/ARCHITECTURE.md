@@ -138,7 +138,8 @@ with msodbcsql + MARS.
    transaction: system-versioned tables stamp rows with its start time.
    `SET IMPLICIT_TRANSACTIONS` is not used (a bare SELECT would not open one).
    If a statement fails and the transaction is gone, the next statement
-   probes `@@OPTIONS & 16384`; with XACT_ABORT on, the next write is rejected
+   probes `@@OPTIONS & 16384`; with XACT_ABORT on, every statement that is not
+   certainly read-only (`src/txn_abort.rs`, shared by sync and async) is rejected
    (25000) until commit()/rollback(), like go-mssqldb. Other failures (a
    conversion error also rolls back) start a new transaction silently.
 4. Untyped `None` params are typed via `sp_describe_undeclared_parameters`
