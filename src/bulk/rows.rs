@@ -40,6 +40,9 @@ const WINDOW_TIME: Duration = Duration::from_millis(20);
 
 static DECIMAL_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static UUID_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static DATE_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static TIME_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static DATETIME_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
 /// How a destination column is converted from Python values.
 #[derive(Clone, Copy)]
@@ -556,13 +559,21 @@ fn with_bytes(cell: &Bound<'_, PyAny>, write: impl FnOnce(&[u8]) -> Result<(), S
         return write(bytes.as_bytes());
     }
     if let Ok(bytes) = cell.cast::<PyByteArray>() {
-        return write(&bytes.to_vec());
+        // SAFETY: the GIL is held and `write` only copies the slice into a Rust
+        // buffer, running no Python code that could resize the bytearray.
+        return write(unsafe { bytes.as_bytes() });
     }
     Err(unsupported(cell, "a binary column"))
 }
 
 fn to_uuid(cell: &Bound<'_, PyAny>) -> Result<[u8; 16], String> {
     let py = cell.py();
+    if let Ok(text) = cell.cast::<PyString>()
+        && let Ok(text) = text.to_str()
+        && let Some(value) = parse_plain_uuid(text.as_bytes())
+    {
+        return Ok(uuid_wire_bytes(value));
+    }
     let class = UUID_TYPE.import(py, "uuid", "UUID").map_err(|err| err.to_string())?;
     let uuid = if cell.is_instance(class).unwrap_or(false) {
         cell.clone()
@@ -576,18 +587,50 @@ fn to_uuid(cell: &Bound<'_, PyAny>) -> Result<[u8; 16], String> {
         .getattr(pyo3::intern!(py, "int"))
         .and_then(|int| int.extract())
         .map_err(|err| err.to_string())?;
+    Ok(uuid_wire_bytes(value))
+}
+
+/// The mixed-endian wire layout of a UUID's 128-bit value.
+fn uuid_wire_bytes(value: u128) -> [u8; 16] {
     let mut bytes = value.to_be_bytes();
     bytes[..4].reverse();
     bytes[4..6].reverse();
     bytes[6..8].reverse();
-    Ok(bytes)
+    bytes
+}
+
+/// The value of a canonical 36-char hyphenated or 32-char plain hex UUID;
+/// anything else is left to `uuid.UUID` so its accepted forms and errors stay.
+fn parse_plain_uuid(text: &[u8]) -> Option<u128> {
+    let hyphenated = match text.len() {
+        36 => true,
+        32 => false,
+        _ => return None,
+    };
+    let mut value: u128 = 0;
+    for (i, &byte) in text.iter().enumerate() {
+        if hyphenated && matches!(i, 8 | 13 | 18 | 23) {
+            if byte != b'-' {
+                return None;
+            }
+            continue;
+        }
+        let digit = (byte as char).to_digit(16)?;
+        value = (value << 4) | u128::from(digit);
+    }
+    Some(value)
 }
 
 /// `cell` as a datetime.date / time / datetime object: strings are parsed as ISO 8601.
 fn temporal<'py>(cell: &Bound<'py, PyAny>, class: &str) -> Result<Bound<'py, PyAny>, String> {
     if cell.is_instance_of::<PyString>() {
-        let module = cell.py().import("datetime").map_err(|err| err.to_string())?;
-        let class = module.getattr(class).map_err(|err| err.to_string())?;
+        let py = cell.py();
+        let (lock, name) = match class {
+            "date" => (&DATE_TYPE, "date"),
+            "time" => (&TIME_TYPE, "time"),
+            _ => (&DATETIME_TYPE, "datetime"),
+        };
+        let class = lock.import(py, "datetime", name).map_err(|err| err.to_string())?;
         return class.call_method1("fromisoformat", (cell,)).map_err(|err| err.to_string());
     }
     Ok(cell.clone())
@@ -653,8 +696,20 @@ fn utc_offset_minutes(value: &Bound<'_, PyAny>) -> Result<i16, String> {
 /// destination's scale. Extra scale is rejected, except for floats: they carry
 /// no exact scale, so they are rounded half to even like mssql_py_core does.
 fn to_decimal(cell: &Bound<'_, PyAny>, dest: &BulkCopyColumnMetadata) -> Result<(bool, u128), String> {
+    if let Some((negative, magnitude)) = exact_int(cell) {
+        return scale_decimal(negative, magnitude, 0, dest, false);
+    }
     let text = number_text(cell, "DECIMAL")?;
     parse_decimal(text.to_str().map_err(|err| err.to_string())?, dest, cell.is_instance_of::<PyFloat>())
+}
+
+/// Sign and magnitude of an exact `int` (not a bool or subclass) that fits an i128.
+fn exact_int(cell: &Bound<'_, PyAny>) -> Option<(bool, u128)> {
+    if !cell.is_exact_instance_of::<PyInt>() {
+        return None;
+    }
+    let value: i128 = cell.extract().ok()?;
+    Some((value < 0, value.unsigned_abs()))
 }
 
 /// A decimal string as `(negative, digits, shift)`: the value is
@@ -690,6 +745,16 @@ fn decimal_digits(text: &str, column: &str) -> Result<(bool, u128, i64), String>
 
 fn parse_decimal(text: &str, dest: &BulkCopyColumnMetadata, round: bool) -> Result<(bool, u128), String> {
     let (negative, digits, shift) = decimal_digits(text, &dest.column_name)?;
+    scale_decimal(negative, digits, shift, dest, round)
+}
+
+fn scale_decimal(
+    negative: bool,
+    digits: u128,
+    shift: i64,
+    dest: &BulkCopyColumnMetadata,
+    round: bool,
+) -> Result<(bool, u128), String> {
     let too_wide = || format!("Decimal value exceeds target precision {} of column '{}'", dest.precision, dest.column_name);
     let to_scale = shift + i64::from(dest.scale);
     let scaled = if to_scale >= 0 {
@@ -730,10 +795,24 @@ fn parse_decimal(text: &str, dest: &BulkCopyColumnMetadata, round: bool) -> Resu
 
 /// A Python number as MONEY: scaled by 10^4, rounded half to even.
 fn to_money(cell: &Bound<'_, PyAny>, dest: &BulkCopyColumnMetadata) -> Result<i128, String> {
+    if let Some((negative, digits)) = exact_int(cell) {
+        let text = || cell.str().map(|s| s.to_string()).unwrap_or_default();
+        return scale_money(negative, digits, 0, dest, &text);
+    }
     let text = number_text(cell, "MONEY")?;
     let text = text.to_str().map_err(|err| err.to_string())?;
     let (negative, digits, shift) = decimal_digits(text, &dest.column_name)?;
-    let overflow = || format!("Value {text} out of range for column '{}'", dest.column_name);
+    scale_money(negative, digits, shift, dest, &|| text.to_string())
+}
+
+fn scale_money(
+    negative: bool,
+    digits: u128,
+    shift: i64,
+    dest: &BulkCopyColumnMetadata,
+    text: &dyn Fn() -> String,
+) -> Result<i128, String> {
+    let overflow = || format!("Value {} out of range for column '{}'", text(), dest.column_name);
     let to_scale = shift + 4;
     let scaled = if to_scale >= 0 {
         let factor = wire::checked_pow10(u32::try_from(to_scale).map_err(|_| overflow())?).ok_or_else(overflow)?;

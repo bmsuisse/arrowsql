@@ -241,16 +241,12 @@ impl RowBuffer {
                 out.arena.extend_from_slice(&self.arena[s.start..s.start + s.len]);
                 Span { start, len: s.len }
             };
-            let cells: Vec<Cell> = src
-                .iter()
-                .map(|cell| match cell {
-                    Cell::Utf8(s) => Cell::Utf8(copy(s)),
-                    Cell::Utf16(s) => Cell::Utf16(copy(s)),
-                    Cell::Bytes(s) => Cell::Bytes(copy(s)),
-                    other => other.clone(),
-                })
-                .collect();
-            out.cells.extend(cells);
+            out.cells.extend(src.iter().map(|cell| match cell {
+                Cell::Utf8(s) => Cell::Utf8(copy(s)),
+                Cell::Utf16(s) => Cell::Utf16(copy(s)),
+                Cell::Bytes(s) => Cell::Bytes(copy(s)),
+                other => other.clone(),
+            }));
         } else {
             if lo < hi {
                 out.arena.extend_from_slice(&self.arena[lo..hi]);

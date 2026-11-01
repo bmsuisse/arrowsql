@@ -76,11 +76,31 @@ pub struct StmtState {
     pub(super) describe_cache: Option<describe::DescribeCache>,
     /// The columns last taken from the client and the metadata they came from.
     last_columns: Option<(MetadataHandle, Arc<Vec<ColumnMetadata>>)>,
+    /// Fixed text widths and LOB flag of `columns`, valid while the Arc is the same.
+    text_shape: Option<TextShape>,
 }
+
+type TextShape = (Arc<Vec<ColumnMetadata>>, Arc<[(usize, usize)]>, bool);
 
 impl StmtState {
     pub fn new() -> Self {
         Self { rowcount: -1, result_done: true, ..Default::default() }
+    }
+
+    /// Fixed text widths and LOB flag of the current columns, cached per column set.
+    fn text_shape(&mut self) -> (Arc<[(usize, usize)]>, bool) {
+        let Some(columns) = self.columns.as_ref() else {
+            return (Arc::from([]), false);
+        };
+        if let Some((cached, widths, has_lob)) = &self.text_shape
+            && Arc::ptr_eq(cached, columns)
+        {
+            return (widths.clone(), *has_lob);
+        }
+        let widths: Arc<[(usize, usize)]> = describe::fixed_text_widths(columns).into();
+        let has_lob = columns.iter().any(describe::is_lob);
+        self.text_shape = Some((columns.clone(), widths.clone(), has_lob));
+        (widths, has_lob)
     }
 
     pub fn ncols(&self) -> usize {
@@ -144,6 +164,7 @@ impl StmtState {
     /// Forget the current result (columns and undelivered rows).
     fn clear_current(&mut self) {
         self.columns = None;
+        self.text_shape = None;
         self.rowcount = -1;
         self.pending.clear();
         self.pending_pos = 0;
@@ -368,15 +389,10 @@ fn deliver(state: &mut StmtState, client: Option<&mut SyncClient>, n: usize, pla
     }
     let mut rows = state.take_pending(n);
     let ncols = state.ncols();
-    if rows.rows > 0
-        && let Some(columns) = state.columns.as_ref()
-    {
-        let widths = describe::fixed_text_widths(columns);
-        if !widths.is_empty() {
-            rows.pad_fixed_text(ncols, &widths);
-        }
+    let (widths, has_lob) = state.text_shape();
+    if rows.rows > 0 && !widths.is_empty() {
+        rows.pad_fixed_text(ncols, &widths);
     }
-    let has_lob = state.columns.as_ref().is_some_and(|cols| cols.iter().any(describe::is_lob));
     let info = state.diag.clone();
     let ret = if rows.rows > 0 {
         if info.is_empty() { SQL_SUCCESS } else { SQL_SUCCESS_WITH_INFO }

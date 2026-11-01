@@ -26,7 +26,7 @@ const DECIMAL_CACHE_SLOTS: usize = 4096;
 #[derive(Default)]
 struct DecimalCache {
     slots: Vec<Option<DecimalSlot>>,
-    mask: usize,
+    bits: u32,
 }
 
 struct DecimalSlot {
@@ -41,7 +41,7 @@ impl DecimalCache {
     fn init(&mut self, rows: usize) {
         let slots = rows.next_power_of_two().max(16).min(slot_limit());
         self.slots = (0..slots).map(|_| None).collect();
-        self.mask = slots - 1;
+        self.bits = slots.trailing_zeros();
     }
 
     /// A new reference to the cached Decimal for `parts`, building and
@@ -78,8 +78,12 @@ impl DecimalCache {
 
     fn index(&self, magnitude: u128, scale: u8, positive: bool) -> usize {
         let folded = (magnitude as u64) ^ ((magnitude >> 64) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let mixed = (folded ^ (u64::from(scale) << 56) ^ u64::from(positive)).wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-        ((mixed >> 32) as usize) & self.mask
+        if self.bits == 0 {
+            return 0;
+        }
+        let key = folded ^ (u64::from(scale) << 1) ^ u64::from(positive);
+        let mixed = key.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+        (mixed >> (64 - self.bits)) as usize
     }
 }
 
