@@ -294,6 +294,14 @@ class _ArrowReader:
     ) -> Dict[str, Any]: ...
 
     # --- RUST-PORT: native Arrow fetch (zero-dependency, Arrow PyCapsule interface) ---
+    def execute_arrow(
+        self,
+        operation: str,
+        params: Optional[Any] = None,
+        *,
+        utf8_strings: bool = True,
+        batch_size: int = 65536,
+    ) -> "ddbc_bindings.ArrowTable": ...
     def fetchall_arrow(self, batch_size: int = 65536) -> "ddbc_bindings.ArrowTable": ...
     def fetchmany_arrow(
         self, size: Optional[int] = None, batch_size: int = 65536

@@ -21,6 +21,7 @@ from typing import Any, List, Optional, Tuple
 
 from arrowsql import ddbc_bindings
 from arrowsql.db_connection import connect
+from arrowsql._utf8_strings import utf8_query
 
 # Slices per worker, and the fewest rows worth a slice (when the row count is known).
 _SLICES_PER_WORKER = 2
@@ -45,6 +46,7 @@ def read_arrow(
     partition_on: Optional[str] = None,
     partitions: int = 1,
     batch_size: int = 65536,
+    utf8_strings: bool = True,
     **connect_kwargs: Any,
 ) -> "ddbc_bindings.ArrowTable":
     """Run ``query`` and return its whole result as a native ``ArrowTable``.
@@ -65,13 +67,26 @@ def read_arrow(
     statements on separate connections, so they read at different points in
     time: the result is not one snapshot, and rows changed concurrently may be
     missed or read twice.
+
+    With ``utf8_strings`` (the default) nvarchar/nchar/ntext columns are cast
+    to UTF-8 varchar on the server, which halves their bytes on the wire for
+    mostly-ASCII text; the Arrow result is the same. It needs SQL Server 2019
+    or Azure SQL and a ``query`` without ORDER BY; otherwise, or when the
+    query cannot be described, the query runs unchanged. Pass False to
+    disable. Costs two extra round trips per call.
     """
     if partitions <= 1 or not partition_on:
-        return _read(connection_str, query, (), batch_size, connect_kwargs)
+        with connect(connection_str, autocommit=True, **connect_kwargs) as conn:
+            if utf8_strings:
+                query = utf8_query(conn, query)
+            return _fetch(conn, query, (), batch_size)
 
     column = _quote_identifier(partition_on)
     with connect(connection_str, autocommit=True, **connect_kwargs) as probe_conn:
-        work = _plan(probe_conn, query, column, partition_on, partitions)
+        plain = query  # the catalog row estimate needs the user's own text
+        if utf8_strings:
+            query = utf8_query(probe_conn, query)
+        work = _plan(probe_conn, query, column, partition_on, partitions, plain)
         if not work:
             return _fetch(probe_conn, query, (), batch_size)
         tables = _run_slices(
@@ -155,7 +170,7 @@ _ROWS_SQL = (
 )
 
 
-def _probe_meta(cursor, query, column) -> Tuple[Optional[int], bool]:
+def _probe_meta(cursor, query, column, plain) -> Tuple[Optional[int], bool]:
     """(estimated row count or None, column may hold NULL) in one round trip.
 
     The row count comes from the catalog and only when ``query`` is a plain
@@ -164,7 +179,7 @@ def _probe_meta(cursor, query, column) -> Tuple[Optional[int], bool]:
     nullability check counts as nullable.
     """
     describe = (f"SELECT {column} FROM ({query}) AS _q",)
-    match = _PLAIN_TABLE.match(query)
+    match = _PLAIN_TABLE.match(plain)
     if match:
         try:
             cursor.execute(f"SELECT {_ROWS_SQL}, {_NULLABLE_SQL}", (match.group(1),) + describe)
@@ -180,7 +195,7 @@ def _probe_meta(cursor, query, column) -> Tuple[Optional[int], bool]:
         return None, True
 
 
-def _plan(conn, query, column, name, partitions) -> List[Tuple[str, tuple]]:
+def _plan(conn, query, column, name, partitions, plain) -> List[Tuple[str, tuple]]:
     """Probe [min, max]; return the slices, or [] to read in one stream."""
     with closing(conn.cursor()) as cursor:
         cursor.execute(f"SELECT MIN({column}), MAX({column}) FROM ({query}) AS _q")
@@ -191,7 +206,7 @@ def _plan(conn, query, column, name, partitions) -> List[Tuple[str, tuple]]:
             raise TypeError(f"partition_on column {name!r} must be an integer column")
         span = high - low + 1
         count = partitions * _SLICES_PER_WORKER
-        rows, has_null = _probe_meta(cursor, query, column)
+        rows, has_null = _probe_meta(cursor, query, column, plain)
         if rows is not None:
             if rows <= _MIN_PARALLEL_ROWS:
                 return []
