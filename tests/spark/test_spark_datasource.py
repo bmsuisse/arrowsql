@@ -227,3 +227,20 @@ def test_bad_bound_and_unknown_column(reader, run_sql, table):
     with pytest.raises(Exception, match="not a column"):
         reader(partitionColumn="nope", **base).load().collect()
 
+
+
+def test_arrow_schema_falls_back_without_timezone_keyword(monkeypatch):
+    # pyspark < 4.2 has no `timezone` keyword on to_arrow_schema.
+    import pyspark.sql.pandas.types as types
+    from pyspark.sql.types import StructField, StructType, TimestampType
+
+    from arrowsql.spark import _arrow_schema
+
+    real = types.to_arrow_schema
+
+    def old(schema, *, error_on_duplicated_field_names_in_struct=False, prefers_large_types=False):
+        return real(schema)
+
+    monkeypatch.setattr(types, "to_arrow_schema", old)
+    out = _arrow_schema(StructType([StructField("t", TimestampType())]))
+    assert str(out.field("t").type).startswith("timestamp[us")

@@ -16,7 +16,7 @@ use mssql_tds::connection::tds_client::{ExecuteOptions, PreparedStatement, Resul
 use mssql_tds::core::CancelHandle;
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::message::transaction_management::TransactionIsolationLevel;
-use mssql_tds::message::parameters::rpc_parameters::{RpcParameter, StatusFlags};
+use mssql_tds::message::parameters::rpc_parameters::RpcParameter;
 use mssql_tds::query::metadata::ColumnMetadata;
 
 use crate::arrow::plan::Plan;
@@ -139,6 +139,12 @@ pub struct Session {
     param_types: HashMap<String, Arc<[(String, String)]>>,
     /// When the TDS login finished (pool `max_lifetime`).
     born: Instant,
+    /// The last statement failed in manual-commit mode: the next operation
+    /// checks whether the server took the transaction with it.
+    last_failed: bool,
+    /// The server rolled the transaction back under XACT_ABORT; writes are
+    /// rejected until commit/rollback (see `crate::txn_abort`).
+    txn_aborted: bool,
 }
 
 /// Drive `fut` (a read of the owner's batch) and, when `cancel` fires meanwhile,
@@ -214,6 +220,8 @@ impl Session {
             cursors: HashMap::new(),
             param_types: HashMap::new(),
             born: Instant::now(),
+            last_failed: false,
+            txn_aborted: false,
         }
     }
 
@@ -246,6 +254,8 @@ impl Session {
         if client.has_active_transaction() {
             client.rollback_transaction(None, None).await.ok()?;
         }
+        self.last_failed = false;
+        self.txn_aborted = false;
         if reset {
             // The server keeps the isolation level across RESETCONNECTION.
             client.execute(RESET_ISOLATION.to_string(), ExecuteOptions::new()).await.ok()?;
@@ -303,7 +313,12 @@ impl Session {
     }
 
     /// Manual-commit mode opens the transaction before the statement, like msodbcsql.
-    async fn prepare_session(&mut self) -> Result<(), Diag> {
+    /// Cancellation reaches the BEGIN on the wire and is checked before any
+    /// user SQL is sent.
+    async fn prepare_session(&mut self, cancel: &OpCancel) -> Result<(), Diag> {
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
         let client = self.client.as_mut().ok_or_else(closed)?;
         if self.autocommit || client.has_active_transaction() {
             return Ok(());
@@ -312,11 +327,62 @@ impl Session {
             .begin_transaction_with_options(
                 TransactionIsolationLevel::NoChange,
                 None,
-                ExecuteOptions::new().timeout_secs(self.timeout),
+                ExecuteOptions::new().timeout_secs(self.timeout).cancel(&cancel.handle),
             )
             .await;
         let _ = client.take_info_messages();
-        result.map_err(|e| diag::records_for_error(&e, "HY000"))
+        match result {
+            Ok(_) if cancel.is_cancelled() => Err(cancelled()),
+            Ok(_) => Ok(()),
+            Err(_) if cancel.is_cancelled() => Err(cancelled()),
+            Err(e) => Err(diag::records_for_error(&e, "HY000")),
+        }
+    }
+
+    /// Everything an operation does before its SQL goes out: notice a
+    /// server-side rollback of the previous statement, open the transaction,
+    /// and refuse writes while the transaction is in that aborted state.
+    async fn begin_operation(&mut self, sql: &str, cancel: &OpCancel) -> Result<(), Diag> {
+        self.detect_server_abort(cancel).await?;
+        self.prepare_session(cancel).await?;
+        if self.txn_aborted && !self.autocommit && !crate::txn_abort::is_read_only(sql) {
+            return Err(vec![crate::txn_abort::rejection()]);
+        }
+        Ok(())
+    }
+
+    /// After a failed statement in manual-commit mode: when the server took
+    /// the transaction with it and XACT_ABORT is on, remember it. A probe that
+    /// is interrupted fails the operation and is retried by the next one.
+    async fn detect_server_abort(&mut self, cancel: &OpCancel) -> Result<(), Diag> {
+        if !self.last_failed {
+            return Ok(());
+        }
+        let client = self.client.as_mut().ok_or_else(closed)?;
+        if self.autocommit || client.has_active_transaction() {
+            self.last_failed = false;
+            return Ok(());
+        }
+        let options = ExecuteOptions::new().timeout_secs(self.timeout).cancel(&cancel.handle);
+        let probed = async {
+            client.execute(crate::txn_abort::XACT_ABORT_PROBE.to_string(), options).await?;
+            client.close_query().await
+        }
+        .await;
+        let _ = client.take_info_messages();
+        match probed {
+            Err(mssql_tds::error::Error::SqlServerError { .. }) => {
+                let _ = client.close_query().await;
+                self.txn_aborted = true;
+            }
+            Err(err) => {
+                discard_batch(client).await;
+                return Err(if cancel.is_cancelled() { cancelled() } else { diag::records_for_error(&err, "HY000") });
+            }
+            Ok(()) => {}
+        }
+        self.last_failed = false;
+        Ok(())
     }
 
     /// Type untyped NULL parameters the way the server infers them (cached).
@@ -402,7 +468,8 @@ impl Session {
             return Err(cancelled());
         }
         self.cursors.insert(cursor, CursorState::default());
-        self.prepare_session().await?;
+        let (Command::Batch(text) | Command::Rpc(text, _)) = &command;
+        self.begin_operation(text, cancel).await?;
         let (sql, params) = match command {
             Command::Rpc(sql, mut params) => {
                 self.resolve_null_types(&sql, &mut params, cancel).await?;
@@ -410,7 +477,9 @@ impl Session {
             }
             Command::Batch(sql) => (sql, None),
         };
-        self.run(cursor, sql, params, prefetch, prefetch_bytes, cancel).await
+        let result = self.run(cursor, sql, params, prefetch, prefetch_bytes, cancel).await;
+        self.last_failed = result.is_err() && !self.autocommit;
+        result
     }
 
     async fn run(
@@ -732,7 +801,7 @@ impl Session {
             return Err(cancelled());
         }
         self.cursors.insert(cursor, CursorState::default());
-        self.prepare_session().await?;
+        self.begin_operation(&sql, cancel).await?;
         if !all_null.is_empty() && !rows.is_empty() {
             let mut probe = ParamSet { types: rows[0].clone(), untyped_nulls: all_null.clone() };
             self.resolve_null_types(&sql, &mut probe, cancel).await?;
@@ -742,6 +811,7 @@ impl Session {
                 }
             }
         }
+        let metadata = crate::params::batch::column_metadata(&rows);
         let timeout = self.timeout;
         let client = self.client.as_mut().ok_or_else(closed)?;
         let mut prepared = PreparedStatement::new(sql);
@@ -751,14 +821,7 @@ impl Session {
         let mut rows = rows.into_iter().enumerate().peekable();
         while rows.peek().is_some() {
             let chunk: Vec<(usize, Vec<SqlType>)> = rows.by_ref().take(EXECUTEMANY_CHUNK).collect();
-            let iter = chunk.into_iter().map(|(i, types)| {
-                let params = types
-                    .into_iter()
-                    .enumerate()
-                    .map(|(j, t)| RpcParameter::new(Some(crate::params::param_name(j + 1)), StatusFlags::NONE, t))
-                    .collect();
-                Ok((i, params))
-            });
+            let iter = chunk.into_iter().map(|(i, types)| Ok((i, crate::params::batch::rpc_parameters(types, &metadata, true))));
             let options = ExecuteOptions::new().timeout_secs(timeout).cancel(&cancel.handle);
             match client.execute_prepared_batch(&mut prepared, iter, &mut orphaned, options).await {
                 Ok(batch) => {
@@ -795,6 +858,7 @@ impl Session {
             let _ = client.unprepare(id, ()).await;
         }
         let _ = client.take_info_messages();
+        self.last_failed = failure.is_some() && !self.autocommit;
         match failure {
             Some(records) => Err(records),
             None => Ok(total.unwrap_or(-1)),
@@ -806,6 +870,8 @@ impl Session {
         if cancel.is_cancelled() {
             return Err(cancelled());
         }
+        self.last_failed = false;
+        self.txn_aborted = false;
         let client = self.client.as_mut().ok_or_else(closed)?;
         if client.has_active_transaction() {
             client.commit_transaction(None, None).await.map_err(|e| diag::records_for_error(&e, "HY000"))?;
@@ -818,6 +884,8 @@ impl Session {
         if cancel.is_cancelled() {
             return Err(cancelled());
         }
+        self.last_failed = false;
+        self.txn_aborted = false;
         let client = self.client.as_mut().ok_or_else(closed)?;
         if client.has_active_transaction() {
             client.rollback_transaction(None, None).await.map_err(|e| diag::records_for_error(&e, "HY000"))?;

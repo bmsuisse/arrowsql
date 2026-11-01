@@ -66,6 +66,8 @@ pub struct RowBuffer {
     pub rows: usize,
     /// Rows the fetch is expected to read; sizes the arena once for large values.
     pub row_hint: usize,
+    /// Byte budget of the fetch (0 = none); caps what is reserved for those rows.
+    pub byte_budget: usize,
 }
 
 /// Small buffers kept per thread so single-row and short fetches (fetchone,
@@ -198,7 +200,9 @@ impl RowBuffer {
     /// faults its pages in twice.
     fn reserve_lob(&mut self, len: usize) {
         if len >= LOB_RESERVE_MIN && self.arena.capacity() - self.arena.len() < len {
-            let more = self.row_hint.saturating_sub(self.rows).clamp(1, LOB_RESERVE_MAX / len + 1);
+            // Rows that fit the rest of the fetch budget, but always this value.
+            let fits = self.byte_budget.saturating_sub(self.byte_size()) / len;
+            let more = self.row_hint.saturating_sub(self.rows).min(fits).clamp(1, LOB_RESERVE_MAX / len + 1);
             self.arena.reserve_exact(len.saturating_mul(more));
         }
     }
@@ -219,13 +223,9 @@ impl RowBuffer {
                 let len = bytes.len() / 2;
                 self.reserve_lob(len);
                 self.arena.reserve(len);
-                // SAFETY: `narrow_ascii_utf16` only writes `dst`, and the length
-                // is extended only after it filled all of it.
-                let narrowed = unsafe {
-                    let dst = std::slice::from_raw_parts_mut(self.arena.as_mut_ptr().add(start), len);
-                    narrow_ascii_utf16(bytes, dst)
-                };
+                let narrowed = narrow_ascii_utf16(bytes, &mut self.arena.spare_capacity_mut()[..len]);
                 if narrowed {
+                    // SAFETY: `narrow_ascii_utf16` initialised all `len` bytes after `start`.
                     unsafe { self.arena.set_len(start + len) };
                     Cell::Utf8(Span { start, len })
                 } else {
@@ -401,5 +401,47 @@ impl RowWriter for RowBuffer {
     }
     fn end_row(&mut self) {
         self.rows += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lob_reservation_respects_fetch_budget() {
+        let value = vec![b'a'; 128 << 10];
+        let budget = 16 << 20;
+        let mut buf = RowBuffer::new();
+        buf.row_hint = 8192;
+        buf.byte_budget = budget;
+        buf.push_span(&value);
+        assert!(buf.arena.capacity() <= budget, "reserved {} bytes", buf.arena.capacity());
+        assert!(buf.arena.capacity() >= 64 * value.len(), "still reserves for the batch");
+    }
+
+    #[test]
+    fn single_value_over_budget_is_still_stored() {
+        let value = vec![7u8; 2 << 20];
+        let mut buf = RowBuffer::new();
+        buf.row_hint = 8192;
+        buf.byte_budget = 1 << 20;
+        let span = buf.push_span(&value);
+        assert_eq!(buf.bytes(span), &value[..]);
+        assert!(buf.arena.capacity() < 2 * value.len());
+    }
+
+    #[test]
+    fn narrow_on_push_keeps_ascii_and_falls_back() {
+        let ascii: Vec<u8> =
+            (0..NARROW_ON_PUSH_MIN).map(|i| if i % 2 == 0 { b'a' + (i % 20) as u8 } else { 0 }).collect();
+        let mut buf = RowBuffer::new();
+        match buf.push_text(&ascii, EncodingType::Utf16) {
+            Cell::Utf8(span) => assert_eq!(span.len, ascii.len() / 2),
+            _ => panic!("ASCII not narrowed"),
+        }
+        let mut wide = ascii.clone();
+        wide[1] = 1;
+        assert!(matches!(buf.push_text(&wide, EncodingType::Utf16), Cell::Utf16(_)));
     }
 }

@@ -226,6 +226,16 @@ def _spark_schema(opts: _Options) -> Any:
     )
 
 
+def _arrow_schema(schema: Any) -> Any:
+    """Spark's Arrow schema for ``schema`` (timestamps in UTC); the ``timezone`` keyword is pyspark >= 4.2."""
+    from pyspark.sql.pandas.types import to_arrow_schema
+
+    try:
+        return to_arrow_schema(schema, timezone="UTC")
+    except TypeError:
+        return to_arrow_schema(schema)
+
+
 def _conform(batch: Any, target: Any, time_zone: str) -> Any:
     """Cast an arrow batch to Spark's expected arrow schema (positional).
 
@@ -350,9 +360,8 @@ class _ArrowSqlReader(DataSourceReader):
 
     def read(self, partition: InputPartition):  # type: ignore[override]
         import pyarrow as pa
-        from pyspark.sql.pandas.types import to_arrow_schema
 
-        opts, target = self.opts, to_arrow_schema(self.schema, timezone="UTC")
+        opts, target = self.opts, _arrow_schema(self.schema)
         time_zone = opts.time_zone or "UTC"
         stream = self._open(partition)
         try:

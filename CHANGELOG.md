@@ -21,6 +21,16 @@ Version numbers in this project are deliberately three different things:
   hash partitioning, `timestampType`, unsigned widening) and write with the Arrow bulk copy.
   Optional extra `arrowsql[spark]`; `import arrowsql` does not import pyspark.
 
+### Fixed
+
+- Async `executemany` with a leading NULL decimal no longer declares the whole
+  batch `decimal(18,10)` (later values lost digits).
+- Async manual-commit `BEGIN` obeys cancellation.
+- After a server-side rollback under XACT_ABORT, writes stay rejected (25000)
+  until `commit()`/`rollback()`: the guard sees through comments, CTEs and
+  `BEGIN TRY` blocks, is no longer consumed by the first rejection and also
+  covers the async API.
+
 ## [0.2.0] - 2026-11-01
 
 ### Added
