@@ -14,7 +14,7 @@ use mssql_tds::connection::tds_client::{
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::error::Error as TdsError;
 use mssql_tds::message::transaction_management::TransactionIsolationLevel;
-use mssql_tds::message::parameters::rpc_parameters::{RpcParameter, StatusFlags};
+use mssql_tds::message::parameters::rpc_parameters::RpcParameter;
 
 use super::StmtShared;
 use super::cancel::StmtCancel;
@@ -161,11 +161,9 @@ fn recover(client: &mut SyncClient) {
 /// transaction. Other failures (e.g. a conversion error) roll back too, but
 /// msodbcsql silently starts a new transaction.
 fn xact_abort_is_on(client: &mut SyncClient, timeout: u32, cancel: &StmtCancel) -> bool {
-    // @@OPTIONS bit 16384 is XACT_ABORT; a server error answers "yes".
-    const PROBE: &str = "IF (@@OPTIONS & 16384) = 16384 RAISERROR('xact_abort', 16, 1)";
     let opts = options(timeout, cancel);
     let result = client.block_on(|c| async move {
-        c.execute(PROBE.to_string(), opts).await?;
+        c.execute(crate::txn_abort::XACT_ABORT_PROBE.to_string(), opts).await?;
         c.close_query().await
     });
     let _ = client.take_info_messages();
@@ -330,25 +328,14 @@ fn describe_row(rows: &RowBuffer, row: &[Cell]) -> Option<DescribedParam> {
     })
 }
 
-/// Statements that change data or schema, judged by their first keyword.
-fn is_write(sql: &str) -> bool {
-    let word = sql.trim_start().split(|c: char| !c.is_ascii_alphabetic()).next().unwrap_or("");
-    ["INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE", "CREATE", "ALTER", "DROP", "EXEC", "EXECUTE", "BULK"]
-        .iter()
-        .any(|w| word.eq_ignore_ascii_case(w))
-}
-
 /// Rejects a write issued after the server aborted the caller's transaction
-/// (XACT_ABORT), like go-mssqldb: it would run outside that transaction and a
-/// later commit() would persist it. The caller's rollback() clears the state.
+/// (XACT_ABORT), see [`crate::txn_abort`]. The state stays until the caller's
+/// commit() or rollback() ends it.
 fn reject_write_after_abort(ex: &mut Exclusive<'_>, sql: &str) -> bool {
-    if !is_write(sql) || !ex.conn.take_txn_aborted() {
+    if !ex.conn.txn_aborted() || crate::txn_abort::is_read_only(sql) {
         return false;
     }
-    ex.state.diag.push(DiagRecord::driver(
-        "25000",
-        "The server rolled back the transaction after an error; the statement was not run. Call rollback() to continue.",
-    ));
+    ex.state.diag.push(crate::txn_abort::rejection());
     true
 }
 
@@ -444,6 +431,8 @@ fn run_batch(ex: &mut Exclusive<'_>, sql: String, mut rows: Vec<Vec<SqlType>>, a
             }
         }
     }
+    let metadata = crate::params::batch::column_metadata(&rows);
+    let metadata = &metadata;
     let mut prepared = PreparedStatement::new(sql);
     let mut orphaned = None;
     let mut progress = BatchProgress::default();
@@ -458,7 +447,7 @@ fn run_batch(ex: &mut Exclusive<'_>, sql: String, mut rows: Vec<Vec<SqlType>>, a
         let base = offset;
         offset += chunk.len();
         let is_last = remaining.len() == 0;
-        let params = chunk.into_iter().enumerate().map(move |(i, types)| Ok((base + i, name_positionally(types))));
+        let params = chunk.into_iter().enumerate().map(move |(i, types)| Ok((base + i, crate::params::batch::rpc_parameters(types, metadata, false))));
         let opts = options(ex.timeout, ex.cancel);
         let result = ex.client.block_on(|c| c.begin_execute_prepared_batch(&mut prepared, params, &mut orphaned, opts));
         ex.state.diag.extend(diag::info_records(&ex.client.take_info_messages()));
@@ -481,12 +470,6 @@ fn run_batch(ex: &mut Exclusive<'_>, sql: String, mut rows: Vec<Vec<SqlType>>, a
     let _ = ex.client.take_info_messages();
     ex.state.rowcount = progress.total_rows_affected.unwrap_or(-1);
     ret
-}
-
-fn name_positionally(types: Vec<SqlType>) -> Vec<RpcParameter> {
-    // sp_execute takes the values in the order sp_prepare declared them, so no
-    // per-row `@Pn` name is built or sent.
-    types.into_iter().map(|t| RpcParameter::new(None, StatusFlags::NONE, t)).collect()
 }
 
 /// Error 2628 (verbose truncation) is data-related (22001) when a batch row

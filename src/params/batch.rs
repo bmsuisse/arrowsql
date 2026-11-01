@@ -14,6 +14,7 @@ use mssql_tds::core::TdsResult;
 use mssql_tds::datatypes::decoder::{DECIMAL_STR_LEN, DecimalParts};
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::error::Error;
+use mssql_tds::message::parameters::rpc_parameters::{RpcParameter, RpcTypeMetadata, StatusFlags};
 
 /// Largest integer magnitude an `f64` holds exactly (2^53).
 const MAX_EXACT_F64_INT: u64 = 1 << 53;
@@ -443,6 +444,44 @@ pub fn normalize(rows: &mut [Vec<SqlType>], nulls: &[Vec<bool>]) -> TdsResult<Ve
         }
     }
     Ok(all_null)
+}
+
+/// Precision/scale a NULL decimal cell cannot carry, per column, taken from the first
+/// non-NULL cell of the (normalised) column. `None` for other columns.
+///
+/// The prepared declaration comes from row 0, so a NULL there would otherwise
+/// declare the TDS default (`decimal(18,10)`) for the whole
+/// batch and round every later value to it.
+pub fn column_metadata(rows: &[Vec<SqlType>]) -> Vec<Option<RpcTypeMetadata>> {
+    let ncols = rows.first().map_or(0, Vec::len);
+    (0..ncols)
+        .map(|col| match &rows[0][col] {
+            SqlType::Decimal(None) | SqlType::Numeric(None) => rows.iter().find_map(|row| {
+                decimal_parts(&row[col])
+                    .map(|p| RpcTypeMetadata { precision: Some(p.precision), scale: Some(p.scale) })
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The RPC parameters of one executemany row. `metadata` (from
+/// [`column_metadata`]) types the NULL cells of decimal columns;
+/// `named` adds `@P<n>` names (sp_execute takes values positionally, so the
+/// sync path omits them).
+pub fn rpc_parameters(types: Vec<SqlType>, metadata: &[Option<RpcTypeMetadata>], named: bool) -> Vec<RpcParameter> {
+    types
+        .into_iter()
+        .enumerate()
+        .map(|(j, t)| {
+            let name = named.then(|| crate::params::param_name(j + 1));
+            let parameter = RpcParameter::new(name, StatusFlags::NONE, t);
+            match metadata.get(j).copied().flatten() {
+                Some(m) => parameter.with_type_metadata(m),
+                None => parameter,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
