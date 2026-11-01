@@ -26,7 +26,7 @@ def _apply_converter(converter, value):
         return value
 
 
-class Row(RowCore):
+class Row(RowCore):  # RUST-PORT: native base, see docs/PYTHON_LAYER_CHANGES.md
     """
     A row of data from a cursor fetch operation. Provides both tuple-like indexing
     and attribute access to column values.

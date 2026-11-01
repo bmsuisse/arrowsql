@@ -253,6 +253,27 @@ and now uses about 1.3 us (measured with the native calls stubbed).
 - `cursor.py` `executemany`: a first row that is a `str` or `bytes` raises
   `TypeError`. A set of strings used to insert each string as a row.
 
+## `RowCore` native row base (PR #4, `row.py`, RUST-PORT)
+
+- `row.py` `Row` derives from `ddbc_bindings.RowCore` (`src/rowfactory.rs`). The
+  five internal fields (`_row_values`, `_column_map`, `_row_cursor`,
+  `_column_map_lower`, `_column_names`) live in Rust; indexing, slicing, column
+  attribute access, comparison, `copy` / pickle (`__reduce__`), `__str__` and
+  `__repr__` run natively. `Row.__slots__` is empty; `vars(row)` holds only
+  user attributes.
+- `Row._fast_create` / `_converted_create` and `cursor.py` fetch paths build rows
+  through `make_row_fast` / `construct_rows`, which allocate through
+  `RowCore.__new__` and fill the fields without `Row.__init__`.
+  `RowCore` takes part in the cyclic GC (`__traverse__` / `__clear__`).
+
+## Rust error dispatch (PR #8, `exceptions.py`, RUST-PORT)
+
+- The SQLSTATE-to-exception-class table, the 1222 / 2628 / 8114 promotions and
+  the `driver_error` / `ddbc_error` / `sqlstate` / `native_error` attributes are
+  built in `src/errors.rs`. The functions of the same names in `exceptions.py`
+  delegate to it; `DDBCRaiseFor` raises the exception for a statement. The
+  native `Connection` and `getinfo` raise typed DB-API exceptions directly.
+
 ## aio review fixes (r2_aio)
 
 - `aio.py` (port-only module): `AsyncCursor.__del__` retires the native cursor;

@@ -38,9 +38,12 @@ Parsed natively (`src/connstr.rs`) and by the vendored Python layer.
 | `Encrypt` (`yes`/`no`/`strict`), `TrustServerCertificate`, `HostNameInCertificate`, `ServerCertificate` | supported (rustls; TLS 1.2 / 1.3). `Encrypt=strict` is implemented but not verifiable against the local SQL Server 2022 container |
 | `ConnectRetryCount`, `ConnectRetryInterval`, `MultiSubnetFailover`, `ApplicationIntent`, `PacketSize`, `Connection Timeout` | supported |
 | `Trusted_Connection=yes` / `Integrated Security=sspi` | Kerberos via GSSAPI (library loaded at runtime) on Unix, SSPI on Windows; not tested here |
-| `Authentication=ActiveDirectoryDefault`, `ActiveDirectoryInteractive`, `ActiveDirectoryDeviceCode`, `ActiveDirectoryMSI`, `ActiveDirectoryServicePrincipal` | acquired in Python with `azure-identity` (the `[azure]` extra) and passed as an access token; not tested against Entra ID here |
+| `Authentication=ActiveDirectoryDefault`, `ActiveDirectoryInteractive`, `ActiveDirectoryDeviceCode`, `ActiveDirectoryMSI` | acquired in Python with `azure-identity` (the `[azure]` extra) and passed as an access token; not tested against Entra ID here |
+| `Authentication=ActiveDirectoryServicePrincipal` | native FedAuth; the token factory (azure-identity `ClientSecretCredential`, UID = client id, PWD = secret) runs once the server names the tenant; not tested against Entra ID here |
 | `token_provider=` / `attrs_before={1256: ...}` (access token) | supported |
-| `Authentication=ActiveDirectoryPassword`, `SqlPassword`, `ActiveDirectoryIntegrated`, NTLM (`DOMAIN\user`) | not supported |
+| `Authentication=SqlPassword` | supported (SQL login, same as no `Authentication`) |
+| `Authentication=ActiveDirectoryPassword` | supported: native FedAuth, token from azure-identity `UsernamePasswordCredential` (fails for MFA accounts); not tested against Entra ID here |
+| `Authentication=ActiveDirectoryIntegrated`, `ActiveDirectoryWorkloadIdentity`, NTLM (`DOMAIN\user`) | not supported (`InterfaceError`; use `Trusted_Connection=yes` or `token_provider=`) |
 | Always Encrypted (`ColumnEncryption`) | not supported |
 
 
