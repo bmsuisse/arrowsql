@@ -112,8 +112,11 @@ impl ConnShared {
 
     pub fn cache_param_types(&self, sql: &str, types: Arc<[DescribedParam]>) {
         let mut cache = self.param_types.lock();
-        if cache.len() >= PARAM_TYPE_CACHE_SIZE {
-            cache.clear();
+        // Drop one entry rather than all of them, so the hot statements stay cached.
+        if cache.len() >= PARAM_TYPE_CACHE_SIZE && !cache.contains_key(sql) {
+            if let Some(key) = cache.keys().next().cloned() {
+                cache.remove(&key);
+            }
         }
         cache.insert(sql.to_string(), types);
     }

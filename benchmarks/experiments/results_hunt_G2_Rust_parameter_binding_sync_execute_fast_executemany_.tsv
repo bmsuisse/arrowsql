@@ -1,0 +1,11 @@
+item	benchmark	metric	baseline	candidate	runs	decision	note
+1 py_time/py_time_value exact fast path	execute SELECT ? (time) x20k	wall s, median of 5 interleaved	1.6773	1.6739	5	kept	flat; per-execute cost is ~80us of TDS round trip, saved ~2us is below noise
+1 py_time/py_time_value exact fast path	executemany 20k rows TIME+DTO+int/Decimal	client CPU s, median of 5	0.1343	0.1156	5	kept	-14% client CPU (combined with items 2 and 5; 4 of 5 new runs below every base median)
+2 aware datetime UTC cache, PyDelta offset, Hinnant days	execute SELECT ? (aware datetime) x20k	wall s	1.7060	1.6125	5	kept	-5.5% wall, directionally consistent (noisy: base 1.57-1.92)
+3 UUID .int + date/uuid direct dispatch	execute SELECT ? (uuid) x20k	wall s	1.5903	1.6497	5	kept	within noise (base 1.52-1.81, new 1.51-1.68); less work, no regression proven
+3 date direct dispatch	execute SELECT ? (date) x20k	wall s	1.7188	1.7320	5	kept	within noise
+4 round_to_scale pure Rust + cached money quantizer	setinputsizes DECIMAL(10,2) + Decimal('1.23456') x20k	wall s	1.8495	1.8063	5	kept	-2.3%, within noise; removes a Decimal/Context construction per hinted value
+5 int+Decimal mixed unify without text	executemany 20k rows (see item 1 row)	client CPU s	0.1343	0.1156	5	kept	not separable from items 1 and 2 in the combined bench; equivalence test against the text path passes
+6 param type cache evicts one entry	600 distinct SQL x NULL param, 2 passes per repeat (describe succeeds)	wall s	0.4049	0.1855	5	kept	-54%: the cyclic scan no longer thrashes a cleared cache
+6 resolve_null_types ordinal match	-	-	-	-	-	kept	no per-NULL String allocation; covered by untyped-NULL tests
+7 placeholders thread_local memo, write!, capacity	covered by unit test with 2000 markers; not separately timed	-	-	-	-	kept	no lock; output byte-identical (unit tests)
