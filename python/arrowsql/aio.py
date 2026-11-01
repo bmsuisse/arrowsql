@@ -122,6 +122,16 @@ class AsyncCursor:
     def connection(self) -> "AsyncConnection":
         return self._conn
 
+    def _retire(self) -> None:
+        """Forget the current result: no row, description or count survives it."""
+        self._batch = None
+        self._rows = []
+        self._pos = 0
+        self._done = True
+        self.description = None
+        self.rowcount = -1
+        self.messages = []
+
     def _install(self, result) -> None:
         shape, batch, done, rowcount, messages = result
         self._batch = batch
@@ -135,9 +145,12 @@ class AsyncCursor:
     def _check(self) -> None:
         if self._closed:
             raise _interface_error("Cursor is closed")
+        if self._conn._closed:
+            raise _interface_error("Connection is closed")
 
     async def execute(self, operation: str, *parameters: Any) -> "AsyncCursor":
         self._check()
+        self._retire()  # a failed or cancelled execute leaves no stale rows behind
         params = _params(parameters) if parameters else None
         result = await _wait(self._c, self._c.execute(_hub(), self._id, operation, params))
         self._install(result)
@@ -145,10 +158,8 @@ class AsyncCursor:
 
     async def executemany(self, operation: str, seq_of_parameters: Sequence[Sequence[Any]]) -> None:
         self._check()
+        self._retire()
         rows = await _wait(self._c, self._c.executemany(_hub(), self._id, operation, seq_of_parameters))
-        self._batch = None
-        self._done = True
-        self.description = None
         self.rowcount = rows
 
     async def _more(self, n: int) -> list:
@@ -172,6 +183,7 @@ class AsyncCursor:
         return out
 
     async def fetchone(self) -> Optional[Any]:
+        self._check()
         batch = self._batch
         if batch is not None:
             row = batch.next()
@@ -189,6 +201,7 @@ class AsyncCursor:
         return await self.fetchone()
 
     async def fetchmany(self, size: Optional[int] = None) -> list:
+        self._check()
         size = self.arraysize if size is None else size
         out = self._local(size)
         while len(out) < size and not self._done:
@@ -200,6 +213,7 @@ class AsyncCursor:
         return out
 
     async def fetchall(self) -> list:
+        self._check()
         out = self._local(2**62)
         while not self._done:  # a result that fails after some rows ends with the error
             more = await self._more(2**62)
@@ -227,9 +241,7 @@ class AsyncCursor:
         self._check()
         result = await _wait(self._c, self._c.nextset(_hub(), self._id))
         if result is None:
-            self._batch = None
-            self._done = True
-            self.description = None
+            self._retire()
             return None
         self._install(result)
         return True
@@ -237,7 +249,7 @@ class AsyncCursor:
     async def close(self) -> None:
         if not self._closed:
             self._closed = True
-            self._batch = None
+            self._retire()
             self._c.close_cursor(self._id)
 
     def __del__(self):
@@ -253,6 +265,7 @@ class AsyncCursor:
         return self
 
     async def __anext__(self):
+        self._check()
         batch = self._batch
         if batch is not None:
             row = batch.next()

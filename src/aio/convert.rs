@@ -105,11 +105,9 @@ pub fn rows_range<'py>(
             return Err(PyErr::fetch(py));
         }
         let list = Bound::from_owned_ptr(py, list);
-        if ncols == 0 {
-            return Ok(list.cast_into_unchecked());
-        }
-        let rows = buf.cells[from * ncols..(from + count) * ncols].chunks_exact(ncols);
-        for (i, row) in rows.enumerate() {
+        for i in 0..count {
+            // A result without visible columns still has rows (empty ones).
+            let row = if ncols == 0 { &[][..] } else { &buf.cells[(from + i) * ncols..(from + i + 1) * ncols] };
             let values = row_values(py, buf, row, as_tuple)?;
             let item = match (&row_type, shape) {
                 (Some(t), Some(s)) => make_row(py, t, values, s)?,
@@ -134,9 +132,13 @@ pub fn rows_to_list<'py>(
 
 /// Rows read ahead by `execute`, turned into Python rows only when fetched
 /// (or moved into Arrow untouched by `fetchall_arrow`).
+///
+/// The buffer sits behind an `Arc` so conversion - which runs Python code that
+/// can reach back into this batch (allocation can trigger a GC finalizer) -
+/// happens without holding the mutex.
 #[pyclass(name = "AioRowBatch", module = "ddbc_bindings", frozen)]
 pub struct RowBatch {
-    state: Mutex<(RowBuffer, usize)>,
+    state: Mutex<(Arc<RowBuffer>, usize)>,
     ncols: usize,
     shape: Arc<Shape>,
     as_tuple: bool,
@@ -144,27 +146,40 @@ pub struct RowBatch {
 
 impl RowBatch {
     pub fn new(rows: RowBuffer, ncols: usize, shape: Arc<Shape>, as_tuple: bool) -> Self {
-        Self { state: Mutex::new((rows, 0)), ncols, shape, as_tuple }
+        Self { state: Mutex::new((Arc::new(rows), 0)), ncols, shape, as_tuple }
     }
 
-    fn retire_if_drained(buf: &mut RowBuffer, pos: &mut usize) {
-        if *pos == buf.rows {
-            buf.clear_and_trim();
-            *pos = 0;
+    /// The buffer and the next row position, to convert outside the lock.
+    fn snapshot(&self) -> (Arc<RowBuffer>, usize) {
+        let state = self.state.lock();
+        (Arc::clone(&state.0), state.1)
+    }
+
+    /// Mark `count` rows (starting at `from`) delivered.
+    fn advance(&self, from: usize, count: usize) {
+        let mut state = self.state.lock();
+        if state.1 != from {
+            return; // someone else moved the batch while we converted
+        }
+        state.1 += count;
+        if state.1 >= state.0.rows {
+            *state = (Arc::new(RowBuffer::default()), 0);
         }
     }
 
     /// The undelivered rows, leaving the batch empty.
     pub fn take_rest(&self) -> Option<(RowBuffer, usize)> {
         let mut state = self.state.lock();
-        let (buf, pos) = &mut *state;
-        let remaining = buf.rows - *pos;
+        let (buf, pos) = std::mem::replace(&mut *state, (Arc::new(RowBuffer::default()), 0));
+        let remaining = buf.rows - pos;
         if remaining == 0 {
             return None;
         }
-        let rest = if *pos == 0 { std::mem::take(buf) } else { buf.slice_rows(self.ncols, *pos, remaining) };
-        buf.clear_and_trim();
-        *pos = 0;
+        let rest = match Arc::try_unwrap(buf) {
+            Ok(owned) if pos == 0 => owned,
+            Ok(owned) => owned.slice_rows(self.ncols, pos, remaining),
+            Err(shared) => shared.slice_rows(self.ncols, pos, remaining),
+        };
         Some((rest, self.ncols))
     }
 }
@@ -174,39 +189,21 @@ impl RowBatch {
     /// Up to `n` rows (all remaining when `n` is None).
     #[pyo3(signature = (n=None))]
     fn take<'py>(&self, py: Python<'py>, n: Option<usize>) -> PyResult<Bound<'py, PyList>> {
-        let mut state = self.state.lock();
-        let (buf, pos) = &mut *state;
-        let count = n.unwrap_or(usize::MAX).min(buf.rows - *pos);
-        let list = rows_range(py, buf, self.ncols, *pos, count, Some(&self.shape), self.as_tuple)?;
-        *pos += count;
-        Self::retire_if_drained(buf, pos);
+        let (buf, pos) = self.snapshot();
+        let count = n.unwrap_or(usize::MAX).min(buf.rows - pos);
+        let list = rows_range(py, &buf, self.ncols, pos, count, Some(&self.shape), self.as_tuple)?;
+        self.advance(pos, count);
         Ok(list)
     }
 
     /// The next row, or None when the batch is exhausted.
     fn next<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        let mut state = self.state.lock();
-        let (buf, pos) = &mut *state;
-        if *pos >= buf.rows {
+        let (buf, pos) = self.snapshot();
+        if pos >= buf.rows {
             return Ok(None);
         }
-        let row = if self.ncols == 0 {
-            rows_range(py, buf, 0, *pos, 1, Some(&self.shape), self.as_tuple)?.get_item(0)?
-        } else {
-            let from = *pos * self.ncols;
-            let cells = &buf.cells[from..from + self.ncols];
-            let row_type = if self.as_tuple { None } else { Some(ROW_TYPE.import(py, "arrowsql.row", "Row")?) };
-            unsafe {
-                let values = row_values(py, buf, cells, self.as_tuple)?;
-                let item = match row_type {
-                    Some(t) => make_row(py, t, values, &self.shape)?,
-                    None => values,
-                };
-                Bound::from_owned_ptr(py, item)
-            }
-        };
-        *pos += 1;
-        Self::retire_if_drained(buf, pos);
+        let row = rows_range(py, &buf, self.ncols, pos, 1, Some(&self.shape), self.as_tuple)?.get_item(0)?;
+        self.advance(pos, 1);
         Ok(Some(row))
     }
 
