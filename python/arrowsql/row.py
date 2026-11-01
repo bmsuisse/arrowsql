@@ -68,6 +68,39 @@ class Row:
         r._column_names = column_names
         return r
 
+    @staticmethod
+    def _converted_create(
+        values, pairs, column_map, cursor, column_map_lower, column_names, uuid_idx
+    ):
+        """Construct a Row bypassing __init__ when output converters apply.
+
+        ``pairs`` is ``((column index, converter), ...)`` for the converted columns
+        only. Same semantics as ``_apply_output_converters_optimized``: None is
+        skipped, str is passed as UTF-16-LE bytes, a failing converter keeps the
+        original value. The values are copied once.
+        """
+        converted = list(values)
+        for i, converter in pairs:
+            value = values[i]
+            if value is None:
+                continue
+            try:
+                if isinstance(value, str):
+                    converted[i] = converter(value.encode("utf-16-le"))
+                else:
+                    converted[i] = converter(value)
+            except Exception:
+                pass
+        r = Row.__new__(Row)
+        r._row_values = converted
+        r._column_map = column_map
+        r._row_cursor = cursor
+        r._column_map_lower = column_map_lower
+        r._column_names = column_names
+        if uuid_idx:
+            r._stringify_uuids(uuid_idx)
+        return r
+
     def __init__(
         self,
         values,
@@ -227,8 +260,10 @@ class Row:
         if isinstance(index, str):
             # A row built without a column map has no named columns, so any
             # string key is simply absent (KeyError), never a TypeError.
-            if self._column_map is not None and index in self._column_map:
-                return self._row_values[self._column_map[index]]
+            if self._column_map is not None:
+                idx = self._column_map.get(index)
+                if idx is not None:
+                    return self._row_values[idx]
             # O(1) case-insensitive lookup when lowercase is enabled
             if self._column_map_lower is not None:
                 idx = self._column_map_lower.get(index.lower())
@@ -253,8 +288,9 @@ class Row:
         """
         # Handle lowercase attribute access - if lowercase is enabled,
         # try to match attribute names case-insensitively
-        if name in self._column_map:
-            return self._row_values[self._column_map[name]]
+        idx = self._column_map.get(name)
+        if idx is not None:
+            return self._row_values[idx]
 
         # O(1) case-insensitive lookup when lowercase is enabled
         if self._column_map_lower is not None:
@@ -367,6 +403,30 @@ class Row:
         return repr(tuple(self._row_values))
 
 
+# RowMapping key data per result set: ``id(names)`` -> (names, unique keys, key set).
+# Every row of a result set shares one ``_column_names`` tuple, so the
+# de-duplicated keys are computed once instead of on every lookup. The entry
+# holds ``names`` itself, so an id can only match while that tuple is alive.
+_MAPPING_KEYS_CACHE: dict = {}
+_MAPPING_KEYS_CACHE_MAX = 64
+
+
+def _mapping_key_entry(row: "Row"):
+    names = row._column_names
+    if names is None:
+        unique = tuple(dict.fromkeys(row._mapping_keys()))
+        return (None, unique, frozenset(unique))
+    entry = _MAPPING_KEYS_CACHE.get(id(names))
+    if entry is not None and entry[0] is names:
+        return entry
+    unique = tuple(dict.fromkeys(names))
+    entry = (names, unique, frozenset(unique))
+    if len(_MAPPING_KEYS_CACHE) >= _MAPPING_KEYS_CACHE_MAX:
+        _MAPPING_KEYS_CACHE.clear()
+    _MAPPING_KEYS_CACHE[id(names)] = entry
+    return entry
+
+
 class RowMapping(Mapping):
     """Read-only ``Mapping`` view over a :class:`Row` (column name -> value).
 
@@ -388,19 +448,15 @@ class RowMapping(Mapping):
         # Row.__getitem__ additionally accepts case-insensitive names and catalog
         # aliases, but those are not iterated keys, so the view must not resolve
         # them here.
-        if isinstance(key, str) and key in self._row._mapping_keys():
+        if isinstance(key, str) and key in _mapping_key_entry(self._row)[2]:
             return self._row[key]
         raise KeyError(key)
 
     def __iter__(self):
-        seen = set()
-        for name in self._row._mapping_keys():
-            if name not in seen:
-                seen.add(name)
-                yield name
+        return iter(_mapping_key_entry(self._row)[1])
 
     def __len__(self) -> int:
-        return sum(1 for _ in self)
+        return len(_mapping_key_entry(self._row)[1])
 
     def __repr__(self) -> str:
         return f"RowMapping({dict(self)!r})"

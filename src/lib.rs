@@ -135,6 +135,8 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_decimal_separator, m)?)?;
     m.add_function(wrap_pyfunction!(sql_fetch, m)?)?;
     m.add_function(wrap_pyfunction!(sql_get_data, m)?)?;
+    m.add_function(wrap_pyfunction!(params::pyformat::scan_pyformat, m)?)?;
+    m.add_function(wrap_pyfunction!(params::pyformat::has_unquoted_qmark, m)?)?;
 
     m.add_function(wrap_pyfunction!(pooling::enable_pooling, m)?)?;
     m.add_function(wrap_pyfunction!(pooling::close_pooling, m)?)?;
