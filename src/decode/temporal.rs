@@ -61,6 +61,17 @@ fn makers(py: Python<'_>) -> PyResult<&'static Makers> {
         .ok_or_else(|| PyRuntimeError::new_err("temporal constructors are not initialised"))
 }
 
+/// (year, month, day) -> days since 0001-01-01, the inverse of [`civil`]
+/// (Hinnant's days_from_civil). Negative before 0001-01-01.
+pub fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let year_of_era = y - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 306
+}
+
 /// Days since 0001-01-01 -> (year, month, day). Hinnant's civil_from_days.
 pub fn civil(days: u32) -> (i32, u8, u8) {
     // Shift epoch from 0001-01-01 to 0000-03-01.
@@ -173,5 +184,21 @@ mod tests {
         assert_eq!(civil(693_595), (1900, 1, 1));
         assert_eq!(civil(3_652_058), (9999, 12, 31));
         assert_eq!(civil(730_119), (2000, 1, 1));
+    }
+}
+
+#[cfg(test)]
+mod civil_tests {
+    use super::{civil, days_from_civil};
+
+    #[test]
+    fn days_from_civil_inverts_civil() {
+        assert_eq!(days_from_civil(1, 1, 1), 0);
+        assert_eq!(days_from_civil(1970, 1, 1), 719_162);
+        assert_eq!(days_from_civil(9999, 12, 31), 3_652_058);
+        for days in (0..=3_652_058u32).step_by(7) {
+            let (y, m, d) = civil(days);
+            assert_eq!(days_from_civil(i64::from(y), i64::from(m), i64::from(d)), i64::from(days));
+        }
     }
 }

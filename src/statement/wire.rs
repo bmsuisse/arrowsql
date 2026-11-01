@@ -38,6 +38,8 @@ const ABANDON_SETTLE_SECS: u32 = 5;
 /// sending an attention instead.
 const SKIM_BUDGET_BYTES: usize = 8 << 20;
 const SKIM_CHUNK_ROWS: usize = 4096;
+/// Longest time closing a result waits for the rest of its rows.
+const SKIM_WAIT_SECS: u32 = 1;
 
 /// Free the wire for statement `requester`. Another statement's results are
 /// buffered; the requester's own previous batch is abandoned. The buffering
@@ -125,7 +127,8 @@ fn discard_owner(client: &mut SyncClient, owned: &StmtShared) {
     let exhausted = state.result_done;
     state.on_wire = false;
     state.result_done = true;
-    abandon(client, exhausted);
+    let limit = state.execution.clone();
+    abandon_with(client, exhausted, limit.as_ref());
 }
 
 /// End the request on the wire. A result that is nearly over is skimmed to its
@@ -133,10 +136,22 @@ fn discard_owner(client: &mut SyncClient, owned: &StmtShared) {
 /// to come is cut short with a TDS attention, which is what makes closing a
 /// cursor over a huge result cheap.
 fn abandon(client: &mut SyncClient, exhausted: bool) {
+    abandon_with(client, exhausted, None);
+}
+
+/// [`abandon`] with the cancel of the batch being ended: skimming waits for
+/// rows the server may be unable to send (a locked row, with no query
+/// timeout), so it gets at most [`SKIM_WAIT_SECS`] before the batch is
+/// cancelled with an attention.
+fn abandon_with(client: &mut SyncClient, exhausted: bool, limit: Option<&Arc<StmtCancel>>) {
     if !client.has_open_batch() {
         return;
     }
-    let _ = if exhausted || skim_to_end(client) {
+    let skimmed = exhausted || {
+        let _limit = limit.map(|cancel| cancel.arm_deadline(SKIM_WAIT_SECS));
+        skim_to_end(client)
+    };
+    let _ = if skimmed {
         client.block_on(|c| c.close_query())
     } else {
         client.block_on(|c| c.cancel_query(ABANDON_SETTLE_SECS))

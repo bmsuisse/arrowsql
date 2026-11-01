@@ -72,8 +72,10 @@ pub(crate) fn with_exclusive_wire(
     // Published before any lock is taken so `_cancel` reaches an execution
     // that is still waiting for the wire.
     let cancel = StmtCancel::new();
-    let _executing = ExecutingGuard::enter(stmt);
+    // Publish before flagging: a `_cancel` that sees the flag must find this
+    // execution's handle, not the previous one's.
     *stmt.cancel.lock() = Some(cancel.clone());
+    let _executing = ExecutingGuard::enter(stmt);
     let timeout = stmt.query_timeout();
     let conn = &stmt.conn;
 

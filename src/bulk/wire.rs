@@ -342,18 +342,4 @@ pub fn finite(value: f64, name: &str) -> Result<(), String> {
     Err(format!("Non-finite float value ({value}) is not allowed in column '{name}'"))
 }
 
-const POW10: [u128; 39] = {
-    let mut table = [1u128; 39];
-    let mut i = 1;
-    while i < 39 {
-        table[i] = table[i - 1] * 10;
-        i += 1;
-    }
-    table
-};
-
-/// `10^exponent` from a table, `None` past `10^38` (the u128 limit).
-#[inline]
-pub(super) fn checked_pow10(exponent: u32) -> Option<u128> {
-    POW10.get(exponent as usize).copied()
-}
+pub(super) use crate::numeric::checked_pow10;

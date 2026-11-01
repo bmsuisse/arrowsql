@@ -33,6 +33,7 @@ use mssql_tds::error::Error;
 use mssql_tds::message::bulk_load::StreamingBulkLoadWriter;
 use uuid::Uuid;
 
+use crate::numeric::div_round_half_away;
 use super::arrow_source::ArrowBatches;
 use super::arrow_wire;
 use super::settings::{BulkSettings, Resolved, SourceShape};
@@ -415,6 +416,7 @@ pub fn load(
     let shape = SourceShape {
         column_count: schema.fields().len(),
         names: Some(schema.fields().iter().map(|f| f.name().clone()).collect()),
+        reject_extra_columns: false,
     };
     run(stmt, settings, &shape, |destination, resolved| {
         let plans = build_plans(&schema, destination, resolved).map_err(BulkFailure::Unsupported)?;
@@ -668,8 +670,8 @@ pub(super) fn rescale_rounding(raw: i128, from_scale: u8, to_scale: u8) -> Resul
         }
         Ordering::Greater => {
             let divisor = i128::try_from(pow10(u32::from(from_scale - to_scale))?).map_err(|_| overflow())?;
-            let half = divisor / 2;
-            Ok(if raw >= 0 { (raw + half) / divisor } else { (raw - half) / divisor })
+            let rounded = i128::try_from(div_round_half_away(raw.unsigned_abs(), divisor as u128)).map_err(|_| overflow())?;
+            Ok(if raw < 0 { -rounded } else { rounded })
         }
     }
 }

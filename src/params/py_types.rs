@@ -1,7 +1,6 @@
 // Vendored from microsoft/mssql-rs mssql-py-core/src/types.rs (MIT), commit 6b6b48ec.
 // Python value -> mssql-tds SqlType for RPC parameters. Keep edits minimal so
 // upstream fixes can be re-synced; local changes are marked LOCAL.
-#![allow(dead_code)]
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -211,33 +210,6 @@ impl ParameterHint {
             }
             _ => false,
         }
-    }
-
-    /// Whether SQL Server permits this type in TVP column metadata.
-    pub(crate) fn supports_tvp_column(self) -> bool {
-        !matches!(
-            self.sql_type,
-            InputSqlType::Udt | InputSqlType::LongVarChar | InputSqlType::WLongVarChar
-        )
-    }
-
-    /// Returns effective decimal precision for TVP metadata.
-    pub(crate) fn precision(self) -> Option<u8> {
-        matches!(self.sql_type, InputSqlType::Numeric | InputSqlType::Decimal)
-            .then(|| Self::effective_numeric_precision(self.size) as u8)
-    }
-
-    /// Returns scale only for numeric and scale-bearing temporal types.
-    pub(crate) fn scale(self) -> Option<u8> {
-        matches!(
-            self.sql_type,
-            InputSqlType::Numeric
-                | InputSqlType::Decimal
-                | InputSqlType::Time
-                | InputSqlType::DateTime
-                | InputSqlType::DateTimeOffset
-        )
-        .then_some(self.scale)
     }
 }
 
@@ -669,23 +641,6 @@ pub(crate) fn null_sql_type(hint: ParameterHint) -> TdsResult<SqlType> {
     })
 }
 
-/// Constructs a value-free TVP column template.
-///
-/// TVP column definitions carry numeric and temporal metadata separately, so
-/// their templates are not limited to the defaults required by scalar NULLs.
-/// The same template types NULL row cells, whose [`SqlType`] discriminant must
-/// match the column definition for TVP validation.
-pub(crate) fn tvp_column_sql_type(hint: ParameterHint) -> TdsResult<SqlType> {
-    match hint.sql_type {
-        InputSqlType::Numeric => Ok(SqlType::Numeric(None)),
-        InputSqlType::Decimal => Ok(SqlType::Decimal(None)),
-        InputSqlType::Time => Ok(SqlType::Time(None)),
-        InputSqlType::DateTime => Ok(SqlType::DateTime2(None)),
-        InputSqlType::DateTimeOffset => Ok(SqlType::DateTimeOffset(None)),
-        _ => null_sql_type(hint),
-    }
-}
-
 /// Applies caller-specified decimal precision and scale instead of inferring
 /// them from the Python value.
 fn hinted_decimal(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<SqlType> {
@@ -758,33 +713,43 @@ fn round_half_up_text(text: &str, scale: usize) -> Option<String> {
 /// SQL Server does when it converts a value to a narrower DECIMAL. Text in
 /// exponent form or already within the scale is returned unchanged.
 fn round_to_scale(text: &str, scale: u8) -> TdsResult<String> {
+    let exponent_form = text.contains(['e', 'E']);
     let fraction_digits = text.split_once('.').map_or(0, |(_, fraction)| fraction.len());
-    if text.contains(['e', 'E']) || fraction_digits <= usize::from(scale) {
-        return Ok(text.to_string());
-    }
-    if let Some(rounded) = round_half_up_text(text, usize::from(scale)) {
-        return Ok(rounded);
+    if !exponent_form {
+        if fraction_digits <= usize::from(scale) {
+            return Ok(text.to_string());
+        }
+        if let Some(rounded) = round_half_up_text(text, usize::from(scale)) {
+            return Ok(rounded);
+        }
     }
     let round_error = |error: PyErr| Error::UsageError(format!("Failed to round numeric value: {error}"));
     Python::attach(|py| {
-        let decimal = decimal_type(py).map_err(round_error)?.call1((text,)).map_err(round_error)?;
-        let exponent = decimal_type(py)
-            .map_err(round_error)?
-            .call1((format!("1E-{scale}"),))
-            .map_err(round_error)?;
-        // A context wide enough for any value SQL Server accepts, so quantize
-        // never signals InvalidOperation for a large coefficient.
-        let context_args = PyDict::new(py);
-        context_args.set_item("prec", 100).map_err(round_error)?;
-        let context = PyModule::import(py, "decimal")
-            .and_then(|module| module.getattr("Context"))
-            .and_then(|class| class.call((), Some(&context_args)))
-            .map_err(round_error)?;
-        let rounded = decimal
-            .call_method1("quantize", (exponent, "ROUND_HALF_UP", context))
-            .map_err(round_error)?;
+        let class = decimal_type(py).map_err(round_error)?;
+        let decimal = class.call1((text,)).map_err(round_error)?;
+        let exponent = class.call1((format!("1E-{scale}"),)).map_err(round_error)?;
+        let context = private_context(py).map_err(round_error)?;
+        let rounded = quantize_half_up(&decimal, &exponent, &context).map_err(round_error)?;
         numeric_text(&rounded)
     })
+}
+
+/// A fresh `decimal.Context` wide enough for any value SQL Server accepts, so
+/// neither the caller's ambient context (rounding mode, `prec`) nor a large
+/// coefficient (InvalidOperation) changes the outcome of an operation run in it.
+fn private_context<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    let context_args = PyDict::new(py);
+    context_args.set_item("prec", 100)?;
+    PyModule::import(py, "decimal")?.getattr("Context")?.call((), Some(&context_args))
+}
+
+/// `decimal.quantize(exponent)` rounding half away from zero in `context`.
+fn quantize_half_up<'py>(
+    decimal: &Bound<'py, PyAny>,
+    exponent: &Bound<'py, PyAny>,
+    context: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    decimal.call_method1("quantize", (exponent, "ROUND_HALF_UP", context))
 }
 
 /// Text of a value bound through a DECIMAL/NUMERIC hint. A Decimal is formatted
@@ -949,9 +914,11 @@ fn hinted_money(py_obj: &Bound<'_, PyAny>, hint: ParameterHint) -> TdsResult<Sql
         .get_or_try_init(py, || decimal_class.call1(("0.0001",)).map(Bound::unbind))
         .map_err(|error| Error::UsageError(format!("Failed to create money scale: {error}")))?
         .bind(py);
-    let scaled = decimal
-        .call_method1("quantize", (quantizer,))
-        .and_then(|value| value.call_method1("scaleb", (4,)))
+    let scaled = private_context(py)
+        .and_then(|context| {
+            let rounded = quantize_half_up(&decimal, quantizer, &context)?;
+            rounded.call_method1("scaleb", (4, context))
+        })
         .and_then(|value| value.call_method0("__int__"))
         .and_then(|value| value.extract::<i64>())
         .map_err(|error| Error::UsageError(format!("Failed to scale money value: {error}")))?;
@@ -1096,16 +1063,11 @@ fn py_datetime_to_sql_type(
     })))
 }
 
-/// Days since 0001-01-01 of an exact `datetime.datetime`, by Howard Hinnant's
-/// days_from_civil, so no Python call is needed.
+/// Days since 0001-01-01 of an exact `datetime.datetime`, computed natively so
+/// no Python call is needed.
 fn exact_datetime_days(dt: &Bound<'_, PyDateTime>) -> Option<u32> {
     let (year, month, day) = (i64::from(dt.get_year()), i64::from(dt.get_month()), i64::from(dt.get_day()));
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let year_of_era = y - era * 400;
-    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    u32::try_from(era * 146_097 + day_of_era - 719_468 + 719_162).ok()
+    u32::try_from(crate::decode::temporal::days_from_civil(year, month, day)).ok()
 }
 
 fn datetime_days(py_obj: &Bound<'_, PyAny>) -> TdsResult<u32> {
@@ -1713,29 +1675,6 @@ pub(crate) fn datetime_to_ticks(
     }
 
     Ok((final_days, time_ticks))
-}
-
-/// Convert SQL Server DATETIME 1/300s ticks to (hour, minute, second, microsecond).
-///
-/// Rounds to the nearest representable Python microsecond.
-/// Clamps out-of-range ticks to 23:59:59.999999 to prevent silent `as u8` truncation
-/// on malformed wire data.
-pub(crate) fn ticks_to_time_components(time_ticks: u32) -> (u8, u8, u8, u32) {
-    // Max valid ticks = 25_919_999 (23:59:59 + 299/300 s).
-    // Clamp to prevent u8 overflow from corrupt data.
-    let clamped = (time_ticks as u64).min(DATETIME_TICKS_PER_DAY - 1);
-
-    // Round to nearest microsecond (+ 150 implements round-half-up for /300)
-    let total_us = (clamped * 1_000_000 + 150) / 300;
-
-    let hour = (total_us / 3_600_000_000) as u8;
-    let remainder = total_us % 3_600_000_000;
-    let minute = (remainder / 60_000_000) as u8;
-    let remainder = remainder % 60_000_000;
-    let second = (remainder / 1_000_000) as u8;
-    let microsecond = (remainder % 1_000_000) as u32;
-
-    (hour, minute, second, microsecond)
 }
 
 /// Validate that the converted ColumnValues type matches the target SQL type.

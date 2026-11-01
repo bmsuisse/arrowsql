@@ -29,7 +29,9 @@ use mssql_tds::datatypes::column_values::{
 };
 use mssql_tds::datatypes::decoder::DecimalParts;
 use mssql_tds::datatypes::row_writer::{RowWriter, ValueKind};
+use crate::numeric::POW10;
 use mssql_tds::datatypes::sql_json::SqlJson;
+use mssql_tds::datatypes::sql_string::ResolvedEncoding;
 use mssql_tds::datatypes::sql_string::EncodingType;
 use mssql_tds::datatypes::sql_vector::SqlVector;
 use uuid::Uuid;
@@ -46,16 +48,11 @@ const UNIX_EPOCH_DAYS: i64 = 719_162;
 const DAYS_TO_1900: i64 = 693_595;
 const MICROS_PER_DAY: i64 = 86_400_000_000;
 
-const fn pow10_table() -> [i128; 39] {
-    let mut table = [1i128; 39];
-    let mut i = 1;
-    while i < 39 {
-        table[i] = table[i - 1] * 10;
-        i += 1;
-    }
-    table
+/// `10^n` as `i128`, `n` in `0..=38`.
+#[inline]
+fn pow10(exponent: usize) -> i128 {
+    POW10[exponent] as i128
 }
-static POW10: [i128; 39] = pow10_table();
 
 /// Growable bitmap (Arrow LSB bit order).
 #[derive(Default)]
@@ -180,7 +177,7 @@ impl Column {
             Values::Float32(v) => v.push(value as f32),
             Values::Float64(v) => v.push(value as f64),
             Values::Bool(v) => v.push(value != 0),
-            Values::Decimal(v, scale) => v.push(i128::from(value) * POW10[*scale as usize]),
+            Values::Decimal(v, scale) => v.push(i128::from(value) * pow10(*scale as usize)),
             Values::Var { .. } => return self.text(value.to_string().as_bytes()),
             _ => return self.null(),
         }
@@ -204,9 +201,9 @@ impl Column {
         if let Values::Decimal(v, column_scale) = &mut self.values {
             let mut value = magnitude as i128;
             if *column_scale > scale {
-                value *= POW10[(*column_scale - scale) as usize];
+                value *= pow10((*column_scale - scale) as usize);
             } else if *column_scale < scale {
-                value /= POW10[(scale - *column_scale) as usize];
+                value /= pow10((scale - *column_scale) as usize);
             }
             v.push(if negative { -value } else { value });
             self.valid.push(true);
@@ -219,7 +216,7 @@ impl Column {
             fmt::write_decimal(&mut text, signed, scale.max(0) as u32);
             return self.text(text.as_bytes());
         }
-        let digits = POW10[scale.max(0) as usize] as u128;
+        let digits = POW10[scale.max(0) as usize];
         let whole = (magnitude / digits) as i64;
         if matches!(self.values, Values::Float32(_) | Values::Float64(_)) {
             let value = magnitude as f64 / digits as f64;
@@ -329,8 +326,9 @@ impl Column {
                 Ok(_) => data.extend_from_slice(bytes),
                 Err(_) => data.extend_from_slice(String::from_utf8_lossy(bytes).as_bytes()),
             },
-            other => match other.encoding() {
-                Some(encoding) => decode_into(encoding, bytes, data),
+            other => match other.resolved_encoding() {
+                Some(ResolvedEncoding::EncodingRs(encoding)) => decode_into(encoding, bytes, data),
+                Some(oem) => data.extend_from_slice(oem.decode_without_bom_handling(bytes).0.as_bytes()),
                 None => data.extend_from_slice(String::from_utf8_lossy(bytes).as_bytes()),
             },
         }

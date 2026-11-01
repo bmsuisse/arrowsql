@@ -293,7 +293,10 @@ impl mssql_tds::connection::client_context::EntraIdTokenFactory for PyTokenFacto
         // The callable does network I/O under the GIL: keep it off the reactor.
         // On the shared runtime, not the connection's own: when the login times
         // out that runtime is dropped, and dropping waits for blocking tasks.
-        let outcome = crate::runtime::runtime().spawn_blocking(move || {
+        let runtime = crate::runtime::try_runtime().map_err(|e| {
+            mssql_tds::error::Error::ConnectionError(format!("failed to start the mssql-rs I/O runtime: {e}"))
+        })?;
+        let outcome = runtime.spawn_blocking(move || {
             Python::attach(|py| -> PyResult<Vec<u8>> {
                 factory.bind(py).call1((spn, sts_url, format!("{auth_method:?}")))?.extract()
             })
@@ -396,6 +399,12 @@ impl Connection {
             self.closed.store(true, Ordering::Release);
             return Ok(None);
         }
+        if slot.client.as_ref().is_some_and(SyncClient::is_foreign) {
+            // Inherited across fork: the parent still uses this session.
+            self.closed.store(true, Ordering::Release);
+            std::mem::forget(slot.client.take());
+            return Ok(None);
+        }
         // Like SQLDisconnect: a plain disconnect refuses to drop a transaction
         // that holds work. The connection stays usable so the caller can end it.
         if !pooled && !transaction_already_rolled_back && open_transaction_has_work(&mut slot) {
@@ -416,7 +425,8 @@ impl Connection {
         let mut slot = self.shared.slot.try_lock()?;
         let quiet = slot.owner.is_none()
             && slot.client.as_ref().is_some_and(|c| {
-                !c.has_open_batch() && (transaction_already_rolled_back || !c.has_active_transaction())
+                !c.is_foreign()
+                    && !c.has_open_batch() && (transaction_already_rolled_back || !c.has_active_transaction())
             });
         if !quiet {
             return None;
@@ -438,13 +448,18 @@ impl Connection {
 
     /// Close a non-pooled session, or sanitise a pooled one and return it.
     fn retire(&self, mut client: SyncClient, transaction_already_rolled_back: bool) -> PyResult<()> {
-        let Some(membership) = self.pool.lock().take() else {
-            let _ = client.block_on(|c| c.close_connection());
+        let membership = self.pool.lock().take();
+        if client.is_foreign() {
+            std::mem::forget(client);
+            return Ok(());
+        }
+        let Some(membership) = membership else {
+            client.close();
             return Ok(());
         };
         if let Err(err) = sanitise(&mut client, transaction_already_rolled_back) {
             // Never keep a session whose state could not be cleaned up.
-            let _ = client.block_on(|c| c.close_connection());
+            client.close();
             return Err(err);
         }
         if let Some(rejected) = self.checkin(client, membership) {
@@ -516,7 +531,10 @@ impl Drop for Connection {
             return;
         }
         if let Some(mut slot) = self.shared.slot.try_lock() {
-            slot.client.take();
+            match slot.client.take() {
+                Some(client) if client.is_foreign() => std::mem::forget(client),
+                other => drop(other),
+            }
         }
     }
 }

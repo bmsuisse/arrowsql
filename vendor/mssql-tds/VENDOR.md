@@ -95,6 +95,14 @@ Local patches (search for `VENDOR PATCH`):
    `src/datatypes/decoder.rs` `read_guid` reads into a `[u8; 16]` stack array.
    Wire output is unchanged.
 
+11. Request timeout accounting (marked `RUST-PORT`): `absorb_browse_info`
+   (`src/connection/tds_client.rs`) charges the elapsed time of its COLINFO
+   look-ahead peeks and reads to `remaining_request_timeout`, like every other
+   token read; `save_transaction`, `commit_transaction` and
+   `rollback_transaction` clear `remaining_request_timeout` as they clear the
+   stale cancel handle, so a COMMIT no longer inherits the residual budget of
+   the query before it.
+
 To drop the vendored copy, delete this directory and the `[patch]` section
 in ../../Cargo.toml once the fix is in the pinned upstream rev.
 

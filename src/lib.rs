@@ -19,6 +19,7 @@ mod decode;
 mod diag;
 mod getinfo;
 mod logging;
+mod numeric;
 mod params;
 mod pooling;
 mod rowfactory;
