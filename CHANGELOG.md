@@ -8,11 +8,45 @@ Version numbers in this project are deliberately three different things:
 
 | what | value | meaning |
 |---|---|---|
-| distribution `arrowsql` | 0.1.0 | this project's release number (`pyproject.toml`) |
+| distribution `arrowsql` | 0.2.0 | this project's release number (`pyproject.toml`) |
 | `arrowsql.__version__` | 1.16.0 | the upstream `mssql-python` release the Python layer is vendored from; kept so code that checks the upstream version keeps working |
 | `arrowsql.ddbc_bindings.__version__` | 1.0.0 | version of the Rust binding contract (`docs/CONTRACT.md`) |
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-11-01
+
+### Added
+
+- `write_arrow()` no longer needs pyarrow: any Arrow PyCapsule source (`__arrow_c_stream__` /
+  `__arrow_c_array__`: polars, DuckDB, nanoarrow, pyarrow) is loaded by the parallel bulk copy
+  in Rust (`DDBCBulkCopyArrowParallel`).
+- DB-API exceptions are raised from Rust: the SQLSTATE-to-class table, the 1222 / 2628 / 8114
+  promotions and the `driver_error` / `ddbc_error` / `sqlstate` / `native_error` attributes are
+  built natively (`DDBCRaiseFor`). The native `Connection` and `getinfo` raise typed exceptions.
+- `Row` is backed by a Rust core (`RowCore`): indexing, attribute access, copy and pickle run
+  natively.
+
+### Changed
+
+- Faster LOB row fetch: large pure-ASCII values are narrowed when they are pushed, and the row
+  arena is sized once (fetchmany over LOB columns about 2.5x faster).
+
+### Fixed
+
+- Arrow reads decoded OEM 437/850 `varchar` lossily; every fetch path now decodes it the same.
+- A forked child closing an inherited connection no longer shuts down the parent's session.
+- `round_to_scale` / money rounding: exponent text is rounded, ties round half away from zero on
+  every path, independent of the ambient decimal context.
+- Row bulk copy without column mappings rejects extra source columns instead of dropping them;
+  ragged `executemany` rows raise a DB-API error instead of a panic.
+- Closing a partly read result no longer blocks on a locked row.
+- asyncio: `fetch_arrow` raises the drained error, cancellation and pool races, drain budget and
+  stale cursor state after errors.
+- Request timeout accounting and cancel-handle publish order in the vendored `mssql-tds`.
+- Security and CI hardening: release publishing only from `main`, actions pinned to SHAs.
+
+## [0.1.0] - 2026-11-01
 
 ### Added
 

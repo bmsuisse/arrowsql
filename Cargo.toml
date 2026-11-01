@@ -1,6 +1,6 @@
 [package]
 name = "ddbc_bindings"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "Rust (PyO3 + mssql-tds) replacement for mssql-python's ODBC-based ddbc_bindings"

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "arrowsql"
-version = "0.1.0"
+version = "0.2.0"
 description = "mssql-python with its ODBC/C++ core replaced by Rust (PyO3 + mssql-tds)"
 requires-python = ">=3.10"
 readme = "README.md"
