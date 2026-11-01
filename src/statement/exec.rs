@@ -101,6 +101,10 @@ pub(crate) fn with_exclusive_wire(
         state.diag.push(DiagRecord::driver("08003", "Connection is closed"));
         return SQL_ERROR;
     };
+    if client.is_foreign() {
+        state.diag.push(DiagRecord::driver("08003", "Connection was inherited from the parent process"));
+        return SQL_ERROR;
+    }
     if !conn.autocommit()
         && conn.take_failed()
         && !client.has_active_transaction()

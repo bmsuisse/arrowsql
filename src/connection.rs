@@ -359,6 +359,9 @@ impl Connection {
             // statement that still has results pending.
             crate::statement::free_for_connection(&mut slot);
             let Some(client) = slot.client.as_mut() else { return Err(connection_closed()) };
+            if client.is_foreign() {
+                return Err(driver_error("08003", "Connection was inherited from the parent process"));
+            }
             op(client).map_err(|e| tds_error(&e, "HY000"))
         })
     }
@@ -369,6 +372,13 @@ impl Connection {
     fn end_transaction(&self, py: Python<'_>, commit: bool) -> PyResult<()> {
         self.shared.take_failed();
         self.shared.take_txn_aborted();
+        // A forked child has no transaction of its own on the parent's session:
+        // rolling back there would end the parent's, and a commit is an error
+        // (client_op) rather than work silently dropped.
+        let shared = self.shared.clone();
+        if !commit && py.detach(move || shared.slot.lock_checked().client.as_ref().is_some_and(SyncClient::is_foreign)) {
+            return Ok(());
+        }
         self.client_op(py, move |client| {
             if !client.has_active_transaction() {
                 return Ok(());

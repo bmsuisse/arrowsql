@@ -349,3 +349,27 @@ def test_cross_thread_cancel_interrupts_running_statement(conn_str):
     result = json.loads(line[len("RESULT ") :])
     assert result["outcome"] == "OperationalError"
     assert result["elapsed"] < 6.0
+
+
+def test_closing_cursor_with_unfinished_batch_does_not_wait_for_it(conn_str):
+    # The first result is fetched completely; the batch still has a long
+    # WAITFOR to go. Closing the cursor abandons it and must not wait it out.
+    import time
+
+    from mssql_python import connect
+
+    c = connect(conn_str)
+    try:
+        c.timeout = 0
+        cur = c.cursor()
+        # NOWAIT flushes the first result to the client before the server waits.
+        cur.execute("SELECT 1; RAISERROR('flush', 0, 1) WITH NOWAIT; WAITFOR DELAY '00:00:30'; SELECT 2")
+        assert cur.fetchall()[0][0] == 1
+        started = time.monotonic()
+        cur.close()
+        assert time.monotonic() - started < 5
+        cur2 = c.cursor()
+        cur2.execute("SELECT 3")
+        assert cur2.fetchone()[0] == 3
+    finally:
+        c.close()

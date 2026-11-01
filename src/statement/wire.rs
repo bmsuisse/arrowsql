@@ -51,7 +51,9 @@ pub fn free_for_statement(
     timeout_secs: u32,
 ) {
     let Slot { client, owner } = slot;
-    let Some(client) = client.as_mut() else {
+    let Some(client) = client.as_mut().filter(|c| !c.is_foreign()) else {
+        // No session, or one inherited across fork: the parent's batch on its
+        // socket is not ours to read, cancel or close.
         *owner = None;
         return;
     };
@@ -69,7 +71,9 @@ pub fn free_for_statement(
 /// Free the wire for a transaction or session request of the connection.
 pub fn free_for_connection(slot: &mut Slot) {
     let Slot { client, owner } = slot;
-    let Some(client) = client.as_mut() else {
+    let Some(client) = client.as_mut().filter(|c| !c.is_foreign()) else {
+        // No session, or one inherited across fork: the parent's batch on its
+        // socket is not ours to read, cancel or close.
         *owner = None;
         return;
     };
@@ -85,7 +89,9 @@ pub fn free_for_connection(slot: &mut Slot) {
 /// Abandon whatever batch is live (connection close).
 pub fn discard_all(slot: &mut Slot) {
     let Slot { client, owner } = slot;
-    let Some(client) = client.as_mut() else {
+    let Some(client) = client.as_mut().filter(|c| !c.is_foreign()) else {
+        // No session, or one inherited across fork: the parent's batch on its
+        // socket is not ours to read, cancel or close.
         *owner = None;
         return;
     };
@@ -139,18 +145,18 @@ fn abandon(client: &mut SyncClient, exhausted: bool) {
     abandon_with(client, exhausted, None);
 }
 
-/// [`abandon`] with the cancel of the batch being ended: skimming waits for
-/// rows the server may be unable to send (a locked row, with no query
-/// timeout), so it gets at most [`SKIM_WAIT_SECS`] before the batch is
-/// cancelled with an attention.
+/// [`abandon`] with the cancel of the batch being ended. The whole
+/// abandonment is bounded by [`SKIM_WAIT_SECS`]: skimming and the final drain
+/// wait for tokens the server may be unable to send (a locked row, a `WAITFOR`
+/// later in the batch), so past that the batch is cancelled with an attention.
+/// Without the cancel of the batch nothing could bound the wait, so a result
+/// that is not yet over is cut short at once.
 fn abandon_with(client: &mut SyncClient, exhausted: bool, limit: Option<&Arc<StmtCancel>>) {
     if !client.has_open_batch() {
         return;
     }
-    let skimmed = exhausted || {
-        let _limit = limit.map(|cancel| cancel.arm_deadline(SKIM_WAIT_SECS));
-        skim_to_end(client)
-    };
+    let _limit = limit.map(|cancel| cancel.arm_deadline(SKIM_WAIT_SECS));
+    let skimmed = exhausted || (limit.is_some() && skim_to_end(client));
     let _ = if skimmed {
         client.block_on(|c| c.close_query())
     } else {
