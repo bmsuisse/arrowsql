@@ -253,6 +253,7 @@ _RSS_SCRIPT = textwrap.dedent(
 )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="peak RSS is measured with the POSIX-only resource module")
 def test_native_stream_source_is_not_buffered_in_memory(conn_str, cursor, table_name):
     """r5 F15: a native result stream is read on demand, not drained before the workers start."""
     import json
