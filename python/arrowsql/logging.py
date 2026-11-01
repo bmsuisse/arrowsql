@@ -456,10 +456,14 @@ class MSSQLLogger:
 
     def debug(self, msg: str, *args, **kwargs):
         """Log at DEBUG level (all diagnostic messages)"""
+        if logging.DEBUG < self._cached_level:
+            return
         self._log(logging.DEBUG, msg, *args, **kwargs)
 
     def info(self, msg: str, *args, **kwargs):
         """Log at INFO level"""
+        if logging.INFO < self._cached_level:
+            return
         self._log(logging.INFO, msg, *args, **kwargs)
 
     def warning(self, msg: str, *args, **kwargs):

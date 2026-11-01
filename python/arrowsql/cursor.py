@@ -13,11 +13,13 @@ Resource Management:
 
 import decimal
 import logging
+import operator
 import re
 import uuid
 import datetime
 import warnings
 from importlib import import_module
+from itertools import chain
 from typing import List, Mapping, Union, Any, Optional, Tuple, Sequence, TYPE_CHECKING, Iterable
 from arrowsql.constants import ConstantsDDBC as ddbc_sql_const, SQLTypes
 from arrowsql.helpers import check_error, connstr_to_pycore_params
@@ -38,6 +40,7 @@ from arrowsql import get_settings
 from arrowsql.parameter_helper import (
     detect_and_convert_parameters,
     parse_pyformat_params,
+    convert_pyformat_to_qmark_with_names,
     convert_pyformat_to_qmark,
 )
 
@@ -387,6 +390,10 @@ _SQL_HANDLE_STMT = ddbc_sql_const.SQL_HANDLE_STMT.value
 _SQL_SUCCESS = ddbc_sql_const.SQL_SUCCESS.value
 _SQL_SUCCESS_WITH_INFO = ddbc_sql_const.SQL_SUCCESS_WITH_INFO.value
 _SQL_NO_DATA = ddbc_sql_const.SQL_NO_DATA.value
+_SQL_VARCHAR = ddbc_sql_const.SQL_VARCHAR.value
+_SQL_DECIMAL = ddbc_sql_const.SQL_DECIMAL.value
+_SQL_NUMERIC = ddbc_sql_const.SQL_NUMERIC.value
+_TEXT_C_TYPES = (ddbc_sql_const.SQL_C_CHAR.value, ddbc_sql_const.SQL_C_WCHAR.value)
 # RUST-PORT: Connection's initial encoding settings (see Connection.__init__).
 _DEFAULT_ENCODING_SETTINGS = {"encoding": "utf-16le", "ctype": ddbc_sql_const.SQL_WCHAR.value}
 
@@ -497,7 +504,11 @@ def _decimal_precision_scale(exponent: int, num_digits: int) -> Tuple[int, int]:
 def _max_binary_len(rows: Any, col_index: int) -> int:
     """Longest bytes/bytearray value in one column across all rows (0 if none)."""
     return max(
-        (len(r[col_index]) for r in rows if isinstance(r[col_index], (bytes, bytearray))),
+        (
+            len(v)
+            for v in map(operator.itemgetter(col_index), rows)
+            if isinstance(v, (bytes, bytearray))
+        ),
         default=0,
     )
 
@@ -596,6 +607,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         self._cached_column_map = None
         self._cached_column_map_lower = None
         self._cached_converter_map = None
+        self._cached_converter_pairs = None  # (converter_map, pairs), keyed by identity
         self._cached_converters_generation = self._connection._converters_generation
         # Canonical, order-preserving column names snapshotted once per result set
         # and handed to each Row so mapping views never read the live cursor.description
@@ -1530,6 +1542,15 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         self._cached_converters_generation = generation
         return converter_map if any(converter is not None for converter in converter_map) else ()
 
+    def _converter_pairs(self, converter_map):
+        """(index, converter) for the converted columns only, cached per converter map."""
+        cached = self._cached_converter_pairs
+        if cached is not None and cached[0] is converter_map:
+            return cached[1]
+        pairs = tuple((i, c) for i, c in enumerate(converter_map) if c)
+        self._cached_converter_pairs = (converter_map, pairs)
+        return pairs
+
     def _compute_uuid_str_indices(self):
         """
         Compute the tuple of column indices whose uuid.UUID values should be
@@ -2414,6 +2435,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             return sample_value, min_val, max_val, 0
 
         sample_value = None
+        sample_figures = None
         max_decimal_formatted_len = 0
         for v in non_nulls:
             if isinstance(v, decimal.Decimal):
@@ -2432,34 +2454,25 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                     # If length comparison fails, keep the current sample_value
                     pass
             elif isinstance(v, decimal.Decimal) and isinstance(sample_value, decimal.Decimal):
-                # For Decimal objects, prefer the one that requires higher precision or scale
+                # For Decimal objects, prefer the one that requires higher precision or scale.
+                # Precision is the significant digits, scale the decimal places; for
+                # 0.000123456789 the precision must be at least the scale (12).
                 v_tuple = v.as_tuple()
-                sample_tuple = sample_value.as_tuple()
-
-                # Calculate precision (total significant digits) and scale (decimal places)
-                # For a number like 0.000123456789, we need precision = 9, scale = 12
-                # The precision is the number of significant digits (len(digits))
-                # The scale is the number of decimal places needed to represent the number
-
                 v_precision = len(v_tuple.digits)
-                if v_tuple.exponent < 0:
-                    v_scale = -v_tuple.exponent
-                else:
-                    v_scale = 0
-
-                sample_precision = len(sample_tuple.digits)
-                if sample_tuple.exponent < 0:
-                    sample_scale = -sample_tuple.exponent
-                else:
-                    sample_scale = 0
-
-                # For SQL DECIMAL(precision, scale), we need:
-                # precision >= number of significant digits
-                # scale >= number of decimal places
-                # For 0.000123456789: precision needs to be at least 12 (to accommodate 12 decimal places)
-                # So we need to adjust precision to be at least as large as scale
+                v_scale = -v_tuple.exponent if v_tuple.exponent < 0 else 0
                 v_required_precision = max(v_precision, v_scale)
-                sample_required_precision = max(sample_precision, sample_scale)
+
+                # The sample's figures only change when sample_value is reassigned.
+                if sample_figures is None or sample_figures[0] is not sample_value:
+                    sample_tuple = sample_value.as_tuple()
+                    sample_precision = len(sample_tuple.digits)
+                    sample_scale = -sample_tuple.exponent if sample_tuple.exponent < 0 else 0
+                    sample_figures = (
+                        sample_value,
+                        max(sample_precision, sample_scale),
+                        sample_scale,
+                    )
+                _, sample_required_precision, sample_scale = sample_figures
 
                 # Prefer the decimal that requires higher precision or scale
                 # This ensures we can accommodate all values in the column
@@ -2516,14 +2529,25 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         if isinstance(first_row, dict):
             # pyformat style - convert all rows
             # Parse parameter names from SQL (determines order for all rows)
-            param_names = parse_pyformat_params(operation)
+            # One scan of the SQL: names give the order for all rows.
+            converted_sql, _first, param_names = convert_pyformat_to_qmark_with_names(
+                operation, first_row
+            )
+            if "%%" in operation:
+                # An escaped "%%(x)s" scans differently before escaping; keep that order.
+                param_names = parse_pyformat_params(operation)
 
             if param_names:
                 # Convert SQL to qmark style
-                operation, _ = convert_pyformat_to_qmark(operation, first_row)
+                operation = converted_sql
 
                 # Convert all parameter dicts to tuples in the same order
                 converted_params = []
+                if len(param_names) == 1:
+                    only_name = param_names[0]
+                    getter = lambda d: (d[only_name],)  # noqa: E731
+                else:
+                    getter = operator.itemgetter(*param_names)
                 for param_dict in seq_of_parameters:
                     if not isinstance(param_dict, dict):
                         raise TypeError(
@@ -2531,8 +2555,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                             f"but row has {type(param_dict).__name__}"
                         )
                     # Build tuple in the order determined by param_names
-                    row_tuple = tuple(param_dict[name] for name in param_names)
-                    converted_params.append(row_tuple)
+                    converted_params.append(getter(param_dict))
 
                 seq_of_parameters = converted_params
                 logger.debug(
@@ -2749,26 +2772,40 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         # Process parameters into column-wise format with possible type conversions
         # First, convert any Decimal types as needed for NUMERIC/DECIMAL columns
         with perf_phase("py::executemany::param_conversion"):
+            # Only columns that can need a conversion are visited; the others
+            # (ints, floats, dates, ...) never raise, so their cells are not touched.
+            convert_cols = []
+            for i, p_type in enumerate(parameters_type):
+                text = p_type.paramCType in _TEXT_C_TYPES
+                as_varchar = p_type.paramSQLType == _SQL_VARCHAR
+                as_decimal = p_type.paramSQLType in (_SQL_DECIMAL, _SQL_NUMERIC)
+                if text or as_varchar or as_decimal:
+                    convert_cols.append((i, text, as_varchar, as_decimal))
+
             processed_parameters = []
             for row_index, row in enumerate(seq_of_parameters):
-                processed_row = list(row)
-                for i, val in enumerate(processed_row):
+                if not isinstance(row, (list, tuple)):
+                    row = list(row)
+                processed_row = None  # copied from `row` on the first conversion
+                for i, text, as_varchar, as_decimal in convert_cols:
+                    if i >= len(row):
+                        break
+                    val = row[i]
                     if val is None:
                         continue
-                    time_text = _normalize_time_param(val, parameters_type[i].paramCType)
-                    if time_text is not None:
-                        processed_row[i] = time_text
+                    if text and isinstance(val, datetime.time):
+                        if processed_row is None:
+                            processed_row = list(row)
+                        processed_row[i] = val.isoformat(timespec="microseconds")
                         continue
-                    if (
-                        isinstance(val, decimal.Decimal)
-                        and parameters_type[i].paramSQLType == ddbc_sql_const.SQL_VARCHAR.value
-                    ):
+                    if as_varchar and isinstance(val, decimal.Decimal):
+                        if processed_row is None:
+                            processed_row = list(row)
                         processed_row[i] = format(val, "f")
                     # Convert all values to string for DECIMAL/NUMERIC columns (GH-503)
-                    elif parameters_type[i].paramSQLType in (
-                        ddbc_sql_const.SQL_DECIMAL.value,
-                        ddbc_sql_const.SQL_NUMERIC.value,
-                    ):
+                    elif as_decimal:
+                        if processed_row is None:
+                            processed_row = list(row)
                         if isinstance(val, decimal.Decimal):
                             processed_row[i] = format(val, "f")
                         else:
@@ -2791,13 +2828,14 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                                 conversion_failed = True
                             if conversion_failed:
                                 raise ValueError(err_msg) from None
-                processed_parameters.append(processed_row)
+                processed_parameters.append(row if processed_row is None else processed_row)
 
         # Now transpose the processed parameters
         with perf_phase("py::executemany::param_processing"):
-            columnwise_params, row_count = self._transpose_rowwise_to_columnwise(
-                processed_parameters
-            )
+            row_count = len(processed_parameters)
+            if len(set(map(len, processed_parameters))) > 1:
+                raise ValueError("Inconsistent parameter row size in executemany()")
+            columnwise_params = [list(column) for column in zip(*processed_parameters)]
 
         # Get encoding settings
         encoding_settings = self._get_encoding_settings()
@@ -2938,6 +2976,16 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             return Row._fast_create(
                 row_data, column_map, self, column_map_lower, self._cached_result_columns
             )
+        if converter_map:
+            return Row._converted_create(
+                row_data,
+                self._converter_pairs(converter_map),
+                column_map,
+                self,
+                column_map_lower,
+                self._cached_result_columns,
+                self._uuid_str_indices,
+            )
         return Row(
             row_data,
             column_map,
@@ -2987,7 +3035,7 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                     self.messages,
                 )
 
-            check_error(ddbc_sql_const.SQL_HANDLE_STMT.value, self.hstmt, ret)
+            check_error(_SQL_HANDLE_STMT, self.hstmt, ret)
 
             # Update rownumber for the number of rows actually fetched
             if rows_data and self._has_result_set:
@@ -2997,8 +3045,20 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
 
             self.rowcount = self._next_row_index
 
-            # Get column and converter maps
-            column_map, converter_map, column_map_lower = self._get_column_and_converter_maps()
+            # Get column and converter maps (cached while the converter generation
+            # and the description are unchanged)
+            column_map = self._cached_column_map
+            if (
+                column_map is not None
+                and self._cached_converters_generation == self._connection._converters_generation
+                and self._result_columns_src is self.description
+            ):
+                converter_map = self._cached_converter_map
+                column_map_lower = self._cached_column_map_lower
+            else:
+                column_map, converter_map, column_map_lower = (
+                    self._get_column_and_converter_maps()
+                )
 
             # Convert raw data to Row objects
             uuid_idx = self._uuid_str_indices
@@ -3012,6 +3072,14 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                         column_map_lower,
                         self._cached_result_columns,
                     )
+                if converter_map:
+                    pairs = self._converter_pairs(converter_map)
+                    names = self._cached_result_columns
+                    create = Row._converted_create
+                    return [
+                        create(row_data, pairs, column_map, self, column_map_lower, names, uuid_idx)
+                        for row_data in rows_data
+                    ]
                 return [
                     Row(
                         row_data,
@@ -3095,6 +3163,14 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 column_map_lower,
                 self._cached_result_columns,
             )
+        if converter_map:
+            pairs = self._converter_pairs(converter_map)
+            names = self._cached_result_columns
+            create = Row._converted_create
+            return [
+                create(row_data, pairs, column_map, self, column_map_lower, names, uuid_idx)
+                for row_data in rows_data
+            ]
         return [
             Row(
                 row_data,
@@ -3869,14 +3945,18 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             # Reading a cursor of this connection while the load owns the
             # connection's wire would deadlock; read it first.
             rows = rows.fetchall()
-        it = iter(rows)
+        if isinstance(rows, Cursor):
+            # Another connection's cursor: batch the fetches, not one fetchone per row.
+            it = chain.from_iterable(iter(lambda: rows.fetchmany(1024), []))
+        else:
+            it = iter(rows)
         first = next(it, None)
         if first is None:
             return iter(())
         if isinstance(first, tuple):
             return chain((first,), it)
         if isinstance(first, Row):
-            return (tuple(item._row_values) for item in chain((first,), it))
+            return map(tuple, map(operator.attrgetter("_row_values"), chain((first,), it)))
         raise TypeError(
             f"bulkcopy data rows must be tuples or Row objects, got {type(first).__name__}"
         )

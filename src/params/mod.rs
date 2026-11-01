@@ -12,6 +12,7 @@ pub mod batch;
 pub mod null_types;
 pub mod placeholders;
 pub mod py_types;
+pub mod pyformat;
 pub mod udt;
 
 use mssql_tds::datatypes::sqltypes::SqlType;
