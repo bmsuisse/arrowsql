@@ -119,6 +119,13 @@ pub fn resolve(
 ) -> Result<Vec<Resolved>, String> {
     let eligible = |column: &BulkCopyColumnMetadata| settings.keep_identity || !column.is_identity;
     let mut resolved: Vec<Resolved> = if settings.mappings.is_empty() {
+        let eligible_count = destination.iter().filter(|column| eligible(column)).count();
+        if shape.column_count > eligible_count {
+            return Err(format!(
+                "source has {} columns, destination has {eligible_count}",
+                shape.column_count
+            ));
+        }
         destination
             .iter()
             .enumerate()

@@ -6055,6 +6055,10 @@ impl TdsClient {
         let parser_context = &ParserContext::ColumnMetadata(Arc::clone(&md), None);
         let mut hidden: Vec<u16> = Vec::new();
         loop {
+            // RUST-PORT: charge the waits below to the request timeout, like
+            // every other token read, so the look-ahead cannot hand the next
+            // read the full budget again.
+            let start = self.request_timeout_start();
             let peeked = self
                 .transport
                 .peek_token_type(
@@ -6063,11 +6067,15 @@ impl TdsClient {
                     self.cancel_handle.as_ref(),
                 )
                 .await;
+            if let Some(start) = start {
+                self.update_remaining_timeout(start);
+            }
             match peeked {
                 Ok(Some(0xA4 | 0xA5)) => {}
                 Ok(_) => break,
                 Err(error) => return Err(self.fail_read(error)),
             }
+            let start = self.request_timeout_start();
             let token = self
                 .transport
                 .receive_token(
@@ -6076,6 +6084,9 @@ impl TdsClient {
                     self.cancel_handle.as_ref(),
                 )
                 .await;
+            if let Some(start) = start {
+                self.update_remaining_timeout(start);
+            }
             match token {
                 Ok(Tokens::ColInfo(info)) => hidden.extend(info.hidden),
                 Ok(_) => {}
@@ -9389,6 +9400,9 @@ impl TdsClient {
         // RUST-PORT: takes no cancel handle; one left by an earlier request
         // (e.g. a cancelled stream) must not cancel this one.
         self.cancel_handle = None;
+        // RUST-PORT: nor may the previous query's residual timeout budget
+        // expire this one (COMMIT after a query that nearly used its timeout).
+        self.remaining_request_timeout = None;
         let transaction = TransactionManagementRequest::new(
             TransactionManagementType::Save(name),
             &self.execution_context,
@@ -9421,6 +9435,9 @@ impl TdsClient {
         // RUST-PORT: takes no cancel handle; one left by an earlier request
         // (e.g. a cancelled stream) must not cancel this one.
         self.cancel_handle = None;
+        // RUST-PORT: nor may the previous query's residual timeout budget
+        // expire this one (COMMIT after a query that nearly used its timeout).
+        self.remaining_request_timeout = None;
         let transaction = TransactionManagementRequest::new(
             TransactionManagementType::Commit {
                 name,
@@ -9456,6 +9473,9 @@ impl TdsClient {
         // RUST-PORT: takes no cancel handle; one left by an earlier request
         // (e.g. a cancelled stream) must not cancel this one.
         self.cancel_handle = None;
+        // RUST-PORT: nor may the previous query's residual timeout budget
+        // expire this one (COMMIT after a query that nearly used its timeout).
+        self.remaining_request_timeout = None;
         let transaction = TransactionManagementRequest::new(
             TransactionManagementType::Rollback {
                 name,

@@ -239,11 +239,18 @@ pub fn describe_col(
     // The per-column dicts are shared with the previous call while the
     // columns stay the same, so the Python layer recognises an unchanged
     // layout by identity. They are the layer's own and never modified.
-    if let Some(mut state) = stmt.state.try_lock() {
-        let state = &mut *state;
-        let Some(columns) = state.columns.as_ref() else { return Ok(SQL_SUCCESS) };
-        let shared = describe::shared_columns(py, columns, &mut state.describe_cache)?;
-        for dict in shared.iter() {
+    // Python objects are built with the statement lock released: allocating
+    // them can run a GC and finalizers, which must not wait on this lock.
+    let quick = stmt.state.try_lock().map(|mut state| (state.columns.clone(), state.describe_cache.take()));
+    if let Some((columns, mut cache)) = quick {
+        let Some(columns) = columns else {
+            return Ok(SQL_SUCCESS);
+        };
+        let shared = describe::shared_columns(py, &columns, &mut cache);
+        if let Some(mut state) = stmt.state.try_lock() {
+            state.describe_cache = cache;
+        }
+        for dict in shared?.iter() {
             ColumnMetadata.append(dict)?;
         }
         return Ok(SQL_SUCCESS);

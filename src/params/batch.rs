@@ -229,15 +229,7 @@ fn unify_decimal_text(rows: &mut [Vec<SqlType>], col: usize, is_null: &[bool]) -
     Ok(())
 }
 
-const POW10: [u128; 39] = {
-    let mut table = [1u128; 39];
-    let mut i = 1;
-    while i < 39 {
-        table[i] = table[i - 1] * 10;
-        i += 1;
-    }
-    table
-};
+use crate::numeric::POW10;
 
 /// Number of decimal digits of `v`, 0 for 0 (leading zeros are not digits).
 fn digit_count(v: u128) -> usize {
@@ -436,6 +428,13 @@ fn normalize_column(rows: &mut [Vec<SqlType>], col: usize, is_null: &[bool]) -> 
 /// Fails when a column's values cannot share one exact numeric type.
 pub fn normalize(rows: &mut [Vec<SqlType>], nulls: &[Vec<bool>]) -> TdsResult<Vec<usize>> {
     let ncols = rows.first().map_or(0, Vec::len);
+    if let Some((index, row)) = rows.iter().enumerate().find(|(_, row)| row.len() != ncols) {
+        return Err(mssql_tds::error::Error::TypeConversionError(format!(
+            "{}executemany row {index} has {} parameters, but the first row has {ncols}",
+            crate::params::INDEX_ERROR_PREFIX,
+            row.len()
+        )));
+    }
     let mut all_null = Vec::new();
     for col in 0..ncols {
         let is_null: Vec<bool> = nulls.iter().map(|row| row[col]).collect();

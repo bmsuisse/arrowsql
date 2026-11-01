@@ -559,9 +559,9 @@ fn with_bytes(cell: &Bound<'_, PyAny>, write: impl FnOnce(&[u8]) -> Result<(), S
         return write(bytes.as_bytes());
     }
     if let Ok(bytes) = cell.cast::<PyByteArray>() {
-        // SAFETY: the GIL is held and `write` only copies the slice into a Rust
-        // buffer, running no Python code that could resize the bytearray.
-        return write(unsafe { bytes.as_bytes() });
+        // Copied: on a free-threaded build another thread may resize the
+        // bytearray while a borrowed slice is alive.
+        return write(&bytes.to_vec());
     }
     Err(unsupported(cell, "a binary column"))
 }
@@ -639,13 +639,7 @@ fn temporal<'py>(cell: &Bound<'py, PyAny>, class: &str) -> Result<Bound<'py, PyA
 /// SQL days since 0001-01-01 of a date or datetime.
 fn sql_days<T: PyDateAccess>(date: &T) -> Result<u32, String> {
     let (year, month, day) = (i64::from(date.get_year()), i64::from(date.get_month()), i64::from(date.get_day()));
-    // Howard Hinnant's days_from_civil, relative to 1970-01-01.
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let year_of_era = y - era * 400;
-    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    let days = era * 146_097 + day_of_era - 719_468 + i64::from(EPOCH_DAYS_FROM_YEAR_ONE);
+    let days = crate::decode::temporal::days_from_civil(year, month, day);
     if !(0..=MAX_SQL_DAYS).contains(&days) {
         return Err(format!("Date out of SQL DATE range: {year}-{month:02}-{day:02}"));
     }
@@ -793,7 +787,7 @@ fn scale_decimal(
     Ok((!negative, scaled))
 }
 
-/// A Python number as MONEY: scaled by 10^4, rounded half to even.
+/// A Python number as MONEY: scaled by 10^4, rounded half away from zero (as SQL Server and the Arrow path do).
 fn to_money(cell: &Bound<'_, PyAny>, dest: &BulkCopyColumnMetadata) -> Result<i128, String> {
     if let Some((negative, digits)) = exact_int(cell) {
         let text = || cell.str().map(|s| s.to_string()).unwrap_or_default();
@@ -819,11 +813,7 @@ fn scale_money(
         digits.checked_mul(factor).ok_or_else(overflow)?
     } else {
         match wire::checked_pow10(u32::try_from(-to_scale).unwrap_or(u32::MAX)) {
-            Some(divisor) => {
-                let (quotient, remainder) = (digits / divisor, digits % divisor);
-                let round_up = remainder * 2 > divisor || (remainder * 2 == divisor && quotient % 2 == 1);
-                quotient + u128::from(round_up)
-            }
+            Some(divisor) => crate::numeric::div_round_half_away(digits, divisor),
             None => 0,
         }
     };
