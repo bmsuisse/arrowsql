@@ -35,3 +35,25 @@ def test_conn_str_repr_redacted():
 
     s = _RedactedStr("Server=x;PWD=hunter2")
     assert "hunter2" not in repr(s) and s == "Server=x;PWD=hunter2"
+
+
+def test_logging_module_has_no_bare_except():
+    import ast
+
+    src = (_ROOT / "python" / "arrowsql" / "logging.py").read_text()
+    bare = [n.lineno for n in ast.walk(ast.parse(src)) if isinstance(n, ast.ExceptHandler) and n.type is None]
+    assert bare == []
+
+
+def test_parallel_probe_failure_is_logged(tmp_path):
+    from unittest import mock
+
+    from arrowsql import arrow_parallel
+
+    class _Cur:
+        def execute(self, *a, **k):
+            raise RuntimeError("boom")
+
+    with mock.patch.object(arrow_parallel.logger, "debug") as dbg:
+        assert arrow_parallel._probe_meta(_Cur(), "SELECT a FROM t", "a") == (None, True)
+    assert dbg.called

@@ -27,6 +27,7 @@ import weakref
 from typing import Any, List, Optional, Sequence, Tuple
 
 from arrowsql import ddbc_bindings
+from arrowsql.logging import logger
 from arrowsql.db_connection import connect
 from arrowsql._utf8_strings import utf8_query
 from arrowsql.exceptions import raise_exception
@@ -136,7 +137,10 @@ def read_arrow_stream(
     ``>= bk`` (plus an ``IS NULL`` slice when the column is nullable), each
     bound as a typed parameter. No MIN/MAX or size probe is run, so the first
     batch comes sooner, and skew can be handled by passing quantiles. Bounds
-    must ascend in the column's own ordering (for strings: its collation); a
+    must ascend in the column's own ordering (for strings: its collation). Only
+    Python code-point order is checked here, not the server collation: a list
+    that ascends in Python but not in the collation yields overlapping or empty
+    slices (duplicate or missing rows), so order string bounds by the collation; a
     ``str`` bound is sent as nvarchar, so a ``varchar`` column is compared
     after an implicit conversion (no index seek). ``partition_nullable`` says
     whether the column may hold NULL (default: asked from the server, one
@@ -405,13 +409,16 @@ def _probe_meta(cursor, query, column, plain=None, with_rows: bool = True) -> Tu
             cursor.execute(f"SELECT {_ROWS_SQL}, {_NULLABLE_SQL}", (match.group(1),) + describe)
             rows, nullable = cursor.fetchone()
             return (None if rows is None else int(rows)), nullable is None or bool(nullable)
-        except Exception:
-            pass
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.debug("parallel read: catalog probe failed, falling back: %s", type(exc).__name__)
     try:
         cursor.execute(f"SELECT {_NULLABLE_SQL}", describe)
         row = cursor.fetchone()
         return None, row is None or row[0] is None or bool(row[0])
-    except Exception:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.debug(
+            "parallel read: nullability probe failed, assuming nullable: %s", type(exc).__name__
+        )
         return None, True
 
 
