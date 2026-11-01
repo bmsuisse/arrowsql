@@ -329,7 +329,12 @@ def test_kill_during_running_statement_raises_operational_error_without_hang(con
         assert outcome["elapsed"] < 20
         exc = outcome["error"]
         assert type(exc) is OperationalError
-        assert exc.driver_error == "General error"
-        assert "Connection may have been terminated by the server" in exc.ddbc_error
+        # The server's "terminated" error token usually arrives first (HY000); on
+        # Windows the socket reset can win the race and surface as 08S01.
+        if exc.driver_error == "Communication link failure":
+            assert exc.sqlstate == "08S01"
+        else:
+            assert exc.driver_error == "General error"
+            assert "Connection may have been terminated by the server" in exc.ddbc_error
     finally:
         _safe_close(victim)
