@@ -70,6 +70,11 @@ duckdb.sql("SELECT avg(total_amount) FROM stream").show()
 # Partitioned parallel read over N connections (integer partition column)
 big = arrowsql.read_arrow(conn_str, "SELECT * FROM dbo.yellow_trips",
                               partition_on="trip_id", partitions=8)
+
+# nvarchar/nchar/ntext columns travel as UTF-8 (about half the bytes for ASCII text) on
+# SQL Server 2019+/Azure SQL; the result is the same. Opt out with utf8_strings=False.
+t = cur.execute_arrow("SELECT * FROM dbo.bench_strings")            # same on cursors
+t = arrowsql.read_arrow(conn_str, "SELECT * FROM dbo.bench_strings", utf8_strings=False)
 ```
 
 For polars use `pl.DataFrame(t)`; `pl.from_arrow(t)` returns a struct Series

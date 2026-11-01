@@ -3285,6 +3285,34 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         """
         return self._fetch_arrow_native(-1, batch_size)
 
+    def execute_arrow(
+        self,
+        operation: str,
+        params: Optional[Any] = None,
+        *,
+        utf8_strings: bool = True,
+        batch_size: int = 65536,
+    ) -> "ddbc_bindings.ArrowTable":
+        """Run ``operation`` and return its whole first result as an Arrow table.
+
+        Same as ``execute`` followed by ``fetchall_arrow``. With
+        ``utf8_strings`` (the default) nvarchar/nchar/ntext columns are cast to
+        UTF-8 varchar on the server, halving their bytes on the wire for
+        mostly-ASCII text; the Arrow result is the same. The rewrite is skipped
+        (the query runs unchanged) when ``params`` is given, the query has an
+        ORDER BY, the server is older than SQL Server 2019, or the query cannot
+        be described. See ``arrowsql.read_arrow`` for the details.
+        """
+        if utf8_strings and not params:
+            from arrowsql._utf8_strings import utf8_query
+
+            operation = utf8_query(self.connection, operation)
+        if params:
+            self.execute(operation, params)
+        else:
+            self.execute(operation)
+        return self.fetchall_arrow(batch_size)
+
     def fetchmany_arrow(
         self, size: Optional[int] = None, batch_size: int = 65536
     ) -> "ddbc_bindings.ArrowTable":

@@ -119,6 +119,48 @@ rows):
    collations. Arrow IPC compression (zstd/lz4) only matters when re-shipping
    results off-box, as arrowbricks does, never for the SQL Server hop.
 
+### 3.1 Shipped: `utf8_strings` on the Arrow read paths
+
+`read_arrow(..., utf8_strings=True)` (default) and `cursor.execute_arrow(sql, params=None, *,
+utf8_strings=True)` apply the UTF-8 result above automatically:
+
+- One round trip describes the query (`sys.dm_exec_describe_first_result_set`) together with
+  `SERVERPROPERTY('ProductMajorVersion'/'EngineEdition')` (cached per connection); a second
+  samples the first 256 rows (also validating the rewrite). The wrapping SQL is built in Rust (`src/utf8_wrap.rs`):
+  `SELECT ..., CAST([c] COLLATE Latin1_General_100_BIN2_UTF8 AS varchar(m)) AS [c], ... FROM (<query>) AS q`,
+  m = 4 x declared chars when that fits in 8000, else `max`; ntext goes through `nvarchar(max)`.
+  NOT NULL columns get `ISNULL(..., '')` so Arrow nullability is unchanged.
+- COLLATE must be on the operand. `CAST(c AS varchar(n)) COLLATE ..._UTF8` only relabels text
+  that was already squeezed through the database code page (every non-Latin-1 character
+  became `?`). The tests catch this with CJK and emoji.
+- Skipped (original query runs): server before 2019, ORDER BY in the query, `?` parameters
+  (the describe needs their types), duplicate or empty column names, a failing describe or
+  sample, no national column, national columns under 25% of the declared row width (keeps
+  the taxi table, one `nvarchar(1)` among 19 numbers, unchanged), or a sample of the first
+  256 rows whose UTF-8 size is not at least 10% below its UTF-16 size. The sample matters
+  because UTF-8 is 3 bytes per character for CJK against 2 in UTF-16: without it a CJK-heavy
+  column grew the transfer by 49% (162.0 MB to 242.2 MB, 100k rows x 5 x 160 chars). Cyrillic,
+  Greek, Hebrew and Arabic are 2 bytes in both (no change, skipped); ASCII halves (162.0 MB
+  to 81.8 MB). The sample is a `TOP (256)` of the query, so an expensive query (sort,
+  aggregate) pays for it once more; use `utf8_strings=False` there. The first rows can
+  misjudge data whose script changes later in the result.
+- The decoder needed no change: a UTF-8 collation arrives with the collation's UTF-8 flag
+  (code page 65001) and 4-byte characters, NULL, `''`, > 8000-byte values and nchar blank
+  padding round-trip (tests/common_issues/test_rs_utf8_strings.py).
+
+Measured (release build, `read_arrow`, medians, off/on interleaved; machine under load
+average ~8, so loopback is noisy):
+
+| Read | Bytes server to client (off, on) | Loopback | 100 Mbit, 20 ms RTT |
+|---|---|---|---|
+| `bench_strings` (200k rows, 10 x nvarchar(200)) | 424.0 MB, 214.5 MB (-49.4%) | 0.337 s, 0.320 s (100k rows, n=11) | 7.12 s, 3.69 s (40k rows, 1.9x) |
+| `yellow_trips` (20 numeric columns, one nvarchar(1)) | 68.16 MB, 67.66 MB without the share rule | rewrite skipped: same query, 0.89 s vs 0.79 s is noise | 3.50 s, 3.51 s (skipped) |
+
+Before the sample/share rules, taxi was 0.70 s off vs 0.79 s on and 0.65 vs 0.64 on loopback
+(a 0.7% byte saving does not pay for the server-side conversion), hence the threshold.
+Loopback gains are small because the server's UTF-8 conversion costs about what the
+smaller transfer saves; the gain appears with any real network.
+
 ## 4. Read parallelism (partitioned reads)
 
 `tds_probe parts`: N connections, each reading a contiguous `trip_id` range
