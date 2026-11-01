@@ -16,6 +16,10 @@ const SYS_NCHAR: i32 = 239;
 const UTF8_COLLATION: &str = "Latin1_General_100_BIN2_UTF8";
 /// Largest finite varchar length.
 const VARCHAR_MAX_LEN: i64 = 8000;
+/// Minimum share (percent) of the declared row width that national character
+/// columns must have for the rewrite to pay. Below it the saved bytes are
+/// negligible (the taxi table: one nvarchar(1) among 19 numeric columns).
+const MIN_SHARE_PERCENT: i64 = 25;
 
 /// One described result column (`sys.dm_exec_describe_first_result_set`).
 #[derive(Debug, Clone)]
@@ -53,12 +57,19 @@ pub fn build(query: &str, columns: &[Column]) -> Option<String> {
     }
     let mut seen = std::collections::HashSet::new();
     let mut converted = false;
+    let (mut national_bytes, mut total_bytes) = (0i64, 0i64);
     let mut items = Vec::with_capacity(columns.len());
     for col in columns {
         if col.name.is_empty() || !seen.insert(col.name.to_lowercase()) {
             return None;
         }
         let quoted = quote(&col.name);
+        // (max) and legacy LOB types have no declared width: assume 8000 bytes.
+        let width = if col.max_length < 0 { VARCHAR_MAX_LEN } else { col.max_length };
+        total_bytes += width;
+        if matches!(col.system_type_id, SYS_NVARCHAR | SYS_NCHAR | SYS_NTEXT) {
+            national_bytes += width;
+        }
         match col.system_type_id {
             SYS_NVARCHAR | SYS_NCHAR | SYS_NTEXT => {
                 converted = true;
@@ -82,7 +93,7 @@ pub fn build(query: &str, columns: &[Column]) -> Option<String> {
             _ => items.push(quoted),
         }
     }
-    if !converted {
+    if !converted || national_bytes * 100 < total_bytes * MIN_SHARE_PERCENT {
         return None;
     }
     Some(format!("SELECT {} FROM ({}\n) AS q", items.join(", "), query))
@@ -149,6 +160,15 @@ mod tests {
         c.nullable = false;
         let sql = build("q", &[c]).unwrap();
         assert!(sql.contains("ISNULL(CAST([a] COLLATE Latin1_General_100_BIN2_UTF8 AS varchar(12)), '') AS [a]"));
+    }
+
+    #[test]
+    fn small_string_share_is_left_alone() {
+        let mut cols: Vec<Column> = (0..19).map(|i| col(&format!("n{i}"), 127, 8)).collect();
+        cols.push(col("flag", SYS_NVARCHAR, 2));
+        assert!(build("q", &cols).is_none());
+        cols.push(col("name", SYS_NVARCHAR, 200));
+        assert!(build("q", &cols).is_some());
     }
 
     #[test]
