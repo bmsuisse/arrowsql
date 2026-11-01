@@ -556,7 +556,7 @@ impl BatchProgress {
     fn keep_result_sets(&mut self, ex: &mut Exclusive<'_>, is_last: bool) -> SqlReturn {
         let Exclusive { client, state, .. } = ex;
         let mut chunk_results = StmtState::new();
-        chunk_results.columns = Some(Arc::new(client.get_metadata().clone()));
+        chunk_results.columns = Some(Arc::new(crate::decode::hidden::visible_columns(client.get_metadata())));
         chunk_results.result_done = false;
         chunk_results.on_wire = true;
 

@@ -75,6 +75,28 @@ impl AnyTransport {
         }
     }
 
+    /// VENDOR PATCH: type byte of the next token, without consuming it.
+    pub(crate) async fn peek_token_type(
+        &mut self,
+        context: &ParserContext,
+        remaining_request_timeout: Option<Duration>,
+        cancel_handle: Option<&CancelHandle>,
+    ) -> TdsResult<Option<u8>> {
+        match self {
+            Self::Network(transport) => {
+                transport
+                    .peek_token_type(context, remaining_request_timeout, cancel_handle)
+                    .await
+            }
+            #[cfg(any(test, feature = "test-util", fuzzing))]
+            Self::Dynamic(transport) => {
+                transport
+                    .peek_token_type(context, remaining_request_timeout, cancel_handle)
+                    .await
+            }
+        }
+    }
+
     #[cfg(not(any(test, feature = "test-util", fuzzing)))]
     pub(crate) fn receive_row_into<'a, W>(
         &'a mut self,

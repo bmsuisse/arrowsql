@@ -147,6 +147,24 @@ async fn read_rows<W: mssql_tds::datatypes::row_writer::RowWriter + Send>(
     max_bytes: usize,
     cancel: Option<&OpCancel>,
 ) -> mssql_tds::core::TdsResult<bool> {
+    match crate::decode::hidden::visible_map(client.get_metadata()) {
+        None => read_loop(client, sink, rows, bytes, max_rows, max_bytes, cancel).await,
+        Some(map) => {
+            let mut filter = crate::decode::hidden::HiddenFilter::new(sink, &map);
+            read_loop(client, &mut filter, |f| rows(&*f.inner), |f| bytes(&*f.inner), max_rows, max_bytes, cancel).await
+        }
+    }
+}
+
+async fn read_loop<W: mssql_tds::datatypes::row_writer::RowWriter + Send>(
+    client: &mut TdsClient,
+    sink: &mut W,
+    rows: impl Fn(&W) -> usize,
+    bytes: impl Fn(&W) -> usize,
+    max_rows: usize,
+    max_bytes: usize,
+    cancel: Option<&OpCancel>,
+) -> mssql_tds::core::TdsResult<bool> {
     let start = rows(sink);
     while rows(sink) - start < max_rows && (max_bytes == usize::MAX || bytes(sink) < max_bytes) {
         if cancel.is_some_and(OpCancel::is_cancelled) {
@@ -395,7 +413,7 @@ impl Session {
         match result {
             Ok(StatementResult::Rows) => {
                 let mut failed = false;
-                let columns = Arc::new(client.get_metadata().clone());
+                let columns = Arc::new(crate::decode::hidden::visible_columns(client.get_metadata()));
                 let read = read_rows(
                     client,
                     &mut out.rows,
@@ -544,7 +562,7 @@ impl Session {
         let result = match advanced {
             Ok(StatementResult::Rows) => {
                 let mut failed = false;
-                let columns = Arc::new(client.get_metadata().clone());
+                let columns = Arc::new(crate::decode::hidden::visible_columns(client.get_metadata()));
                 let read = read_rows(client, &mut out.rows, |b| b.rows, RowBuffer::byte_size, prefetch.max(1), PREFETCH_BYTES, Some(cancel)).await;
                 info.extend(diag::info_records(&client.take_info_messages()));
                 match read {
@@ -809,7 +827,7 @@ async fn drain_into(client: &mut TdsClient, state: &mut CursorState, rows_on_wir
                 error: None,
             }),
             Ok(StatementResult::Rows) => {
-                let columns = Some(Arc::new(client.get_metadata().clone()));
+                let columns = Some(Arc::new(crate::decode::hidden::visible_columns(client.get_metadata())));
                 let mut rows = RowBuffer::new();
                 let error = read_rows(client, &mut rows, |b| b.rows, RowBuffer::byte_size, usize::MAX, usize::MAX, cancel)
                     .await

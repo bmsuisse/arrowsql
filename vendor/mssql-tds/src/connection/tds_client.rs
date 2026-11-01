@@ -1184,7 +1184,7 @@ impl TdsClient {
             Tokens::ReturnStatus(_) => "ReturnStatus",
             Tokens::ReturnValue(_) => "ReturnValue",
             Tokens::TabName => "TabName",
-            Tokens::ColInfo => "ColInfo",
+            Tokens::ColInfo(_) => "ColInfo",
         }
     }
 
@@ -5940,7 +5940,7 @@ impl TdsClient {
                     saw_message = true;
                     continue;
                 }
-                Tokens::TabName | Tokens::ColInfo => {
+                Tokens::TabName | Tokens::ColInfo(_) => {
                     continue;
                 }
                 // Parsed with the negotiated version; result-set attachment is
@@ -6038,6 +6038,62 @@ impl TdsClient {
     /// it is replayed as-is; re-observing it would charge one token's evidence
     /// to the reset acknowledgement twice.
     #[inline]
+    /// VENDOR PATCH: the server marks hidden result columns (FOR BROWSE keys,
+    /// the ROWSTAT of a T-SQL `FETCH`) in the COLINFO token that follows
+    /// COLMETADATA (after an optional TABNAME), not in the column flags.
+    /// Consume those tokens here, before anyone looks at the columns, and set
+    /// `fHidden` (0x2000) on the columns they name.
+    async fn absorb_browse_info(
+        &mut self,
+        md: Arc<ColMetadataToken>,
+        _parser_context: &ParserContext,
+    ) -> TdsResult<Arc<ColMetadataToken>> {
+        if md.columns.is_empty() {
+            return Ok(md);
+        }
+        // Decode context for anything an interrupted wait has to drain.
+        let parser_context = &ParserContext::ColumnMetadata(Arc::clone(&md), None);
+        let mut hidden: Vec<u16> = Vec::new();
+        loop {
+            let peeked = self
+                .transport
+                .peek_token_type(
+                    parser_context,
+                    self.remaining_request_timeout,
+                    self.cancel_handle.as_ref(),
+                )
+                .await;
+            match peeked {
+                Ok(Some(0xA4 | 0xA5)) => {}
+                Ok(_) => break,
+                Err(error) => return Err(self.fail_read(error)),
+            }
+            let token = self
+                .transport
+                .receive_token(
+                    parser_context,
+                    self.remaining_request_timeout,
+                    self.cancel_handle.as_ref(),
+                )
+                .await;
+            match token {
+                Ok(Tokens::ColInfo(info)) => hidden.extend(info.hidden),
+                Ok(_) => {}
+                Err(error) => return Err(self.fail_read(error)),
+            }
+        }
+        if hidden.is_empty() {
+            return Ok(md);
+        }
+        let mut marked = (*md).clone();
+        for number in hidden {
+            if let Some(column) = marked.columns.get_mut(usize::from(number).wrapping_sub(1)) {
+                column.flags |= 0x2000;
+            }
+        }
+        Ok(Arc::new(marked))
+    }
+
     async fn next_response_token(&mut self, parser_context: &ParserContext) -> TdsResult<Tokens> {
         if let Some(token) = self.parked_token.take() {
             return Ok(*token);
@@ -6057,6 +6113,12 @@ impl TdsClient {
         let token = match result {
             Ok(token) => token,
             Err(error) => return Err(self.fail_read(error)),
+        };
+        let token = match token {
+            Tokens::ColMetadata(md) => {
+                Tokens::ColMetadata(self.absorb_browse_info(md, parser_context).await?)
+            }
+            other => other,
         };
         if let Err(error) = self
             .observe_response_token(&token)
@@ -8552,7 +8614,7 @@ impl TdsClient {
                 self.capture_info_message(&info_token);
                 Ok(None)
             }
-            Tokens::TabName | Tokens::ColInfo => Ok(None),
+            Tokens::TabName | Tokens::ColInfo(_) => Ok(None),
             // Sent between COLMETADATA and the first row. Parsed with the
             // negotiated version; result-set attachment is not implemented yet.
             Tokens::DataClassification(_) => Ok(None),

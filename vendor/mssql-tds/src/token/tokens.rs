@@ -108,7 +108,7 @@ pub(crate) enum Tokens {
     ReturnStatus(ReturnStatusToken),
     ReturnValue(ReturnValueToken),
     TabName,
-    ColInfo,
+    ColInfo(ColInfoToken),
 }
 
 /// Union of all parsed TDS tokens (public under `fuzzing` cfg).
@@ -135,7 +135,7 @@ pub enum Tokens {
     ReturnStatus(ReturnStatusToken),
     ReturnValue(ReturnValueToken),
     TabName,
-    ColInfo,
+    ColInfo(ColInfoToken),
 }
 
 macro_rules! impl_from_token {
@@ -187,7 +187,7 @@ impl Token for Tokens {
             Tokens::ReturnValue(token) => token.token_type(),
             Tokens::SessionState(token) => token.token_type(),
             Tokens::TabName => TokenType::TabName,
-            Tokens::ColInfo => TokenType::ColInfo,
+            Tokens::ColInfo(_) => TokenType::ColInfo,
         }
     }
 }
@@ -316,6 +316,14 @@ impl Token for SessionStateToken {
     fn token_type(&self) -> TokenType {
         TokenType::SessionState
     }
+}
+
+/// COLINFO (browse mode): the 1-based numbers of the columns the server marks
+/// hidden (status bit 0x10), e.g. the key and timestamp columns FOR BROWSE
+/// appends, or the ROWSTAT of a T-SQL `FETCH`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ColInfoToken {
+    pub hidden: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Default)]
