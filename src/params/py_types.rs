@@ -1347,12 +1347,25 @@ fn py_to_column_value_internal(
         }
     }
 
+    // A vector column takes a sequence of floats (the str branch below would only mismatch it).
+    if target_metadata.is_some_and(|meta| meta.sql_type == SqlDbType::Vector)
+        && !py_obj.is_instance_of::<PyString>()
+    {
+        let values = py_obj.extract::<Vec<f32>>().map_err(|e| {
+            Error::UsageError(format!("Failed to convert value to VECTOR: {e}"))
+        })?;
+        return Ok(ColumnValues::Vector(SqlVector::try_from_f32(values)?));
+    }
+
     // Check for string (second most common)
     if py_obj.is_instance_of::<PyString>() {
         // Direct string extraction - no fallback needed
         let val = str_text(py_obj)?;
-        if target_metadata.is_some_and(|m| m.sql_type == SqlDbType::Xml) {
-            return Ok(ColumnValues::Xml(SqlXml::from(val)));
+        // xml and json columns take their text as-is; String would fail the type check.
+        match target_metadata.map(|meta| meta.sql_type) {
+            Some(SqlDbType::Xml) => return Ok(ColumnValues::Xml(SqlXml::from(val))),
+            Some(SqlDbType::Json) => return Ok(ColumnValues::Json(SqlJson::from(val))),
+            _ => {}
         }
         let sql_string = SqlString::from_utf8_string(val);
         return Ok(ColumnValues::String(sql_string));
