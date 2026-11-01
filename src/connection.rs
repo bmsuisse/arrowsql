@@ -98,8 +98,13 @@ impl ConnShared {
         self.txn_aborted.store(true, Ordering::Release);
     }
 
-    pub fn take_txn_aborted(&self) -> bool {
-        self.txn_aborted.swap(false, Ordering::AcqRel)
+    pub fn txn_aborted(&self) -> bool {
+        self.txn_aborted.load(Ordering::Acquire)
+    }
+
+    /// Ends the aborted state (commit or rollback).
+    pub fn clear_txn_aborted(&self) {
+        self.txn_aborted.store(false, Ordering::Release);
     }
 
     pub fn take_failed(&self) -> bool {
@@ -371,7 +376,7 @@ impl Connection {
     /// transaction's start time (upstream starts it at commit and gets that wrong).
     fn end_transaction(&self, py: Python<'_>, commit: bool) -> PyResult<()> {
         self.shared.take_failed();
-        self.shared.take_txn_aborted();
+        self.shared.clear_txn_aborted();
         // A forked child has no transaction of its own on the parent's session:
         // rolling back there would end the parent's, and a commit is an error
         // (client_op) rather than work silently dropped.

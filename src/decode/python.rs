@@ -6,6 +6,7 @@
 //! columns repeat a few thousand values and building a Decimal is the most
 //! expensive cell conversion.
 
+use std::mem::MaybeUninit;
 use std::sync::OnceLock;
 
 use mssql_tds::datatypes::decoder::DecimalParts;
@@ -201,7 +202,10 @@ impl<'a> Converter<'a> {
             if ptr.is_null() {
                 return Err(PyErr::fetch(py));
             }
-            let dst = std::slice::from_raw_parts_mut(ffi::PyUnicode_1BYTE_DATA(ptr), bytes.len() / 2);
+            let dst = std::slice::from_raw_parts_mut(
+                ffi::PyUnicode_1BYTE_DATA(ptr).cast::<MaybeUninit<u8>>(),
+                bytes.len() / 2,
+            );
             if narrow_ascii_utf16(bytes, dst) {
                 Ok(ptr)
             } else {
@@ -235,8 +239,9 @@ const NON_ASCII_MASK: u64 = 0xFF80_FF80_FF80_FF80;
 
 /// Narrow UTF-16LE `src` into `dst` (one byte per unit) while checking that
 /// every unit is ASCII. Returns false at the first non-ASCII unit, leaving
-/// `dst` partly written. `src` must hold exactly `2 * dst.len()` bytes.
-pub(super) fn narrow_ascii_utf16(src: &[u8], dst: &mut [u8]) -> bool {
+/// `dst` partly written; on true all of `dst` is initialised. `src` must hold
+/// exactly `2 * dst.len()` bytes.
+pub(super) fn narrow_ascii_utf16(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> bool {
     debug_assert_eq!(src.len(), dst.len() * 2);
     let mut chunks = src.chunks_exact(8);
     let mut out = dst.chunks_exact_mut(4);
@@ -245,13 +250,16 @@ pub(super) fn narrow_ascii_utf16(src: &[u8], dst: &mut [u8]) -> bool {
         if word & NON_ASCII_MASK != 0 {
             return false;
         }
-        o.copy_from_slice(&[chunk[0], chunk[2], chunk[4], chunk[6]]);
+        o[0].write(chunk[0]);
+        o[1].write(chunk[2]);
+        o[2].write(chunk[4]);
+        o[3].write(chunk[6]);
     }
     for (unit, o) in chunks.remainder().chunks_exact(2).zip(out.into_remainder()) {
         if unit[0] >= 0x80 || unit[1] != 0 {
             return false;
         }
-        *o = unit[0];
+        o.write(unit[0]);
     }
     true
 }
@@ -259,7 +267,7 @@ pub(super) fn narrow_ascii_utf16(src: &[u8], dst: &mut [u8]) -> bool {
 /// True when `bytes` is UTF-16LE in which every code unit is ASCII.
 #[cfg(test)]
 fn is_ascii_utf16(bytes: &[u8]) -> bool {
-    bytes.len() % 2 == 0 && narrow_ascii_utf16(bytes, &mut vec![0; bytes.len() / 2])
+    bytes.len() % 2 == 0 && narrow_ascii_utf16(bytes, &mut vec![MaybeUninit::uninit(); bytes.len() / 2])
 }
 
 /// Convert one cell without any batch cache.
@@ -333,8 +341,10 @@ mod tests {
         // every position and with each kind of non-ASCII value.
         for len in 0..=13usize {
             let ok: Vec<u16> = (0..len).map(|i| 0x20 + i as u16).collect();
-            let mut dst = vec![0u8; len];
+            let mut dst = vec![std::mem::MaybeUninit::<u8>::uninit(); len];
             assert!(narrow_ascii_utf16(&utf16(&ok), &mut dst));
+            // SAFETY: a true result initialised all of `dst`.
+            let dst: Vec<u8> = dst.iter().map(|b| unsafe { b.assume_init() }).collect();
             assert_eq!(dst, ok.iter().map(|u| *u as u8).collect::<Vec<_>>());
             for pos in 0..len {
                 for bad in [0x80u16, 0xE9, 0x100, 0x161, 0xFF00, 0xD800, 0xDC00] {
