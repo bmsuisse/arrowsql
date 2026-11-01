@@ -152,9 +152,8 @@ def parse_pyformat_params(sql: str) -> List[str]:
     debug = logger.isEnabledFor(logging.DEBUG)
     if debug:
         logger.debug(
-            "parse_pyformat_params: Starting parse - sql_length=%d, sql_preview=%s",
+            "parse_pyformat_params: Starting parse - sql_length=%d",
             len(sql),
-            sql[:100] if len(sql) > 100 else sql,
         )
     params = [name for name, _start, _end in _scan_pyformat(sql)]
     if debug:
@@ -216,10 +215,6 @@ def convert_pyformat_to_qmark_with_names(
             "convert_pyformat_to_qmark: Starting conversion - sql_length=%d, param_count=%d",
             len(sql),
             len(param_dict),
-        )
-        logger.debug(
-            "convert_pyformat_to_qmark: SQL preview: %s",
-            sql[:200] if len(sql) > 200 else sql,
         )
         logger.debug(
             "convert_pyformat_to_qmark: Parameters provided: %s",
@@ -305,14 +300,11 @@ def convert_pyformat_to_qmark_with_names(
             len(rewritten_sql),
             len(positional_params),
         )
+        # SQL text and bound values may hold secrets: log names, types, counts only.
         logger.debug(
-            "convert_pyformat_to_qmark: Result SQL preview: %s",
-            rewritten_sql[:200] if len(rewritten_sql) > 200 else rewritten_sql,
-        )
-        logger.debug(
-            "Converted pyformat to qmark: params=%s, positional=%s",
+            "Converted pyformat to qmark: params=%s, positional_types=%s",
             list(param_dict.keys()),
-            positional_params,
+            [type(v).__name__ for v in positional_params],
         )
 
     return rewritten_sql, positional_params, param_names
