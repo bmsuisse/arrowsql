@@ -44,6 +44,9 @@ mssql-tds = { git = "https://github.com/microsoft/mssql-rs", rev = "6b6b48ecbbbd
 [target.'cfg(target_env = "musl")'.dependencies]
 mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
 
+[build-dependencies]
+pyo3-build-config = "0.29.0"
+
 [profile.dev]
 opt-level = 1
 

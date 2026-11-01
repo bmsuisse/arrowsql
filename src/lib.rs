@@ -146,6 +146,8 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(logging::update_log_level, m)?)?;
     utf8_wrap::register(m)?;
     m.add_function(wrap_pyfunction!(rowfactory::construct_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(rowfactory::make_row_fast, m)?)?;
+    m.add_class::<rowfactory::RowCore>()?;
 
     m.add_function(wrap_pyfunction!(statement::exec_direct, m)?)?;
     m.add_function(wrap_pyfunction!(statement::execute, m)?)?;

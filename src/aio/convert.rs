@@ -8,7 +8,7 @@ use pyo3::ffi;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyList, PyString, PyType};
+use pyo3::types::{PyList, PyType};
 
 use crate::decode::RowBuffer;
 use crate::decode::python::cell_to_py;
@@ -58,30 +58,16 @@ fn row_values(py: Python<'_>, buf: &RowBuffer, row: &[crate::decode::buffer::Cel
     }
 }
 
-fn set_slot(py: Python<'_>, obj: *mut ffi::PyObject, name: &Bound<'_, PyString>, value: *mut ffi::PyObject) -> PyResult<()> {
-    let rc = unsafe { ffi::PyObject_GenericSetAttr(obj, name.as_ptr(), value) };
-    if rc < 0 { Err(PyErr::fetch(py)) } else { Ok(()) }
-}
-
 /// Wrap `values` (a new reference) in a `Row` without running `Row.__init__`.
-fn make_row(py: Python<'_>, row_type: &Bound<'_, PyType>, values: *mut ffi::PyObject, shape: &Shape) -> PyResult<*mut ffi::PyObject> {
+fn make_row(py: Python<'_>, row_type: &Bound<'_, PyType>, plain: bool, values: *mut ffi::PyObject, shape: &Shape) -> PyResult<*mut ffi::PyObject> {
     let values = unsafe { Bound::from_owned_ptr(py, values) };
-    let row = unsafe {
-        let type_ptr = row_type.as_type_ptr();
-        let alloc = (*type_ptr).tp_alloc.unwrap_or(ffi::PyType_GenericAlloc);
-        let ptr = alloc(type_ptr, 0);
-        if ptr.is_null() {
-            return Err(PyErr::fetch(py));
-        }
-        Bound::from_owned_ptr(py, ptr)
-    };
-    let none = py.None();
-    let ptr = row.as_ptr();
-    set_slot(py, ptr, intern!(py, "_row_values"), values.as_ptr())?;
-    set_slot(py, ptr, intern!(py, "_column_map"), shape.column_map.as_ptr())?;
-    set_slot(py, ptr, intern!(py, "_row_cursor"), none.as_ptr())?;
-    set_slot(py, ptr, intern!(py, "_column_map_lower"), shape.column_map_lower.as_ptr())?;
-    set_slot(py, ptr, intern!(py, "_column_names"), shape.column_names.as_ptr())?;
+    let none = py.None().into_bound(py);
+    let row = crate::rowfactory::new_row(
+        py,
+        row_type.as_type_ptr(),
+        plain,
+        [&values, shape.column_map.bind(py), &none, shape.column_map_lower.bind(py), shape.column_names.bind(py)],
+    )?;
     Ok(row.into_ptr())
 }
 
@@ -110,7 +96,7 @@ pub fn rows_range<'py>(
             let row = if ncols == 0 { &[][..] } else { &buf.cells[(from + i) * ncols..(from + i + 1) * ncols] };
             let values = row_values(py, buf, row, as_tuple)?;
             let item = match (&row_type, shape) {
-                (Some(t), Some(s)) => make_row(py, t, values, s)?,
+                (Some(t), Some(s)) => make_row(py, t, true, values, s)?,
                 _ => values,
             };
             ffi::PyList_SET_ITEM(list.as_ptr(), i as ffi::Py_ssize_t, item);

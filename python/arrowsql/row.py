@@ -5,14 +5,28 @@ This module contains the Row class, which represents a single row of data
 from a cursor fetch operation.
 """
 
-import decimal
 import uuid as _uuid
 from collections.abc import Mapping
 from typing import Any
+from arrowsql.ddbc_bindings import RowCore, make_row_fast
 from arrowsql.logging import logger
 
 
-class Row:
+def _apply_converter(converter, value):
+    """Run one output converter; on failure log at debug level and keep ``value``.
+
+    ``str`` values are passed as UTF-16-LE bytes (the SQL_WVARCHAR wire format).
+    """
+    try:
+        if isinstance(value, str):
+            return converter(value.encode("utf-16-le"))
+        return converter(value)
+    except Exception:
+        logger.debug("Exception occurred in output converter", exc_info=True)
+        return value
+
+
+class Row(RowCore):
     """
     A row of data from a cursor fetch operation. Provides both tuple-like indexing
     and attribute access to column values.
@@ -41,32 +55,12 @@ class Row:
             print(value)
     """
 
-    # Slot internal fields while preserving dynamic attributes and weak references.
-    __slots__ = (
-        "_row_values",
-        "_column_map",
-        "_row_cursor",
-        "_column_map_lower",
-        "_column_names",
-        "__dict__",
-        "__weakref__",
-    )
+    __slots__ = ()
 
     @staticmethod
     def _fast_create(values, column_map, cursor, column_map_lower=None, column_names=None):
-        """Construct a Row bypassing __init__ — for the common fast path.
-
-        Used by fetchall/fetchmany when no output converters and no UUID
-        stringification are needed (the vast majority of queries). Skips
-        the entire if/elif/else chain and keyword argument overhead in __init__.
-        """
-        r = Row.__new__(Row)
-        r._row_values = values
-        r._column_map = column_map
-        r._row_cursor = cursor
-        r._column_map_lower = column_map_lower
-        r._column_names = column_names
-        return r
+        """Construct a Row bypassing __init__ (no converters, no UUID stringification)."""
+        return make_row_fast(Row, values, column_map, cursor, column_map_lower, column_names)
 
     @staticmethod
     def _converted_create(
@@ -84,19 +78,8 @@ class Row:
             value = values[i]
             if value is None:
                 continue
-            try:
-                if isinstance(value, str):
-                    converted[i] = converter(value.encode("utf-16-le"))
-                else:
-                    converted[i] = converter(value)
-            except Exception:
-                pass
-        r = Row.__new__(Row)
-        r._row_values = converted
-        r._column_map = column_map
-        r._row_cursor = cursor
-        r._column_map_lower = column_map_lower
-        r._column_names = column_names
+            converted[i] = _apply_converter(converter, value)
+        r = make_row_fast(Row, converted, column_map, cursor, column_map_lower, column_names)
         if uuid_idx:
             r._stringify_uuids(uuid_idx)
         return r
@@ -211,19 +194,7 @@ class Row:
 
             # If we found a converter, apply it
             if converter:
-                try:
-                    # If value is already a Python type (str, int, etc.),
-                    # we need to convert it to bytes for our converters
-                    if isinstance(value, str):
-                        # Encode as UTF-16LE for string values (SQL_WVARCHAR format)
-                        value_bytes = value.encode("utf-16-le")
-                        converted_values[i] = converter(value_bytes)
-                    else:
-                        converted_values[i] = converter(value)
-                except Exception:
-                    logger.debug("Exception occurred in output converter", exc_info=True)
-                    # If conversion fails, keep the original value
-                    pass
+                converted_values[i] = _apply_converter(converter, value)
 
         return converted_values
 
@@ -242,165 +213,9 @@ class Row:
 
         for i, (value, converter) in enumerate(zip(values, converter_map)):
             if converter and value is not None:
-                try:
-                    if isinstance(value, str):
-                        value_bytes = value.encode("utf-16-le")
-                        converted_values[i] = converter(value_bytes)
-                    else:
-                        converted_values[i] = converter(value)
-                except Exception:
-                    pass
+                converted_values[i] = _apply_converter(converter, value)
 
         return converted_values
-
-    def __getitem__(self, index) -> Any:
-        """Allow accessing by numeric index (row[0]) or column name (row["col"])."""
-        if type(index) is int:
-            return self._row_values[index]
-        if isinstance(index, str):
-            # A row built without a column map has no named columns, so any
-            # string key is simply absent (KeyError), never a TypeError.
-            if self._column_map is not None:
-                idx = self._column_map.get(index)
-                if idx is not None:
-                    return self._row_values[idx]
-            # O(1) case-insensitive lookup when lowercase is enabled
-            if self._column_map_lower is not None:
-                idx = self._column_map_lower.get(index.lower())
-                if idx is not None:
-                    return self._row_values[idx]
-            raise KeyError(f"Row has no column '{index}'")
-        if isinstance(index, (int, slice)):
-            return self._row_values[index]
-        raise TypeError(
-            f"Row indices must be integers, slices, or strings, not {type(index).__name__}"
-        )
-
-    def __getattr__(self, name: str) -> Any:
-        """
-        Allow accessing by column name as attribute: row.column_name
-
-        Note: Case sensitivity depends on the global 'lowercase' setting:
-        - When lowercase=True: Column names are stored in lowercase, enabling
-          case-insensitive attribute access (e.g., row.NAME, row.name, row.Name all work).
-        - When lowercase=False (default): Column names preserve original casing,
-          requiring exact case matching for attribute access.
-        """
-        # Handle lowercase attribute access - if lowercase is enabled,
-        # try to match attribute names case-insensitively
-        idx = self._column_map.get(name)
-        if idx is not None:
-            return self._row_values[idx]
-
-        # O(1) case-insensitive lookup when lowercase is enabled
-        if self._column_map_lower is not None:
-            idx = self._column_map_lower.get(name.lower())
-            if idx is not None:
-                return self._row_values[idx]
-
-        # RUST-PORT: the internal slots are named _row_values / _row_cursor so a
-        # column named _values or _cursor resolves to the column above. The old
-        # names stay readable here for callers that use them.
-        if name == "_values":
-            return self._row_values
-        if name == "_cursor":
-            return self._row_cursor
-
-        raise AttributeError(f"Row has no attribute '{name}'")
-
-    @property
-    def _mapping(self) -> "RowMapping":
-        """Read-only ``dict``-like view (column name -> value) over this row.
-
-        Returns a :class:`RowMapping` (a ``collections.abc.Mapping``). Typical use::
-
-            row = cursor.fetchone()
-            dict(row._mapping)                     # {'id': 1, 'name': 'Alice'}
-            for name, value in row._mapping.items():
-                ...
-            row._mapping["name"]                    # value by column name
-            "name" in row._mapping                  # membership by column name
-
-        Semantics and caveats:
-
-        - Keys are the result set's column names, order-preserving and
-          de-duplicated: when a name repeats, one key is kept and the last column
-          with that name supplies its value (matching ``row[name]`` / ``row.name``).
-          Every duplicate value stays reachable positionally via ``row[i]``.
-        - Lookup and membership use the canonical column names exactly, so the key
-          set, ``in`` and ``[]`` always agree. Unlike ``row[name]`` / ``row.name``,
-          the view does NOT resolve case-insensitive names or catalog aliases; with
-          ``lowercase=True`` the keys are the lowercased names.
-        - ``_mapping`` is a property, so a column literally named ``_mapping`` is
-          shadowed: read it with ``row["_mapping"]`` or ``row._mapping["_mapping"]``.
-        """
-        return RowMapping(self)
-
-    def _mapping_keys(self) -> tuple:
-        """Canonical, order-preserving column names backing ``_mapping``.
-
-        Prefers the names snapshotted once by the cursor for the result set, which
-        preserve the result set's column order. When a row was built without that
-        snapshot (e.g. a direct ``Row(values, column_map)`` construction), names are
-        reconstructed from ``_column_map`` in column-index order; that order can
-        differ from ``_column_map``'s insertion order, so a directly-constructed row
-        may key differently from an otherwise-equivalent cursor row. Returns ``()``
-        when neither source is available. Normal cursor fetches always supply the
-        snapshot.
-        """
-        if self._column_names is not None:
-            return self._column_names
-        if self._column_map:
-            idx_to_name: dict = {}
-            for name, idx in self._column_map.items():
-                idx_to_name.setdefault(idx, name)
-            return tuple(idx_to_name[i] for i in sorted(idx_to_name))
-        return ()
-
-    def __eq__(self, other: Any) -> bool:
-        """
-        Support comparison with lists for test compatibility.
-        This is the key change needed to fix the tests.
-        """
-        if isinstance(other, list):
-            return self._row_values == other
-        if isinstance(other, Row):
-            return self._row_values == other._row_values
-        return super().__eq__(other)
-
-    def __len__(self) -> int:
-        """Return the number of values in the row"""
-        return len(self._row_values)
-
-    def __iter__(self) -> Any:
-        """Allow iteration through values"""
-        return iter(self._row_values)
-
-    def __str__(self) -> str:
-        """Return string representation of the row"""
-        # Local import to avoid circular dependency
-        from arrowsql import getDecimalSeparator
-
-        parts = []
-        for value in self:
-            if isinstance(value, decimal.Decimal):
-                # Apply custom decimal separator for display
-                sep = getDecimalSeparator()
-                if sep != "." and value is not None:
-                    s = str(value)
-                    if "." in s:
-                        s = s.replace(".", sep)
-                    parts.append(s)
-                else:
-                    parts.append(str(value))
-            else:
-                parts.append(repr(value))
-
-        return "(" + ", ".join(parts) + ")"
-
-    def __repr__(self) -> str:
-        """Return a detailed string representation for debugging"""
-        return repr(tuple(self._row_values))
 
 
 # RowMapping key data per result set: ``id(names)`` -> (names, unique keys, key set).
