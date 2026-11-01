@@ -1,0 +1,27 @@
+[package]
+name = "arrowsql-mock-server"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Test harness: Microsoft's mssql-mock-tds server driven over stdin/stdout JSON lines"
+publish = false
+
+# Standalone workspace: not part of the driver build or wheel.
+[workspace]
+
+[features]
+# Statically build OpenSSL (non-Windows) when the system has no headers.
+vendored-openssl = ["mssql-mock-tds/vendored-openssl"]
+
+[dependencies]
+# Same rev as the driver's mssql-tds pin. The mock is MIT; it is not vendored.
+mssql-mock-tds = { git = "https://github.com/microsoft/mssql-rs", rev = "6b6b48ecbbbdad297039d1641e2be4775eed998b" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync"] }
+serde_json = "1"
+# The mock builds mssql-tds without a TLS backend; pick the driver's.
+mssql-tds = { git = "https://github.com/microsoft/mssql-rs", rev = "6b6b48ecbbbdad297039d1641e2be4775eed998b", default-features = false, features = ["rustls-tls"] }
+native-tls = "0.2"
+
+# The mock's mssql-tds dependency resolves to the driver's vendored copy.
+[patch."https://github.com/microsoft/mssql-rs"]
+mssql-tds = { path = "../../../vendor/mssql-tds" }
