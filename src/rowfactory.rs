@@ -158,6 +158,21 @@ impl RowCore {
         Ok((eq == matches!(op, CompareOp::Eq)).into_pyobject(py)?.to_owned().into_any().unbind())
     }
 
+    /// Pickle/copy support. The cursor is not carried over (cursors are not
+    /// picklable); user attributes travel as state.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let py = slf.py();
+        let (values, map, lower, names) = {
+            let c = slf.borrow();
+            (c.values.clone_ref(py), c.column_map.clone_ref(py), c.column_map_lower.clone_ref(py), c.column_names.clone_ref(py))
+        };
+        let args = PyTuple::new(py, [slf.get_type().into_any(), values.into_bound(py), map.into_bound(py), py.None().into_bound(py), lower.into_bound(py), names.into_bound(py)])?;
+        let state = slf.getattr(pyo3::intern!(py, "__dict__"))?;
+        let state = if state.is_truthy()? { state } else { py.None().into_bound(py) };
+        let func = py.import("arrowsql.ddbc_bindings")?.getattr("make_row_fast")?;
+        PyTuple::new(py, [func, args.into_any(), state])
+    }
+
     fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
         self.values.bind(py).len()
     }

@@ -12,6 +12,20 @@ from arrowsql.ddbc_bindings import RowCore, make_row_fast
 from arrowsql.logging import logger
 
 
+def _apply_converter(converter, value):
+    """Run one output converter; on failure log at debug level and keep ``value``.
+
+    ``str`` values are passed as UTF-16-LE bytes (the SQL_WVARCHAR wire format).
+    """
+    try:
+        if isinstance(value, str):
+            return converter(value.encode("utf-16-le"))
+        return converter(value)
+    except Exception:
+        logger.debug("Exception occurred in output converter", exc_info=True)
+        return value
+
+
 class Row(RowCore):
     """
     A row of data from a cursor fetch operation. Provides both tuple-like indexing
@@ -64,13 +78,7 @@ class Row(RowCore):
             value = values[i]
             if value is None:
                 continue
-            try:
-                if isinstance(value, str):
-                    converted[i] = converter(value.encode("utf-16-le"))
-                else:
-                    converted[i] = converter(value)
-            except Exception:
-                pass
+            converted[i] = _apply_converter(converter, value)
         r = make_row_fast(Row, converted, column_map, cursor, column_map_lower, column_names)
         if uuid_idx:
             r._stringify_uuids(uuid_idx)
@@ -186,19 +194,7 @@ class Row(RowCore):
 
             # If we found a converter, apply it
             if converter:
-                try:
-                    # If value is already a Python type (str, int, etc.),
-                    # we need to convert it to bytes for our converters
-                    if isinstance(value, str):
-                        # Encode as UTF-16LE for string values (SQL_WVARCHAR format)
-                        value_bytes = value.encode("utf-16-le")
-                        converted_values[i] = converter(value_bytes)
-                    else:
-                        converted_values[i] = converter(value)
-                except Exception:
-                    logger.debug("Exception occurred in output converter", exc_info=True)
-                    # If conversion fails, keep the original value
-                    pass
+                converted_values[i] = _apply_converter(converter, value)
 
         return converted_values
 
@@ -217,14 +213,7 @@ class Row(RowCore):
 
         for i, (value, converter) in enumerate(zip(values, converter_map)):
             if converter and value is not None:
-                try:
-                    if isinstance(value, str):
-                        value_bytes = value.encode("utf-16-le")
-                        converted_values[i] = converter(value_bytes)
-                    else:
-                        converted_values[i] = converter(value)
-                except Exception:
-                    pass
+                converted_values[i] = _apply_converter(converter, value)
 
         return converted_values
 

@@ -340,3 +340,32 @@ def test_rowcount_for_dml_and_no_fetch_after_dml(cursor, seven_rows):
 
     with pytest.raises(ProgrammingError):
         cursor.fetchone()
+
+
+def _plain_row():
+    from arrowsql.row import Row
+
+    row = Row([1, "x"], {"a": 0, "b": 1}, None, [], None, None, ("a", "b"))
+    row.user_attr = 5
+    return row
+
+
+def test_row_copy_pickle_deepcopy_round_trip():
+    import copy
+    import pickle
+
+    row = _plain_row()
+    for clone in (copy.copy(row), copy.deepcopy(row), pickle.loads(pickle.dumps(row))):
+        assert type(clone) is type(row)
+        assert clone == row
+        assert clone.a == 1 and clone["b"] == "x"
+        assert clone.user_attr == 5
+        assert dict(clone._mapping) == {"a": 1, "b": "x"}
+
+
+def test_row_unset_fields_do_not_recurse():
+    from arrowsql.row import Row
+
+    row = Row.__new__(Row)
+    with pytest.raises(AttributeError):
+        row.anything
