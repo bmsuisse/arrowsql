@@ -136,7 +136,7 @@ impl PoolInner {
                 }
                 continue;
             }
-            return Ok((session, permit));
+            return self.hand_over(session, permit).await;
         }
         let timeout = self.timeout.load(Ordering::Relaxed);
         // Dropping the login abandons it and frees the permit with it.
@@ -144,6 +144,20 @@ impl PoolInner {
             session = open_session(&self.conn_str, self.autocommit, timeout) => session?,
             () = cancel.cancelled() => return Err(cancelled()),
         };
+        self.hand_over(session, permit).await
+    }
+
+    /// `close` may have completed while the ping or login above was pending:
+    /// a session handed out now would outlive the pool.
+    async fn hand_over(
+        &self,
+        mut session: Session,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<(Session, OwnedSemaphorePermit), Diag> {
+        if self.closed.load(Ordering::Acquire) {
+            session.close().await;
+            return Err(pool_closed());
+        }
         Ok((session, permit))
     }
 

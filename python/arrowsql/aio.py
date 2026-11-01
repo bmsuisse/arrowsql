@@ -239,9 +239,9 @@ class AsyncCursor:
 
     async def nextset(self) -> Optional[bool]:
         self._check()
+        self._retire()  # Rust drops the current result up front; a failed or cancelled advance leaves none
         result = await _wait(self._c, self._c.nextset(_hub(), self._id))
         if result is None:
-            self._retire()
             return None
         self._install(result)
         return True

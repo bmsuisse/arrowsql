@@ -285,3 +285,110 @@ async def test_pool_reset_restores_isolation_level(conn_str):
             assert await second.fetchval(query) == default
     finally:
         await pool.close()
+
+
+# ---- r5 F6: a failed nextset() must not leave the previous result fetchable
+
+
+@pytest.mark.asyncio
+async def test_failed_nextset_retires_the_previous_result(conn):
+    cur = conn.cursor()
+    await cur.execute("SELECT 1; RAISERROR('boom', 16, 1); SELECT 2")
+    with pytest.raises(mssql_python.Error):
+        await cur.nextset()
+    assert await cur.fetchone() is None
+    assert cur.description is None
+
+
+# ---- r5 F8: a re-entrant next() on one batch must not return the same row twice
+
+_REENTRANT_SCRIPT = textwrap.dedent(
+    """
+    import asyncio, datetime, os
+
+    seen = []
+    state = {"cursor": None, "armed": False}
+
+    class Date(datetime.date):
+        # A substituted date class runs Python code while the batch converts a row.
+        def __new__(cls, *args):
+            if state["armed"]:
+                state["armed"] = False
+                row = state["cursor"]._batch.next()
+                if row is not None:
+                    seen.append(row[0])
+            return super().__new__(cls, *args)
+
+    datetime.date = Date
+    from mssql_python import aio
+
+    async def main():
+        conn = await aio.connect(os.environ["CS"], autocommit=True)
+        cur = conn.cursor()
+        await cur.execute("SELECT n, CAST('2020-01-01' AS date) FROM (VALUES (1),(2),(3),(4)) t(n)")
+        state["cursor"] = cur
+        state["armed"] = True
+        seen.append((await cur.fetchone())[0])
+        seen.extend(r[0] for r in await cur.fetchall())
+        print(sorted(seen))
+        await conn.close()
+
+    asyncio.run(main())
+    """
+)
+
+
+def test_reentrant_batch_consumption_never_repeats_rows(conn_str):
+    out = subprocess.run(
+        [sys.executable, "-I", "-c", _REENTRANT_SCRIPT], capture_output=True, text=True, timeout=60,
+        env={**os.environ, "CS": conn_str},
+    )
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip() == "[1, 2, 3, 4]"
+
+
+# ---- r5 F11: acquire() pending on login must not hand out a session after close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="aio is Unix-only")
+@pytest.mark.asyncio
+async def test_acquire_pending_on_login_raises_after_pool_close(conn_str):
+    import re
+
+    m = re.search(r"(?i)server\s*=\s*(?:tcp:)?([^,;]+)(?:,(\d+))?", str(conn_str))
+    host, port = m.group(1), int(m.group(2) or 1433)
+    gate = asyncio.Event()
+    tasks = []
+
+    async def pipe(r, w):
+        try:
+            while data := await r.read(65536):
+                w.write(data)
+                await w.drain()
+        except ConnectionError:
+            pass
+        finally:
+            w.close()
+
+    async def handle(r, w):
+        await gate.wait()  # the login stalls until the pool is closed
+        ur, uw = await asyncio.open_connection(host, port)
+        tasks.append(asyncio.ensure_future(pipe(r, uw)))
+        tasks.append(asyncio.ensure_future(pipe(ur, w)))
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    proxy_port = server.sockets[0].getsockname()[1]
+    proxied = re.sub(r"(?i)server\s*=\s*[^;]+", f"Server=tcp:127.0.0.1,{proxy_port}", str(conn_str), count=1)
+    try:
+        pool = await aio.create_pool(proxied, min_size=0, max_size=1)
+        waiter = asyncio.ensure_future(pool.acquire().__aenter__())
+        await asyncio.sleep(0.5)
+        await pool.close()
+        gate.set()
+        with pytest.raises(mssql_python.Error):
+            conn = await asyncio.wait_for(waiter, 30)
+            await conn.close()
+    finally:
+        server.close()
+        for t in tasks:
+            t.cancel()
