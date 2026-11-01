@@ -170,7 +170,7 @@ _ROWS_SQL = (
 )
 
 
-def _probe_meta(cursor, query, column, plain) -> Tuple[Optional[int], bool]:
+def _probe_meta(cursor, query, column, plain=None) -> Tuple[Optional[int], bool]:
     """(estimated row count or None, column may hold NULL) in one round trip.
 
     The row count comes from the catalog and only when ``query`` is a plain
@@ -179,7 +179,7 @@ def _probe_meta(cursor, query, column, plain) -> Tuple[Optional[int], bool]:
     nullability check counts as nullable.
     """
     describe = (f"SELECT {column} FROM ({query}) AS _q",)
-    match = _PLAIN_TABLE.match(plain)
+    match = _PLAIN_TABLE.match(plain if plain is not None else query)
     if match:
         try:
             cursor.execute(f"SELECT {_ROWS_SQL}, {_NULLABLE_SQL}", (match.group(1),) + describe)
@@ -195,7 +195,7 @@ def _probe_meta(cursor, query, column, plain) -> Tuple[Optional[int], bool]:
         return None, True
 
 
-def _plan(conn, query, column, name, partitions, plain) -> List[Tuple[str, tuple]]:
+def _plan(conn, query, column, name, partitions, plain=None) -> List[Tuple[str, tuple]]:
     """Probe [min, max]; return the slices, or [] to read in one stream."""
     with closing(conn.cursor()) as cursor:
         cursor.execute(f"SELECT MIN({column}), MAX({column}) FROM ({query}) AS _q")

@@ -27,7 +27,9 @@ _DESCRIBE_SQL = (
     "FROM sys.dm_exec_describe_first_result_set(?, NULL, 0) AS d "
     "WHERE d.is_hidden = 0 ORDER BY d.column_ordinal"
 )
-_CHECK_SQL = "SELECT TOP 1 d.name FROM sys.dm_exec_describe_first_result_set(?, NULL, 0) AS d"
+# Rewrite only when UTF-8 is at most this share of the UTF-16 bytes of the
+# sampled rows. CJK is 3 bytes per character in UTF-8 against 2 in UTF-16.
+_MAX_SIZE_RATIO = 0.9
 # The rewrite puts the query in a derived table, which drops ORDER BY.
 _ORDER_BY = re.compile(r"\bORDER\s+BY\b", re.IGNORECASE)
 
@@ -40,7 +42,9 @@ def utf8_query(conn: Any, query: str) -> str:
 
     Returns ``query`` itself when the server predates UTF-8 collations
     (SQL Server 2019 / Azure SQL), the query has an ORDER BY, no column would
-    change, the column names are empty or duplicated, or the describe fails.
+    change, the column names are empty or duplicated, the describe or the
+    sample probe fails, or the first 256 rows are not at least 10% smaller in
+    UTF-8 (CJK text grows: 3 bytes per character against 2).
     """
     if _ORDER_BY.search(query) or _server_support.get(conn) is False:
         return query
@@ -57,13 +61,16 @@ def utf8_query(conn: Any, query: str) -> str:
                 pass
             if not supported:
                 return query
-            wrapped = ddbc_bindings.utf8_wrap_query(query, [(r[2], r[3], r[4], r[5]) for r in rows])
-            if wrapped is None:
+            plan = ddbc_bindings.utf8_wrap_query(query, [(r[2], r[3], r[4], r[5]) for r in rows])
+            if plan is None:
                 return query
-            # The rewrite is invalid for batches, EXEC and the like; find out here.
-            cursor.execute(_CHECK_SQL, (wrapped,))
-            check = cursor.fetchall()
-            if not check or check[0][0] is None:
+            wrapped, sample_sql = plan
+            # Runs the query's first rows: also finds out that the rewrite is
+            # invalid (batches, EXEC, ...) and how big the strings are in UTF-8.
+            cursor.execute(sample_sql)
+            utf8_bytes, utf16_bytes = cursor.fetchone()
+            if not utf16_bytes or utf8_bytes > _MAX_SIZE_RATIO * utf16_bytes:
+                logger.debug("utf8_strings: no saving in sample (%s vs %s bytes)", utf8_bytes, utf16_bytes)
                 return query
             return wrapped
     except Exception as exc:

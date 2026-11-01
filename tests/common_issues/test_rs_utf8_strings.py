@@ -10,6 +10,7 @@ import pytest
 pa = pytest.importorskip("pyarrow")
 
 import mssql_python  # noqa: E402
+from mssql_python import connect  # noqa: E402
 from mssql_python import ddbc_bindings  # noqa: E402
 from mssql_python._utf8_strings import utf8_query  # noqa: E402
 
@@ -179,3 +180,36 @@ def test_server_gate():
     assert ddbc_bindings.utf8_collations_supported(15, 3)
     assert ddbc_bindings.utf8_collations_supported(12, 5)
     assert not ddbc_bindings.utf8_collations_supported(None, None)
+
+
+def test_non_utf8_database_collation_keeps_every_character(conn_str, cursor, table_name, needs_utf8):
+    """The conversion must target UTF-8, not the database code page (cp1252 turns these into '?')."""
+    cursor.execute("SELECT CAST(DATABASEPROPERTYEX(DB_NAME(), 'Collation') AS varchar(128))")
+    if "UTF8" in cursor.fetchone()[0]:
+        pytest.skip("database default collation is already UTF-8")
+    pad = "ascii padding " * 3  # keeps the sample smaller in UTF-8, so the rewrite applies
+    words = ["Привет мир", "Γειά σου κόσμε",
+             "中文漢字かな한글", "\U0001f600\U0001f680\U0001d11e", "שלום السلام"]
+    words = [pad + w for w in words]
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (id int NOT NULL, s nvarchar(200) NOT NULL, c nchar(100) NULL)")
+    for i, w in enumerate(words):
+        cursor.execute(f"INSERT INTO dbo.{table_name} VALUES (?, ?, ?)", (i, w, w))
+    cursor.connection.commit()
+    query = f"SELECT id, s, c FROM dbo.{table_name}"
+    with connect(conn_str) as conn:
+        assert "UTF8" in utf8_query(conn, query)
+    on = pa.table(mssql_python.read_arrow(conn_str, query))
+    off = pa.table(mssql_python.read_arrow(conn_str, query, utf8_strings=False))
+    assert on.equals(off)
+    assert on.column("s").to_pylist() == words
+    assert "?" not in "".join(on.column("s").to_pylist())
+
+
+def test_cjk_heavy_data_is_left_as_utf16(conn_str, cursor, table_name, needs_utf8):
+    """3 bytes per character in UTF-8 against 2 in UTF-16: the rewrite would grow the transfer."""
+    cursor.execute(f"CREATE TABLE dbo.{table_name} (id int NOT NULL, s nvarchar(200) NULL)")
+    cursor.execute(f"INSERT INTO dbo.{table_name} VALUES (1, REPLICATE(N'\u4e2d\u6587\u6f22\u5b57', 20)), (2, N'ascii')")
+    cursor.connection.commit()
+    query = f"SELECT id, s FROM dbo.{table_name}"
+    assert utf8_query(cursor.connection, query) == query
+    _same(mssql_python.read_arrow(conn_str, query), mssql_python.read_arrow(conn_str, query, utf8_strings=False))

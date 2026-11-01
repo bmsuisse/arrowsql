@@ -48,10 +48,23 @@ fn varchar_len(max_length_bytes: i64) -> String {
     if need > VARCHAR_MAX_LEN { "max".into() } else { need.max(1).to_string() }
 }
 
-/// `SELECT <list> FROM (<query>) AS q` with national character columns cast to
-/// UTF-8 varchar, or `None` when nothing would change or the shape is unsafe
-/// (empty or duplicate column names).
-pub fn build(query: &str, columns: &[Column]) -> Option<String> {
+/// The rewritten query and a probe that sizes a sample of the data.
+#[derive(Debug)]
+pub struct Rewrite {
+    /// `SELECT <list> FROM (<query>) AS q`, national columns cast to UTF-8 varchar.
+    pub wrapped: String,
+    /// One row: (UTF-8 bytes, UTF-16 bytes) of the national columns in the first
+    /// [`SAMPLE_ROWS`] rows. UTF-8 is larger than UTF-16 for CJK and similar
+    /// scripts (3 bytes against 2), so the caller compares them before using `wrapped`.
+    pub sample: String,
+}
+
+/// Rows the size probe looks at.
+const SAMPLE_ROWS: usize = 256;
+
+/// The rewrite of `query`, or `None` when nothing would change or the shape is
+/// unsafe (empty or duplicate column names, small national share).
+pub fn build(query: &str, columns: &[Column]) -> Option<Rewrite> {
     if columns.is_empty() {
         return None;
     }
@@ -59,6 +72,7 @@ pub fn build(query: &str, columns: &[Column]) -> Option<String> {
     let mut converted = false;
     let (mut national_bytes, mut total_bytes) = (0i64, 0i64);
     let mut items = Vec::with_capacity(columns.len());
+    let (mut utf8_terms, mut utf16_terms) = (Vec::new(), Vec::new());
     for col in columns {
         if col.name.is_empty() || !seen.insert(col.name.to_lowercase()) {
             return None;
@@ -83,6 +97,8 @@ pub fn build(query: &str, columns: &[Column]) -> Option<String> {
                     (quoted.clone(), varchar_len(col.max_length))
                 };
                 let cast = format!("CAST({operand} COLLATE {UTF8_COLLATION} AS varchar({len}))");
+                utf8_terms.push(format!("ISNULL(DATALENGTH({cast}), 0)"));
+                utf16_terms.push(format!("ISNULL(DATALENGTH({quoted}), 0)"));
                 // A CAST is always nullable; ISNULL keeps NOT NULL columns NOT NULL.
                 items.push(if col.nullable {
                     format!("{cast} AS {quoted}")
@@ -96,7 +112,13 @@ pub fn build(query: &str, columns: &[Column]) -> Option<String> {
     if !converted || national_bytes * 100 < total_bytes * MIN_SHARE_PERCENT {
         return None;
     }
-    Some(format!("SELECT {} FROM ({}\n) AS q", items.join(", "), query))
+    let sample = format!(
+        "SELECT SUM(CAST({} AS bigint)), SUM(CAST({} AS bigint)) FROM (SELECT TOP ({SAMPLE_ROWS}) * FROM ({}\n) AS s) AS q",
+        utf8_terms.join(" + "),
+        utf16_terms.join(" + "),
+        query
+    );
+    Some(Rewrite { wrapped: format!("SELECT {} FROM ({}\n) AS q", items.join(", "), query), sample })
 }
 
 /// Whether the server accepts UTF-8 collations: SQL Server 2019 (major 15)
@@ -105,11 +127,14 @@ pub fn server_supports_utf8(product_major_version: Option<i32>, engine_edition: 
     matches!(engine_edition, Some(5 | 8)) || product_major_version.is_some_and(|v| v >= 15)
 }
 
-/// ddbc_bindings.utf8_wrap_query(query, columns) -> str | None
+/// ddbc_bindings.utf8_wrap_query(query, columns) -> (wrapped_sql, sample_sql) | None
 ///
 /// `columns` holds (name, system_type_id, max_length, is_nullable) per described column.
 #[pyfunction]
-pub fn utf8_wrap_query(query: &str, columns: Vec<(Option<String>, i32, i64, Option<bool>)>) -> Option<String> {
+pub fn utf8_wrap_query(
+    query: &str,
+    columns: Vec<(Option<String>, i32, i64, Option<bool>)>,
+) -> Option<(String, String)> {
     let cols: Option<Vec<Column>> = columns
         .into_iter()
         .map(|(name, system_type_id, max_length, nullable)| {
@@ -121,7 +146,7 @@ pub fn utf8_wrap_query(query: &str, columns: Vec<(Option<String>, i32, i64, Opti
             })
         })
         .collect();
-    build(query, &cols?)
+    build(query, &cols?).map(|r| (r.wrapped, r.sample))
 }
 
 /// ddbc_bindings.utf8_collations_supported(product_major_version, engine_edition) -> bool
@@ -147,7 +172,8 @@ mod tests {
     #[test]
     fn wraps_national_columns_only() {
         let sql =
-            build("SELECT 1", &[col("id", 56, 4), col("a]b", SYS_NVARCHAR, 40), col("v", 167, 10)]).unwrap();
+            build("SELECT 1", &[col("id", 56, 4), col("a]b", SYS_NVARCHAR, 40), col("v", 167, 10)]).unwrap()
+            .wrapped;
         assert_eq!(
             sql,
             "SELECT [id], CAST([a]]b] COLLATE Latin1_General_100_BIN2_UTF8 AS varchar(80)) AS [a]]b], [v] FROM (SELECT 1\n) AS q"
@@ -158,7 +184,7 @@ mod tests {
     fn not_null_stays_not_null() {
         let mut c = col("a", SYS_NCHAR, 6);
         c.nullable = false;
-        let sql = build("q", &[c]).unwrap();
+        let sql = build("q", &[c]).unwrap().wrapped;
         assert!(sql.contains("ISNULL(CAST([a] COLLATE Latin1_General_100_BIN2_UTF8 AS varchar(12)), '') AS [a]"));
     }
 

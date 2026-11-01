@@ -21,8 +21,9 @@ Version numbers in this project are deliberately three different things:
   result and cast nvarchar/nchar/ntext columns to a UTF-8 collated varchar on the server (query
   wrapping is built in Rust: `ddbc_bindings.utf8_wrap_query`). About half the string bytes on
   the wire; same Arrow result. Needs SQL Server 2019+/Azure SQL; falls back to the original
-  query on ORDER BY, parameters, duplicate/empty column names, describe failures or a small
-  string share of the row. `utf8_strings=False` opts out.
+  query on ORDER BY, parameters, duplicate/empty column names, describe failures, a small
+  string share of the row, or when the first 256 rows are not at least 10% smaller in UTF-8 (CJK
+  grows). `utf8_strings=False` opts out.
 - The project is called **arrowsql** (distribution and import name `arrowsql`,
   repository github.com/bmsuisse/arrowsql). A `mssql_python` alias package keeps
   `import mssql_python` working: its modules are the `arrowsql` modules.
