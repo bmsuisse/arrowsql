@@ -19,6 +19,7 @@ use mssql_tds::datatypes::column_values::{
 use mssql_tds::datatypes::decoder::DecimalParts;
 use mssql_tds::datatypes::row_writer::RowWriter;
 use mssql_tds::datatypes::sql_json::SqlJson;
+use super::python::narrow_ascii_utf16;
 use mssql_tds::datatypes::sql_string::{EncodingType, SqlString};
 use mssql_tds::datatypes::sql_vector::SqlVector;
 use uuid::Uuid;
@@ -63,10 +64,17 @@ pub struct RowBuffer {
     pub cells: Vec<Cell>,
     pub arena: Vec<u8>,
     pub rows: usize,
+    /// Rows the fetch is expected to read; sizes the arena once for large values.
+    pub row_hint: usize,
 }
 
 /// Small buffers kept per thread so single-row and short fetches (fetchone,
 /// partial fetchmany) reuse allocations instead of making two per call.
+/// Values from this size on are stored narrowed (ASCII UTF-16) and reserve
+/// arena room for the whole fetch.
+const NARROW_ON_PUSH_MIN: usize = 16 << 10;
+const LOB_RESERVE_MIN: usize = 16 << 10;
+const LOB_RESERVE_MAX: usize = 1 << 30;
 const POOL_DEPTH: usize = 4;
 const POOL_MAX_CELLS: usize = 1024;
 const POOL_MAX_ARENA: usize = 16 << 10;
@@ -185,14 +193,45 @@ impl RowBuffer {
         }
     }
 
+    /// Room for `len` more arena bytes. A large value sizes the arena once for
+    /// the rows still to come: doubling a huge arena copies it each time and
+    /// faults its pages in twice.
+    fn reserve_lob(&mut self, len: usize) {
+        if len >= LOB_RESERVE_MIN && self.arena.capacity() - self.arena.len() < len {
+            let more = self.row_hint.saturating_sub(self.rows).clamp(1, LOB_RESERVE_MAX / len + 1);
+            self.arena.reserve_exact(len.saturating_mul(more));
+        }
+    }
+
     fn push_span(&mut self, bytes: &[u8]) -> Span {
         let start = self.arena.len();
+        self.reserve_lob(bytes.len());
         self.arena.extend_from_slice(bytes);
         Span { start, len: bytes.len() }
     }
 
     fn push_text(&mut self, bytes: &[u8], encoding: EncodingType) -> Cell {
         match encoding {
+            EncodingType::Utf16 if bytes.len() >= NARROW_ON_PUSH_MIN && bytes.len() % 2 == 0 => {
+                // Large ASCII values are stored one byte per character: half the
+                // arena to fill and to fault in.
+                let start = self.arena.len();
+                let len = bytes.len() / 2;
+                self.reserve_lob(len);
+                self.arena.reserve(len);
+                // SAFETY: `narrow_ascii_utf16` only writes `dst`, and the length
+                // is extended only after it filled all of it.
+                let narrowed = unsafe {
+                    let dst = std::slice::from_raw_parts_mut(self.arena.as_mut_ptr().add(start), len);
+                    narrow_ascii_utf16(bytes, dst)
+                };
+                if narrowed {
+                    unsafe { self.arena.set_len(start + len) };
+                    Cell::Utf8(Span { start, len })
+                } else {
+                    Cell::Utf16(self.push_span(bytes))
+                }
+            }
             EncodingType::Utf16 => Cell::Utf16(self.push_span(bytes)),
             EncodingType::Utf8 => match std::str::from_utf8(bytes) {
                 Ok(_) => Cell::Utf8(self.push_span(bytes)),
