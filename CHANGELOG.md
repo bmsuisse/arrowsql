@@ -79,5 +79,8 @@ Version numbers in this project are deliberately three different things:
 - Pool checkout does not probe an idle connection with a timeout (upstream
   GH #854), and `set_attr(SQL_ATTR_CONNECTION_TIMEOUT)` is not carried across
   pool reuse. See `tests/upstream_excluded.txt`.
-- Always Encrypted, `ActiveDirectoryPassword` and NTLM are not supported.
-- Only Linux x86_64 has been exercised against a database.
+- Always Encrypted and NTLM are not supported.
+- Linux x86_64 is the platform exercised daily against a database. CI also builds and runs
+  the DB-free tests on macOS, Windows (x64, arm64) and Linux arm64, and runs the DB suite
+  against SQL Server Express on `windows-latest` (the `windows-db` job; Windows is not a
+  required gate).

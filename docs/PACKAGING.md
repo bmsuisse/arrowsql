@@ -9,7 +9,7 @@ brings only the compiled `ddbc_bindings` extension and the vendored
 | (none) | nothing | `connect()`, the DB-API cursor/row path, `aio`, `read_arrow` on the native Arrow stream |
 | `arrow` | `pyarrow>=14` | `cursor.arrow()`, `arrow_batch()`, `arrow_reader()` (upstream API surface) |
 | `azure` | `azure-identity` | `auth=` / `token_provider=` with azure-identity credentials |
-| `async-preview` | `mssql-python-rs==0.4.0` (Microsoft `mssql_py_core`, ~30 MB) | `bulkcopy()`, `bulkcopy_arrow()`, upstream `async_query` preview |
+| `async-preview` | `mssql-python-rs==0.4.0` (Microsoft `mssql_py_core`, ~30 MB) | upstream `async_query` preview; fallback for `bulkcopy()` / `bulkcopy_arrow()` only on cursors without a native handle (bulk copy itself runs in the Rust core) |
 
 ## Wheels, sdist and versions
 
@@ -66,9 +66,10 @@ stack. Every optional import is lazy:
   Arrow fetch/insert methods (`TYPE_CHECKING` guard at module top).
 * `auth.py`, `db_connection.py`: `azure.identity` / `azure.core` are imported
   inside the functions that build those credentials.
-* `cursor.py` bulkcopy: `mssql_py_core` is imported in
-  `_bulkcopy_import_core()`. A missing package raises an `ImportError`
-  that names the `async-preview` extra.
+* `cursor.py` bulkcopy: bulk copy runs natively (`DDBCBulkCopyRows` /
+  `DDBCBulkCopyArrow`); `mssql_py_core` is imported in
+  `_bulkcopy_import_core()` only for cursors without a native handle. A
+  missing package raises an `ImportError` that names the `async-preview` extra.
 * `odbc_provider.py`: the provider package (`mssql_python_odbc` / `mssql_py_core`)
   is imported only when the upstream ODBC provider is selected. The Rust
   port path (`ddbc_bindings.__rust_port__`) skips that import.

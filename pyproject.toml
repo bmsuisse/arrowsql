@@ -36,7 +36,8 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-# Upstream async_query preview and bulkcopy() (still served by Microsoft's mssql_py_core).
+# Upstream async_query preview. bulkcopy()/bulkcopy_arrow() run natively; mssql_py_core is
+# only a fallback for cursors without a native handle (the upstream ODBC provider path).
 async-preview = ["mssql-python-rs==0.4.0"]
 # Arrow fetch (arrow(), arrow_batch(), read_arrow()) and Arrow bulk insert.
 arrow = ["pyarrow>=14"]

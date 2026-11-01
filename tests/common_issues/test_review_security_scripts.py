@@ -16,7 +16,7 @@ def _load(name):
 def test_with_database_replaces_key_case_insensitively():
     f = _load("run_tests").with_database
     assert f("Server=x;database=master;UID=u", "d") == "Server=x;database=d;UID=u"
-    assert f("Server=x;Initial Catalog = prod ;PWD=p", "d") == "Server=x;Initial Catalog = d;PWD=p"
+    assert f("Server=x;Initial Catalog = prod ;PWD=p", "d") == "Server=x;Initial Catalog =d;PWD=p"
     assert f("Server=x;DATABASE={a;b};PWD=p", "d") == "Server=x;DATABASE=d;PWD=p"
     assert f("Server=x;PWD=p", "d") == "Server=x;PWD=p;Database=d"
 
@@ -57,3 +57,19 @@ def test_parallel_probe_failure_is_logged(tmp_path):
     with mock.patch.object(arrow_parallel.logger, "debug") as dbg:
         assert arrow_parallel._probe_meta(_Cur(), "SELECT a FROM t", "a") == (None, True)
     assert dbg.called
+
+
+def test_workflows_pin_actions_and_restrict_publish():
+    import re
+
+    wf = _ROOT / ".github" / "workflows"
+    for f in wf.glob("*.yml"):
+        for line in f.read_text().splitlines():
+            m = re.search(r"uses:\s*([\w.-]+/[\w./-]+)@(\S+)", line)
+            if m:
+                assert re.fullmatch(r"[0-9a-f]{40}", m.group(2)), f"{f.name}: {line.strip()}"
+    release = (wf / "workflow.yml").read_text()
+    assert "github.ref == 'refs/heads/main'" in release
+    for line in release.splitlines():
+        if "needs.plan.outputs.version" in line:
+            assert line.strip().startswith(("VERSION:", "version:")), line
