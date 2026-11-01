@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="26 38 520 84" width="520" height="84" role="img" aria-label="arrowsql"><style>
+@keyframes up{0%,25%{transform:translate(0,0)}60%,100%{transform:translate(0,12px)}}
+@keyframes dn{0%,25%{transform:translate(0,0)}60%,100%{transform:translate(0,-12px)}}
+@keyframes mid{0%,25%{transform:translate(0,0)}60%,100%{transform:translate(24px,0)}}
+@keyframes fill{0%,30%{fill-opacity:0}60%,100%{fill-opacity:1}}
+.up{animation:up 2.8s cubic-bezier(.65,0,.25,1) infinite alternate,fill 2.8s ease infinite alternate}
+.dn{animation:dn 2.8s cubic-bezier(.65,0,.25,1) infinite alternate,fill 2.8s ease infinite alternate}
+.mid{animation:mid 2.8s cubic-bezier(.65,0,.25,1) infinite alternate,fill 2.8s ease infinite alternate}
+@media (prefers-reduced-motion:reduce){.up,.dn,.mid{animation:none;fill-opacity:1}.up{transform:translate(0,12px)}.dn{transform:translate(0,-12px)}.mid{transform:translate(24px,0)}}
+</style><g fill="none" stroke="#F4F1EA" stroke-width="3"><rect x="35.5" y="47.5" width="17" height="17" rx="3"/><rect x="35.5" y="71.5" width="17" height="17" rx="3"/><rect x="35.5" y="95.5" width="17" height="17" rx="3"/><rect x="59.5" y="47.5" width="17" height="17" rx="3"/><rect x="59.5" y="71.5" width="17" height="17" rx="3"/><rect x="59.5" y="95.5" width="17" height="17" rx="3"/></g><g fill="#FFC233" stroke="#FFC233" stroke-width="3"><rect class="up" x="83.5" y="47.5" width="17" height="17" rx="3"/><rect class="mid" x="83.5" y="71.5" width="17" height="17" rx="3"/><rect class="dn" x="83.5" y="95.5" width="17" height="17" rx="3"/></g><text x="146" y="104" font-family="'Space Grotesk','Inter','Segoe UI',Helvetica,Arial,sans-serif" font-size="64" font-weight="700" letter-spacing="-1.5" fill="#F4F1EA">arrow<tspan fill="#FFC233">sql</tspan></text></svg>
