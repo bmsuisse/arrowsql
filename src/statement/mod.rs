@@ -32,6 +32,7 @@ use crate::connection::ConnShared;
 use crate::consts::*;
 use crate::diag::DiagRecord;
 pub(crate) use cancel::StmtCancel;
+pub(crate) use wire::DRAIN_BUDGET_BYTES;
 use cursor::StmtState;
 use exec::{Command, execute_command};
 pub(crate) use exec::with_exclusive_wire;
