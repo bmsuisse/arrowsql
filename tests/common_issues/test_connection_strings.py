@@ -252,7 +252,10 @@ def test_unknown_connection_string_keyword_raises_parse_error(conn_str):
 
     with pytest.raises(ConnectionStringParseError) as info:
         connect(s)
-    assert "cibogus" in str(info.value).lower()
+    # The string holds a PWD, so an arbitrary unknown name (maybe a password
+    # fragment) is reported by position, not echoed (review r5 F2).
+    assert "unknown keyword" in str(info.value).lower()
+    assert "cibogus" not in str(info.value).lower()
 
 
 # ---------------------------------------------------------------------------

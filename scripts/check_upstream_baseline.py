@@ -27,7 +27,21 @@ def excluded_ids() -> list[str]:
     return ids
 
 
-ERROR_LINE = re.compile(r"^ERROR (\S+?)(?: - .*)?$")
+def parse_error_line(line: str, baseline: set[str]) -> str | None:
+    """Node id of a pytest ``ERROR <id>[ - <message>]`` summary line, else None.
+
+    Node ids may hold spaces (parametrize ids), so the id is matched against the
+    known baseline first, longest candidate first; otherwise the text before the
+    first " - " is used.
+    """
+    if not line.startswith("ERROR "):
+        return None
+    rest = line[len("ERROR "):]
+    candidates = [rest] + [rest[: m.start()] for m in re.finditer(" - ", rest)]
+    for candidate in candidates:
+        if candidate in baseline:
+            return candidate
+    return rest.split(" - ", 1)[0]
 
 
 def main() -> int:
@@ -56,9 +70,9 @@ def main() -> int:
         match = re.match(r"^PASSED (\S.*)$", line.rstrip("\n"))
         if match:
             passed.add(match.group(1))
-        err = ERROR_LINE.match(line.rstrip("\n"))
+        err = parse_error_line(line.rstrip("\n"), baseline)
         if err:
-            errored.add(err.group(1))
+            errored.add(err)
     proc.wait()
 
     def is_excluded(test_id: str) -> bool:
