@@ -4,6 +4,7 @@ No database needed.
 """
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -81,15 +82,22 @@ def test_redact_removes_connection_string_and_password():
     assert "Secret" not in out and "Server=s" not in out
 
 
-def test_ensure_database_failure_is_redacted(tmp_path, capsys):
-    fake = tmp_path / "python"
-    fake.write_text("#!/bin/sh\necho \"boom $RUN_TESTS_SETUP_CONN\" >&2\nexit 3\n")
-    fake.chmod(0o755)
+def test_ensure_database_failure_is_redacted(monkeypatch):
     conn = "Server=s;PWD=hunter2-secret;UID=u"
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(cmd, 3, "", f"boom {conn} hunter2-secret")
+
+    monkeypatch.setattr(run_tests.subprocess, "run", fake_run)
     with pytest.raises(SystemExit) as exc:
-        run_tests.ensure_database(fake, conn, "rs_agent_x")
+        run_tests.ensure_database(Path("python"), conn, "rs_agent_x")
     assert "hunter2-secret" not in str(exc.value)
     assert "exit 3" in str(exc.value)
+    assert not any("hunter2-secret" in str(a) for a in seen["cmd"])
+    assert seen["env"]["RUN_TESTS_SETUP_CONN"] == conn
 
 
 NODE = "test_004_cursor.py::test_x[values0-Small decimals with scientific notation]"
