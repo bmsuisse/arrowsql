@@ -32,6 +32,8 @@ where possible, and the upstream test suite is the compatibility bar.
 
 ## Usage
 
+Runnable examples: [examples/](examples/) (Arrow and DuckDB, bulk loads, agent mode).
+
 Same API as mssql-python (DB-API 2.0, `?` parameters):
 
 ```python
