@@ -1351,6 +1351,12 @@ fn py_to_column_value_internal(
     if py_obj.is_instance_of::<PyString>() {
         // Direct string extraction - no fallback needed
         let val = str_text(py_obj)?;
+        // xml and json columns take their text as-is; String would fail the type check.
+        match target_metadata.map(|meta| meta.sql_type) {
+            Some(SqlDbType::Xml) => return Ok(ColumnValues::Xml(SqlXml::from(val))),
+            Some(SqlDbType::Json) => return Ok(ColumnValues::Json(SqlJson::from(val))),
+            _ => {}
+        }
         let sql_string = SqlString::from_utf8_string(val);
         return Ok(ColumnValues::String(sql_string));
     }
@@ -1789,6 +1795,9 @@ fn validate_type_compatibility(
 
         // UUID/GUID
         (ColumnValues::Uuid(_), SqlDbType::UniqueIdentifier) => true,
+
+        // XML
+        (ColumnValues::Xml(_), SqlDbType::Xml) => true,
 
         // JSON
         (ColumnValues::Json(_), SqlDbType::Json) => true,
