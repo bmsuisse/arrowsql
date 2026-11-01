@@ -850,7 +850,7 @@ pub fn load(
             "bulkcopy data rows must be tuples or Row objects, got {}",
             type_name(&first)
         )))?;
-    let shape = SourceShape { column_count: first_row.len(), names: None };
+    let shape = SourceShape { column_count: first_row.len(), names: None, reject_extra_columns: true };
     let raised = Arc::new(Mutex::new(None));
     let source = iterator.unbind();
     let first = first.unbind();

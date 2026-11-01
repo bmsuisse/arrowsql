@@ -471,6 +471,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ragged_rows_are_an_error_not_a_panic() {
+        let mut rows = vec![vec![SqlType::Int(Some(1)), SqlType::Int(Some(2))], vec![SqlType::Int(Some(3))]];
+        let nulls = vec![vec![false, false], vec![false]];
+        assert!(normalize(&mut rows, &nulls).is_err());
+        let mut rows = vec![vec![SqlType::Int(Some(1))], vec![SqlType::Int(Some(3)), SqlType::Int(Some(4))]];
+        let nulls = vec![vec![false], vec![false, false]];
+        assert!(normalize(&mut rows, &nulls).is_err());
+    }
+
     /// The int/Decimal fast path must agree with the text path, errors included.
     #[test]
     fn int_decimal_fast_path_matches_the_text_path() {

@@ -416,6 +416,7 @@ pub fn load(
     let shape = SourceShape {
         column_count: schema.fields().len(),
         names: Some(schema.fields().iter().map(|f| f.name().clone()).collect()),
+        reject_extra_columns: false,
     };
     run(stmt, settings, &shape, |destination, resolved| {
         let plans = build_plans(&schema, destination, resolved).map_err(BulkFailure::Unsupported)?;
