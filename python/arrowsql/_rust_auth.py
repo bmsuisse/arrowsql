@@ -13,6 +13,7 @@ through to a SQL login with the client id or UPN. This module keeps auth.py
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from typing import Callable, Dict, Optional
 
@@ -81,25 +82,39 @@ def make_password_token_factory(username: str, password: str) -> Callable[[str, 
     if not username or not password:
         raise ValueError("ActiveDirectoryPassword auth requires UID (user principal name) and PWD")
 
+    secret_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+
     def _factory(spn: str, sts_url: str, _auth_method: str) -> bytes:
         # pylint: disable=import-outside-toplevel
         from azure.identity import UsernamePasswordCredential
         from azure.core.exceptions import ClientAuthenticationError
-        from arrowsql.auth import _parse_tenant_id
+        from azure.core.pipeline.transport import RequestsTransport
+        from arrowsql import auth as _auth
 
         if not spn:
             raise RuntimeError("ActiveDirectoryPassword: empty SPN from server")
-        tenant_id = _parse_tenant_id(sts_url)
+        tenant_id = _auth._parse_tenant_id(sts_url)
         if not tenant_id:
             raise RuntimeError(f"Could not extract tenant_id from STS URL: {sts_url!r}")
-        scope = spn if spn.endswith("/.default") else spn.rstrip("/") + "/.default"
+        scope = _auth._scope_from_server_spn(spn)
         try:
-            credential = UsernamePasswordCredential(
-                client_id=_PASSWORD_CLIENT_ID,
-                username=username,
-                password=password,
-                tenant_id=tenant_id,
+            cache_key = _auth._credential_cache_key(
+                _AD_PASSWORD,
+                {"tenant_id": tenant_id, "username": username, "secret_hash": secret_hash},
             )
+            with _auth._credential_cache_lock:
+                credential = _auth._credential_cache.get(cache_key)
+                if credential is None:
+                    # The factory runs on a blocking-pool worker of the core;
+                    # bound the Entra round-trip like the service-principal path.
+                    credential = UsernamePasswordCredential(
+                        client_id=_PASSWORD_CLIENT_ID,
+                        username=username,
+                        password=password,
+                        tenant_id=tenant_id,
+                        transport=RequestsTransport(connection_timeout=10, read_timeout=15),
+                    )
+                    _auth._credential_cache[cache_key] = credential
             token = credential.get_token(scope).token
         except ClientAuthenticationError:
             # The provider text can echo the account; keep it out of the exception chain.

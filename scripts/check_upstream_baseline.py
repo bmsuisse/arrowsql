@@ -27,6 +27,9 @@ def excluded_ids() -> list[str]:
     return ids
 
 
+ERROR_LINE = re.compile(r"^ERROR (\S+?)(?: - .*)?$")
+
+
 def main() -> int:
     baseline = {
         line.strip()
@@ -45,6 +48,7 @@ def main() -> int:
     print("+", " ".join(cmd), flush=True)
 
     passed: set[str] = set()
+    errored: set[str] = set()
     proc = subprocess.Popen(cmd, cwd=UPSTREAM, stdout=subprocess.PIPE, text=True, errors="replace")
     assert proc.stdout is not None
     for line in proc.stdout:
@@ -52,6 +56,9 @@ def main() -> int:
         match = re.match(r"^PASSED (\S.*)$", line.rstrip("\n"))
         if match:
             passed.add(match.group(1))
+        err = ERROR_LINE.match(line.rstrip("\n"))
+        if err:
+            errored.add(err.group(1))
     proc.wait()
 
     def is_excluded(test_id: str) -> bool:
@@ -59,10 +66,13 @@ def main() -> int:
             test_id == e or test_id.startswith(e + "::") or test_id.startswith(e + "[") for e in excluded
         )
 
-    missing = sorted(t for t in baseline - passed if not is_excluded(t))
+    # A teardown ERROR is reported next to PASSED for the same test; it still
+    # counts as a regression.
+    missing = sorted(t for t in baseline if (t not in passed or t in errored) and not is_excluded(t))
     print(
         f"\nbaseline: {len(baseline)}  passed: {len(passed)}  excluded entries: {len(excluded)}  "
-        f"passing outside the baseline: {len(passed - baseline)}  baseline tests not passing: {len(missing)}"
+        f"passing outside the baseline: {len(passed - baseline)}  baseline tests not passing: {len(missing)}  "
+        f"errors: {len(errored)}"
     )
     for test_id in missing[:200]:
         print("  MISSING", test_id)

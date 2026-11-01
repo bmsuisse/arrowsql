@@ -33,6 +33,23 @@ def load_env(path: Path) -> dict:
     return env
 
 
+_DB_KEY = re.compile(
+    r"(?i)(^|;)(\s*(?:database|initial\s+catalog)\s*=)(\s*(?:\{(?:[^}]|\}\})*\}|[^;]*))"
+)
+
+
+def with_database(conn_str: str, name: str) -> str:
+    """Return conn_str with its Database / Initial Catalog key set to ``name``.
+
+    Keys are matched case-insensitively and only at a key position; a braced
+    value may hold ';'. When neither key is present ``Database=<name>`` is appended.
+    """
+    new, count = _DB_KEY.subn(lambda m: f"{m.group(1)}{m.group(2)}{name}", conn_str)
+    if count:
+        return new
+    return conn_str.rstrip(";") + f";Database={name}"
+
+
 def ensure_database(python: Path, conn_str: str, name: str) -> None:
     code = (
         "import sys, mssql_python\n"
@@ -51,7 +68,7 @@ def main() -> int:
     # RUN_TESTS_PYTHON selects another interpreter, e.g. <main>/.venv-upstream/bin/python for ground truth.
     python = Path(os.environ.get("RUN_TESTS_PYTHON", ROOT / ".venv" / "bin" / "python"))
     ensure_database(python, env["DB_CONNECTION_STRING"], db)
-    env["DB_CONNECTION_STRING"] = env["DB_CONNECTION_STRING"].replace("Database=master", f"Database={db}")
+    env["DB_CONNECTION_STRING"] = with_database(env["DB_CONNECTION_STRING"], db)
     args = [str(ROOT / a) if (ROOT / a.split("::")[0]).exists() else a for a in sys.argv[2:]]
     cmd = [str(python), "-m", "pytest", "-q", "-p", "no:cacheprovider", "--timeout", "120", *args]
     return subprocess.run(cmd, env=env, cwd=ROOT / "tests" / "upstream").returncode

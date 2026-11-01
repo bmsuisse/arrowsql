@@ -292,3 +292,75 @@ def test_checkin_probe_is_bounded_on_a_half_open_socket(conn_str, pooled):
         assert time.monotonic() - started < 20
     finally:
         proxy.close()
+
+
+# --- review r4 S12: server-supplied SPN allow-list, AD password parity ---------
+
+
+@pytest.fixture(autouse=True)
+def _fresh_credential_cache():
+    from arrowsql import auth
+
+    auth._credential_cache.clear()
+    yield
+    auth._credential_cache.clear()
+
+
+@pytest.mark.parametrize(
+    "spn",
+    [
+        "https://evil.example.com/",
+        "https://database.windows.net.evil.example/",
+        "http://database.windows.net/",
+        "https://user@evil.example/database.windows.net",
+        "https://database.windows.net:8443/",
+        "database.windows.net",
+    ],
+)
+@pytest.mark.parametrize("mode", ["ActiveDirectoryServicePrincipal", "ActiveDirectoryPassword"])
+def test_untrusted_spn_never_reaches_the_credential(mode, spn, native_calls, monkeypatch):
+    used = []
+    _fake_azure(monkeypatch, used)
+    with pytest.raises(_Stop):
+        connect(BOGUS + f"Authentication={mode};UID=cid;PWD=sec")
+    factory = native_calls[0][5]
+    with pytest.raises(RuntimeError, match="known SQL resource host"):
+        factory(spn, "https://login.microsoftonline.com/contoso.onmicrosoft.com/", mode)
+    assert not [u for u in used if len(u) == 3 and u[1] == "scope"]
+
+
+@pytest.mark.parametrize(
+    "spn,scope",
+    [
+        ("https://database.windows.net/", "https://database.windows.net/.default"),
+        ("https://database.windows.net/.default", "https://database.windows.net/.default"),
+        ("https://database.chinacloudapi.cn/", "https://database.chinacloudapi.cn/.default"),
+        ("https://Database.USGovCloudApi.net", "https://database.usgovcloudapi.net/.default"),
+    ],
+)
+def test_sovereign_sql_hosts_are_accepted(spn, scope, native_calls, monkeypatch):
+    used = []
+    _fake_azure(monkeypatch, used)
+    with pytest.raises(_Stop):
+        connect(BOGUS + "Authentication=ActiveDirectoryPassword;UID=a@contoso.com;PWD=pw")
+    native_calls[0][5](spn, "https://login.microsoftonline.com/contoso.onmicrosoft.com/", "x")
+    assert ("UsernamePasswordCredential", "scope", scope) in used
+
+
+def test_ad_password_factory_bounds_timeouts_and_reuses_the_credential(native_calls, monkeypatch):
+    used = []
+    _fake_azure(monkeypatch, used)
+    import azure.core.pipeline.transport as azt
+
+    seen = []
+    real = azt.RequestsTransport
+    monkeypatch.setattr(azt, "RequestsTransport", lambda **kw: seen.append(kw) or real(**kw))
+    with pytest.raises(_Stop):
+        connect(BOGUS + "Authentication=ActiveDirectoryPassword;UID=a@contoso.com;PWD=pw")
+    factory = native_calls[0][5]
+    args = ("https://database.windows.net/", "https://login.microsoftonline.com/contoso.onmicrosoft.com/", "x")
+    factory(*args)
+    factory(*args)
+    creds = [u for u in used if u[0] == "UsernamePasswordCredential" and isinstance(u[1], dict)]
+    assert len(creds) == 1, "credential must be cached across calls"
+    assert seen == [{"connection_timeout": 10, "read_timeout": 15}]

@@ -15,6 +15,7 @@ Parser behavior:
 - Collects all errors and reports them together
 """
 
+import re
 from typing import Dict, Tuple, Optional
 from arrowsql.exceptions import ConnectionStringParseError
 from arrowsql.constants import _ALLOWED_CONNECTION_STRING_PARAMS, _RESERVED_PARAMETERS
@@ -22,6 +23,21 @@ from arrowsql.helpers import sanitize_user_input
 from arrowsql.logging import logger
 
 _SENSITIVE_KEYS = frozenset({"pwd", "password"})
+
+
+_PLAIN_KEYWORD = re.compile(r"[A-Za-z][A-Za-z0-9_ ]{0,39}")
+
+
+def _display_key(key: str, position: int) -> str:
+    """Keyword text for an error message.
+
+    A "keyword" can be a fragment of a value that held an unescaped ';' (for
+    example a password), so only identifier-like names are echoed; anything
+    else is reported by position.
+    """
+    if _PLAIN_KEYWORD.fullmatch(key):
+        return f"'{key}'"
+    return f"at position {position}"
 
 
 class _ConnectionStringParser:
@@ -167,6 +183,7 @@ class _ConnectionStringParser:
 
         # Dictionary to store parsed key=value pairs
         params = {}
+        key_positions: Dict[str, int] = {}
 
         # Track current position in the string
         current_pos = 0
@@ -193,13 +210,21 @@ class _ConnectionStringParser:
                 # ERROR: No '=' found - incomplete specification
                 incomplete_text = connection_str[key_start:current_pos].strip()
                 if incomplete_text:
+                    # Without '=' this may be a piece of a value that contained an
+                    # unescaped ';' (a password), so only echo known keywords.
+                    shown = (
+                        f"'{incomplete_text}'"
+                        if _ConnectionStringParser.normalize_key(incomplete_text.lower())
+                        else f"at position {key_start}"
+                    )
                     errors.append(
-                        f"Incomplete specification: keyword '{incomplete_text}' has no value (missing '=')"
+                        f"Incomplete specification: keyword {shown} has no value (missing '=')"
                     )
                 continue
 
             # Extract and normalize the key
             key = connection_str[key_start:current_pos].strip().lower()
+            key_shown = _display_key(key, key_start)
 
             # ERROR: Empty key
             if not key:
@@ -220,17 +245,18 @@ class _ConnectionStringParser:
                 # ERROR: Empty value
                 if not value:
                     errors.append(
-                        f"Empty value for keyword '{key}' (all connection string parameters must have non-empty values)"
+                        f"Empty value for keyword {key_shown} (all connection string parameters must have non-empty values)"
                     )
 
                 # Check for duplicates
                 if key in params:
-                    errors.append(f"Duplicate keyword '{key}' found")
+                    errors.append(f"Duplicate keyword {key_shown} found")
                 else:
                     params[key] = value
+                    key_positions[key] = key_start
 
             except ValueError as e:
-                errors.append(f"Error parsing value for keyword '{key}': {e}")
+                errors.append(f"Error parsing value for keyword {key_shown}: {e}")
                 # Skip to next semicolon
                 while current_pos < str_len and connection_str[current_pos] != ";":
                     current_pos += 1
@@ -259,7 +285,9 @@ class _ConnectionStringParser:
 
             if unknown_keys:
                 for key in unknown_keys:
-                    errors.append(f"Unknown keyword '{key}' is not recognized")
+                    errors.append(
+                        f"Unknown keyword {_display_key(key, key_positions.get(key, -1))} is not recognized"
+                    )
 
         # If we collected any errors, raise them all together
         if errors:
