@@ -9,6 +9,7 @@
 
 import datetime as dt
 import decimal
+import json
 import uuid
 
 import pytest
@@ -111,9 +112,16 @@ def test_vector_column_is_either_loaded_or_rejected_cleanly(cursor, table_name):
     except mssql_python.Error:
         pytest.skip("VECTOR type needs SQL Server 2025")
     cursor.connection.commit()
-    cursor.bulkcopy(f"dbo.{table_name}", [(1, "[1.0, 2.0, 3.0]")])
-    cursor.execute(f"SELECT COUNT(*) FROM dbo.{table_name}")
-    assert cursor.fetchone()[0] == 1
+    cursor.bulkcopy(f"dbo.{table_name}", [(1, [1.0, 2.0, 3.0]), (2, [4.5, 5.5, 6.5]), (3, None)])
+    cursor.execute(f"SELECT id, v FROM dbo.{table_name} ORDER BY id")
+    rows = cursor.fetchall()
+
+    def floats(value):  # read back as text today, as a list upstream
+        return [float(x) for x in (json.loads(value) if isinstance(value, str) else value)]
+
+    assert rows[0][0] == 1 and floats(rows[0][1]) == [1.0, 2.0, 3.0]
+    assert floats(rows[1][1]) == [4.5, 5.5, 6.5]
+    assert rows[2][1] is None
 
 
 def test_json_column_is_either_loaded_or_rejected_cleanly(cursor, table_name):

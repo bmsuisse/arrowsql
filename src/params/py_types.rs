@@ -1347,6 +1347,16 @@ fn py_to_column_value_internal(
         }
     }
 
+    // A vector column takes a sequence of floats (the str branch below would only mismatch it).
+    if target_metadata.is_some_and(|meta| meta.sql_type == SqlDbType::Vector)
+        && !py_obj.is_instance_of::<PyString>()
+    {
+        let values = py_obj.extract::<Vec<f32>>().map_err(|e| {
+            Error::UsageError(format!("Failed to convert value to VECTOR: {e}"))
+        })?;
+        return Ok(ColumnValues::Vector(SqlVector::try_from_f32(values)?));
+    }
+
     // Check for string (second most common)
     if py_obj.is_instance_of::<PyString>() {
         // Direct string extraction - no fallback needed
