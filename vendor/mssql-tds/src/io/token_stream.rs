@@ -239,7 +239,12 @@ pub(crate) trait TdsTokenStreamReader {
 
     /// VENDOR PATCH: the type byte of the next token without consuming it
     /// (`None` when the transport cannot look ahead).
-    async fn peek_token_type(&mut self) -> TdsResult<Option<u8>> {
+    async fn peek_token_type(
+        &mut self,
+        _context: &ParserContext,
+        _remaining_request_timeout: Option<Duration>,
+        _cancel_handle: Option<&CancelHandle>,
+    ) -> TdsResult<Option<u8>> {
         Ok(None)
     }
 

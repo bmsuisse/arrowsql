@@ -3143,6 +3143,57 @@ impl NetworkTransport {
         })
     }
 
+    /// VENDOR PATCH: the type byte of the next token, left unconsumed. Waits
+    /// for it like a token read does (timeout, cancellation and ATTENTION
+    /// settlement included), since the server may be blocked before its first
+    /// row.
+    pub(crate) async fn peek_token_type(
+        &mut self,
+        context: &ParserContext,
+        remaining_request_timeout: Option<Duration>,
+        cancel_handle: Option<&CancelHandle>,
+    ) -> TdsResult<Option<u8>> {
+        async fn peek(this: &mut NetworkTransport) -> TdsResult<Option<u8>> {
+            if this.tds_read_buffer.get_buffered_slice().is_empty() {
+                this.refill_for(1).await?;
+            }
+            Ok(this.tds_read_buffer.get_buffered_slice().first().copied())
+        }
+        if !self.tds_read_buffer.get_buffered_slice().is_empty() {
+            return Ok(self.tds_read_buffer.get_buffered_slice().first().copied());
+        }
+        self.attention_settlement = None;
+        let attention_stream = self.stream.as_ref().cloned();
+        let already_dead = self.known_dead;
+        let outcome = {
+            let mut read = std::pin::pin!(peek(self));
+            read_to_attention_boundary(
+                read.as_mut(),
+                remaining_request_timeout,
+                cancel_handle,
+                attention_stream,
+                already_dead,
+            )
+            .await
+        };
+        let (error, boundary) = match outcome {
+            InterruptibleRead::Completed(result) => return result,
+            InterruptibleRead::Interrupted { error, boundary } => (error, boundary),
+        };
+        let Some((deadline, completed)) = boundary else {
+            self.known_dead = true;
+            return Err(*error);
+        };
+        match completed {
+            Ok(_) => match self.wait_for_attention_ack(context, None, deadline).await {
+                Ok(true) => {}
+                Ok(false) | Err(_) => self.known_dead = true,
+            },
+            Err(_) => self.known_dead = true,
+        }
+        Err(*error)
+    }
+
     pub(crate) async fn receive_token(
         &mut self,
         context: &ParserContext,
@@ -3487,11 +3538,14 @@ impl TdsTokenStreamReader for NetworkTransport {
             .await
     }
 
-    async fn peek_token_type(&mut self) -> TdsResult<Option<u8>> {
-        if self.tds_read_buffer.get_buffered_slice().is_empty() {
-            self.refill_for(1).await?;
-        }
-        Ok(self.tds_read_buffer.get_buffered_slice().first().copied())
+    async fn peek_token_type(
+        &mut self,
+        context: &ParserContext,
+        remaining_request_timeout: Option<Duration>,
+        cancel_handle: Option<&CancelHandle>,
+    ) -> TdsResult<Option<u8>> {
+        NetworkTransport::peek_token_type(self, context, remaining_request_timeout, cancel_handle)
+            .await
     }
 
     async fn receive_row_into(

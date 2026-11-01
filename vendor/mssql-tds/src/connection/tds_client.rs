@@ -6046,14 +6046,24 @@ impl TdsClient {
     async fn absorb_browse_info(
         &mut self,
         md: Arc<ColMetadataToken>,
-        parser_context: &ParserContext,
+        _parser_context: &ParserContext,
     ) -> TdsResult<Arc<ColMetadataToken>> {
         if md.columns.is_empty() {
             return Ok(md);
         }
+        // Decode context for anything an interrupted wait has to drain.
+        let parser_context = &ParserContext::ColumnMetadata(Arc::clone(&md), None);
         let mut hidden: Vec<u16> = Vec::new();
         loop {
-            match self.transport.peek_token_type().await {
+            let peeked = self
+                .transport
+                .peek_token_type(
+                    parser_context,
+                    self.remaining_request_timeout,
+                    self.cancel_handle.as_ref(),
+                )
+                .await;
+            match peeked {
                 Ok(Some(0xA4 | 0xA5)) => {}
                 Ok(_) => break,
                 Err(error) => return Err(self.fail_read(error)),
