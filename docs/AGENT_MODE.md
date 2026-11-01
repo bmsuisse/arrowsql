@@ -50,3 +50,17 @@ text = query(conn_or_connection_string, "SELECT TOP 100 * FROM dbo.orders WHERE 
   a partial result with a success footer. Bad arguments exit 2, Ctrl-C exits 130.
 - `query_cursor(cursor, sql)` runs on an existing cursor; `render_cursor(cursor)`
   renders one that has just executed. String connections use autocommit.
+
+## Credentials and least privilege
+
+- The CLI accepts a full connection string with `--connection-string` / `--conn`.
+  Anything on the command line is visible to other local users (`ps`, `/proc`) and ends up
+  in shell history and agent transcripts, so do **not** put the password there. Pass it
+  through the environment instead: `MSSQL_CONNECTION_STRING` or `DB_CONNECTION_STRING`
+  (read when `--connection-string` is absent), set from a secret store or an untracked
+  `.env` file the agent never prints.
+- Give the agent its own SQL login or Entra principal with the least privilege that the
+  task needs, ideally read-only (`db_datareader`, `VIEW DEFINITION`) on one database. The
+  tool runs the SQL it is given unchanged and does not make an unsafe statement safe.
+- Prefer `Authentication=ActiveDirectoryServicePrincipal`-style or token credentials with
+  short lifetimes over long-lived `sa` passwords; never use `sa`.

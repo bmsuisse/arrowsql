@@ -81,6 +81,42 @@ class TokenInfo(NamedTuple):
 # audience is rejected by SQL Server at login.
 _SQL_SCOPE = "https://database.windows.net/.default"
 
+# Resource hosts a SQL server may name in FEDAUTHINFO. The SPN comes from the
+# (possibly untrusted) server, so a token is only requested for these audiences;
+# anything else fails closed instead of minting a token for an arbitrary resource.
+_ALLOWED_SQL_RESOURCE_HOSTS = frozenset(
+    {
+        "database.windows.net",
+        "database.chinacloudapi.cn",
+        "database.usgovcloudapi.net",
+        "database.cloudapi.de",
+        "database.fabric.microsoft.com",
+    }
+)
+
+
+def _scope_from_server_spn(spn: str) -> str:
+    """Return the ``.default`` scope for a server-supplied resource SPN.
+
+    Raises ``RuntimeError`` unless the SPN is an https URL on an allow-listed
+    SQL resource host. Only the host is used; any path or query is dropped.
+    """
+    # pylint: disable=import-outside-toplevel
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(spn or "")
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        host = ""
+    if parsed.scheme != "https" or host not in _ALLOWED_SQL_RESOURCE_HOSTS or parsed.port not in (None, 443):
+        raise RuntimeError(
+            "Refusing to request an Entra token: the server named a resource that is not a "
+            "known SQL resource host"
+        )
+    return f"https://{host}/.default"
+
+
 # One-time guard so the DefaultAzureCredential multi-user pooling caveat is
 # logged at most once per process rather than on every token acquisition.
 _dac_pooling_warned = False
@@ -443,6 +479,7 @@ class ServicePrincipalAuth:
             tenant_id = _parse_tenant_id(sts_url)
             if not tenant_id:
                 raise RuntimeError(f"Could not extract tenant_id from STS URL: {sts_url!r}")
+            scope = _scope_from_server_spn(spn)
 
             try:
                 # Reuse the shared credential cache (introduced for MSI in PR #573)
@@ -508,7 +545,6 @@ class ServicePrincipalAuth:
                         )
                         _credential_cache[cache_key] = credential
                 # mssql-tds passes the resource SPN; azure-identity wants a scope.
-                scope = spn if spn.endswith("/.default") else spn.rstrip("/") + "/.default"
                 token = credential.get_token(scope).token
                 logger.info(
                     "ServicePrincipal token factory: token acquired, length=%d chars",

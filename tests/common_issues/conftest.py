@@ -31,12 +31,19 @@ def pytest_collection_modifyitems(config, items):
             item.own_markers = [m for m in item.own_markers if m.name != "xfail"]
 
 
+class _RedactedStr(str):
+    """A connection string whose repr never shows the password in tracebacks."""
+
+    def __repr__(self):
+        return "<connection string (redacted)>"
+
+
 @pytest.fixture(scope="session")
 def conn_str():
     value = os.environ.get("DB_CONNECTION_STRING")
     if not value:
         pytest.skip("DB_CONNECTION_STRING not set")
-    return value
+    return _RedactedStr(value)
 
 
 @pytest.fixture

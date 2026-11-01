@@ -9,11 +9,11 @@ compatibility.
 | | upstream mssql-python 1.16 | this project today | target |
 |---|---:|---:|---:|
 | driver | 9.4 MB (`mssql_python`) | 4.7 MB extension + 0.6 MB Python | ~2-3 MB |
-| `mssql_py_core` (Rust TDS, via `mssql-python-rs`) | 30 MB | 30 MB (bulkcopy, async preview) | 0 (optional extra) |
+| `mssql_py_core` (Rust TDS, via `mssql-python-rs`) | 30 MB | 0 core, 30 MB with the `async-preview` extra (async preview; bulkcopy fallback only) | 0 (optional extra) |
 | `mssql_python_odbc` (ODBC driver) | 7 MB | 0 | 0 |
 | required runtime deps | 2 | 1 | **0** |
 
-Plan: own bulk copy in the Rust core (drops `mssql_py_core` for bulkcopy), the
+Done: bulk copy runs in the Rust core (`mssql_py_core` is no longer needed for bulkcopy). Plan: the
 upstream async preview moves behind an extra, `pyarrow` and `azure-identity`
 stay optional, one abi3 wheel per platform if the measured cost is nil,
 stripped release builds.

@@ -137,7 +137,7 @@ class MSSQLLogger:
                 for handler in old_handlers:
                     try:
                         handler.flush()  # Flush BEFORE close
-                    except:
+                    except Exception:
                         pass  # Ignore flush errors
                     handler.close()
                     self._logger.removeHandler(handler)
@@ -146,7 +146,7 @@ class MSSQLLogger:
                 for handler in old_handlers:
                     try:
                         handler.release()
-                    except:
+                    except Exception:
                         pass  # Handler might already be closed
 
             self._file_handler = None
@@ -250,14 +250,14 @@ class MSSQLLogger:
                     try:
                         handler.flush()
                         handler.close()
-                    except:
+                    except Exception:
                         pass  # Ignore errors during cleanup
                     self._logger.removeHandler(handler)
             finally:
                 for handler in handlers:
                     try:
                         handler.release()
-                    except:
+                    except Exception:
                         pass
 
     def _validate_log_file_path(self, file_path: str) -> str:
@@ -328,7 +328,7 @@ class MSSQLLogger:
                 from arrowsql import __version__
 
                 driver_version = __version__
-            except:
+            except Exception:
                 driver_version = "unknown"
 
             # Get current time
@@ -358,7 +358,7 @@ class MSSQLLogger:
                     f"[MSSQL-Python] Warning: Failed to write log header to {self._log_file}: {type(e).__name__}\n"
                 )
                 sys.stderr.flush()
-            except:
+            except Exception:
                 pass  # Even stderr notification failed
             # Don't crash - logging continues without header
 
@@ -397,7 +397,7 @@ class MSSQLLogger:
             # Fallback - use regular logging
             try:
                 self._logger.log(level, msg)
-            except:
+            except Exception:
                 pass
 
     def _log(self, level: int, msg: str, *args, **kwargs):
@@ -449,7 +449,7 @@ class MSSQLLogger:
                     f"[MSSQL-Python Logging Failed - {level_name}] {msg if 'msg' in locals() else 'Unable to format message'}\n"
                 )
                 sys.stderr.flush()
-            except:
+            except Exception:
                 pass  # Even stderr failed - give up silently
 
     # Convenience methods for logging

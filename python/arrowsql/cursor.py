@@ -513,6 +513,9 @@ def _max_binary_len(rows: Any, col_index: int) -> int:
     )
 
 
+_NO_ROWS = object()
+
+
 class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-methods
     """
     Represents a database cursor, which is used to manage the context of a fetch operation.
@@ -1810,8 +1813,8 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
                 str(use_prepare),
             )
 
-            # Log the actual query being executed
-            logger.debug("Executing query: %s", operation)
+            # SQL text can embed literals (secrets); log only its length.
+            logger.debug("Executing query (%d characters)", len(operation))
 
         if self.closed:
             self._check_closed()  # Check if the cursor is closed
@@ -2029,6 +2032,10 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
 
         # Initialize the description attribute with the column metadata
         self._initialize_description(column_metadata)
+        # A previous execute() may have left UUID column indices behind; they do
+        # not describe this catalog result set and would stringify/convert the
+        # wrong column.
+        self._uuid_str_indices = None
 
         # Use fallback description if provided and current description is empty
         if not self.description and fallback_description:
@@ -3950,8 +3957,9 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             it = chain.from_iterable(iter(lambda: rows.fetchmany(1024), []))
         else:
             it = iter(rows)
-        first = next(it, None)
-        if first is None:
+        # A sentinel, not None: a leading None row is a type error, not "no rows".
+        first = next(it, _NO_ROWS)
+        if first is _NO_ROWS:
             return iter(())
         if isinstance(first, tuple):
             return chain((first,), it)
@@ -3961,6 +3969,34 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
             f"bulkcopy data rows must be tuples or Row objects, got {type(first).__name__}"
         )
 
+    @staticmethod
+    def _record_batches_as_stream(batches):
+        """Wrap an iterable of ``pyarrow.RecordBatch`` in a RecordBatchReader.
+
+        The first batch is read to learn the schema; the iterable is one-shot, so
+        a wrong element type is reported here rather than handed to a fallback.
+        """
+        import itertools
+
+        import pyarrow as pa  # pylint: disable=import-outside-toplevel
+
+        try:
+            it = iter(batches)
+        except TypeError:
+            raise TypeError(
+                "source must be a pyarrow Table/RecordBatch/RecordBatchReader, an iterable of "
+                "RecordBatch, or an object implementing __arrow_c_stream__/__arrow_c_array__, "
+                f"got {type(batches).__name__}"
+            ) from None
+        first = next(it, _NO_ROWS)
+        if first is _NO_ROWS:
+            raise ValueError("bulkcopy_arrow: the iterable of RecordBatch is empty")
+        if not isinstance(first, pa.RecordBatch):
+            raise TypeError(
+                f"bulkcopy_arrow: iterable elements must be pyarrow.RecordBatch, got {type(first).__name__}"
+            )
+        return pa.RecordBatchReader.from_batches(first.schema, itertools.chain((first,), it))
+
     # RUST-PORT
     def _bulkcopy_arrow_native(self, table_name, source, **options):
         """Run ``bulkcopy_arrow`` in-process. Returns None when this cursor or
@@ -3968,11 +4004,12 @@ class Cursor:  # pylint: disable=too-many-instance-attributes,too-many-public-me
         handle = self._native_bulk_handle("DDBCBulkCopyArrow")
         if handle is None:
             return None
-        # An iterable of RecordBatch is not re-readable, so only mssql_py_core takes it.
-        if not (hasattr(source, "__arrow_c_stream__") or hasattr(source, "__arrow_c_array__")):
-            return None
         self._check_closed()
         self._bulkcopy_connection_params()  # same preconditions as the mssql_py_core path
+        if not (hasattr(source, "__arrow_c_stream__") or hasattr(source, "__arrow_c_array__")):
+            # An iterable of RecordBatch: expose it as one Arrow stream so it loads on
+            # this connection (caller's transaction, #temp tables) like any other source.
+            source = self._record_batches_as_stream(source)
         # No fallback on BulkUnsupported: mssql_py_core accepts exactly the same
         # (Arrow type, SQL type) pairs, and a one-shot reader is gone by then.
         try:
