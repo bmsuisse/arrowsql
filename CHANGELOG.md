@@ -16,6 +16,10 @@ Version numbers in this project are deliberately three different things:
 
 ### Added
 
+- Bulk copy writes each DECIMAL cell at the shortest legal magnitude width (4/8/12/16 bytes)
+  instead of the width implied by the column precision. SQL Server accepts this; 1M rows of nine
+  `decimal(38,2)` columns with small values upload 55 MB instead of 163 MB. `ARROWSQL_DECIMAL_FIXED=1`
+  restores precision-width cells.
 - The project is called **arrowsql** (distribution and import name `arrowsql`,
   repository github.com/bmsuisse/arrowsql). A `mssql_python` alias package keeps
   `import mssql_python` working: its modules are the `arrowsql` modules.
