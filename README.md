@@ -1,49 +1,54 @@
-# arrowsql (mssql-python on a Rust core)
+<p align="center"><img src="docs/assets/logo.svg" alt="arrowsql" width="360"></p>
 
-[mssql-python](https://github.com/microsoft/mssql-python) with its C++/ODBC
-core replaced by Rust: a PyO3 extension over Microsoft's native TDS crate
-[`mssql-tds`](https://github.com/microsoft/mssql-rs). No ODBC driver, no
-unixODBC, same Python API: `import arrowsql`, or keep `import mssql_python`
-(a compatibility alias for existing code).
+# arrowsql
 
-Status: work in progress (alpha, not yet on PyPI). The upstream Python layer is vendored unchanged
-where possible, and the upstream test suite is the compatibility bar.
+A fast SQL Server driver for Python with a Rust core. Drop-in compatible with Microsoft's
+[mssql-python](https://github.com/microsoft/mssql-python), with native Arrow, DuckDB and polars output.
 
-## What it adds
+[![PyPI](https://img.shields.io/pypi/v/arrowsql)](https://pypi.org/project/arrowsql/)
+[![Python](https://img.shields.io/pypi/pyversions/arrowsql)](https://pypi.org/project/arrowsql/)
+[![License: MIT](https://img.shields.io/pypi/l/arrowsql)](LICENSE)
+[![CI](https://github.com/bmsuisse/arrowsql/actions/workflows/ci.yml/badge.svg)](https://github.com/bmsuisse/arrowsql/actions/workflows/ci.yml)
 
-- Faster row fetches than upstream on every row-based read in our benchmarks.
-- Native Arrow: upstream's `cursor.arrow()`, `arrow_batch()` and
-  `arrow_reader()` decode straight into Arrow with the GIL released.
-- A zero-dependency Arrow API: `fetchall_arrow()`, `fetchmany_arrow()` and
-  `arrow_stream()` return objects that DuckDB, polars and pyarrow read
-  directly via the Arrow PyCapsule interface.
-- Partitioned parallel reads: `arrowsql.read_arrow(conn_str, query,
-  partition_on=, partitions=)`. Slices are equal-width in the key (skewed
-  keys are not rebalanced) and the partitions are not one snapshot.
-  `arrowsql.read_arrow_stream(...)` streams the same read (bounded buffer,
-  unordered batches) so DuckDB or `deltalake` work while rows still arrive, and
-  `partition_bounds=[...]` takes typed boundaries (int, date/datetime, Decimal,
-  str) instead of probing MIN/MAX.
-- Native bulk copy (rows and Arrow) and parallel loads with
-  `arrowsql.write_arrow(conn_str, table, source, workers=N)` and
-  `arrowsql.write_rows(conn_str, table, rows, workers=N)` (heap: TABLOCK;
-  clustered columnstore: no TABLOCK, batches of at least 102,400 rows; other
-  indexed targets use one worker).
-- Native asyncio: `arrowsql.aio` with a built-in pool.
-- Free-threaded CPython (3.15t) support; zero required dependencies.
-- `sqlstate` and `native_error` on every exception
-  ([upstream #581](https://github.com/microsoft/mssql-python/issues/581)).
+arrowsql replaces the C++/ODBC core of mssql-python with a PyO3 extension over Microsoft's native TDS
+crate [`mssql-tds`](https://github.com/microsoft/mssql-rs). No ODBC driver or unixODBC is needed, and the
+Python API (DB-API 2.0, `?` parameters) stays the same. Status: alpha.
 
-## Usage
+## Why arrowsql
 
-Runnable examples: [examples/](examples/) (Arrow and DuckDB, bulk loads, agent mode).
+- **Faster row fetches.** 3.0x to 3.5x faster than mssql-python and 7x to 10x faster than pyodbc on
+  `fetchall()` / `fetchmany()` of taxi data (100k to 3M rows x 20 columns).
+- **Native Arrow, no GIL.** `cursor.arrow()` is 2.4x faster than upstream; `fetchall_arrow()` and
+  `arrow_stream()` need no pyarrow and feed DuckDB, polars and pyarrow directly.
+- **Parallel reads and loads.** `read_arrow(..., partitions=8)` reads 3M rows in 0.59 s (upstream
+  4.25 s); `write_arrow(..., workers=8)` loads 3M rows in 1.82 s (upstream 12.35 s).
+- **Native asyncio.** `arrowsql.aio` with a built-in pool: about 40k point lookups/s at 64 concurrent
+  queries, against about 7k/s for upstream.
+- **Agent mode.** `arrowsql-agent` CLI and `arrowsql.agent.query()` give LLMs bounded, typed output and
+  structured errors.
+- **Drop-in.** `import mssql_python` keeps working. Zero required dependencies.
 
-Same API as mssql-python (DB-API 2.0, `?` parameters):
+Measured on NYC yellow taxi January 2024 (2,964,624 rows) against SQL Server 2022 in podman on the same
+host; see [Benchmarks](#benchmarks) for the setup.
+
+## Install
+
+```bash
+pip install arrowsql              # no required dependencies
+pip install 'arrowsql[arrow]'     # + pyarrow, for cursor.arrow() and upstream-style Arrow APIs
+pip install 'arrowsql[azure]'     # + azure-identity, for Entra ID authentication
+pip install 'arrowsql[async-preview]'  # upstream's private async preview (mssql_py_core)
+```
+
+Import it as `import arrowsql`. The wheel also ships a `mssql_python` alias package, so existing
+`import mssql_python` code works unchanged. Do not install arrowsql and Microsoft's `mssql-python` into
+the same environment: they overwrite each other's files.
+
+## Quick start
 
 ```python
 import arrowsql
 
-# TrustServerCertificate=yes is for local testing only, see "Security note"
 conn_str = "Server=localhost,1433;Database=nyctaxi;Uid=sa;Pwd=...;Encrypt=yes;TrustServerCertificate=yes"
 
 with arrowsql.connect(conn_str) as conn:
@@ -53,82 +58,8 @@ with arrowsql.connect(conn_str) as conn:
         print(trip_id, total)
 ```
 
-### Arrow, DuckDB, polars
-
-```python
-import duckdb, arrowsql
-from datetime import datetime
-
-cur = arrowsql.connect(conn_str).cursor()
-
-# Upstream-compatible (needs pyarrow): pyarrow.Table / RecordBatchReader
-table = cur.execute("SELECT * FROM dbo.yellow_trips_100k").arrow()
-
-# Zero-dependency: a native Arrow table that DuckDB/polars/pyarrow read directly
-t = cur.execute("SELECT * FROM dbo.yellow_trips_100k").fetchall_arrow()
-duckdb.sql("SELECT PULocationID, count(*) FROM t GROUP BY 1").show()
-
-# Streaming: the next batch is decoded in the background while DuckDB scans
-stream = cur.execute("SELECT * FROM dbo.yellow_trips").arrow_stream(batch_size=65_536)
-duckdb.sql("SELECT avg(total_amount) FROM stream").show()
-
-# Partitioned parallel read over N connections (integer partition column)
-big = arrowsql.read_arrow(conn_str, "SELECT * FROM dbo.yellow_trips",
-                              partition_on="trip_id", partitions=8)
-
-# The same read as a stream: DuckDB (or deltalake, polars, pyarrow) consumes
-# batches while the 8 connections are still reading; memory stays bounded.
-# Closing it early cancels the running statements.
-with arrowsql.read_arrow_stream(conn_str, "SELECT * FROM dbo.yellow_trips",
-                                partition_on="trip_id", partitions=8) as s:
-    duckdb.sql("SELECT avg(total_amount) FROM s").show()
-
-# Caller-supplied boundaries (e.g. quantiles for a skewed key): no MIN/MAX probe.
-# k bounds give the slices < b1, [b1, b2), ..., >= bk, plus IS NULL if nullable.
-arrowsql.read_arrow(conn_str, "SELECT * FROM dbo.yellow_trips", partition_on="tpep_pickup_datetime",
-                    partitions=4, partition_bounds=[datetime(2024, 1, 10), datetime(2024, 1, 20)])
-
-# nvarchar/nchar/ntext columns travel as UTF-8 (about half the bytes for ASCII text) on
-# SQL Server 2019+/Azure SQL; the result is the same. Opt out with utf8_strings=False.
-t = cur.execute_arrow("SELECT * FROM dbo.bench_strings")            # same on cursors
-t = arrowsql.read_arrow(conn_str, "SELECT * FROM dbo.bench_strings", utf8_strings=False)
-```
-
-For polars use `pl.DataFrame(t)`; `pl.from_arrow(t)` returns a struct Series
-for capsule streams.
-
-### Async
-
-`arrowsql.aio` is native asyncio on this project's Rust core: waits never
-hold the GIL, `execute` returns the first rows itself, and a pool is built in.
-Cancelling a task (including `asyncio.wait_for` timeouts) cancels the query on
-the server and leaves the connection usable. Unix only (uses `loop.add_reader`).
-
-```python
-import asyncio
-from arrowsql import aio
-
-async def main():
-    async with await aio.connect(conn_str) as conn:
-        rows = await conn.fetch("SELECT TOP 3 trip_id, total_amount FROM dbo.yellow_trips WHERE PULocationID = ?", 132)
-
-    pool = await aio.create_pool(conn_str, min_size=4, max_size=32)
-    total = await pool.fetchval("SELECT SUM(total_amount) FROM dbo.yellow_trips")
-    async with pool.acquire() as conn:
-        cur = conn.cursor()
-        await cur.execute("SELECT * FROM dbo.yellow_trips_100k")
-        table = await cur.fetchall_arrow()          # native Arrow, DuckDB-ready
-    await pool.close()
-
-asyncio.run(main())
-```
-
-The sync driver also releases the GIL for all network I/O, so
-`asyncio.to_thread` over it works too. Upstream's private async preview
-(`arrowsql.async_query._AsyncConnection`, backed by Microsoft's
-`mssql_py_core`) stays available with the `[async-preview]` extra.
-
-### Errors
+Every exception carries `sqlstate` and `native_error`
+([upstream #581](https://github.com/microsoft/mssql-python/issues/581)):
 
 ```python
 try:
@@ -137,231 +68,171 @@ except arrowsql.IntegrityError as exc:
     print(exc.sqlstate, exc.native_error)  # '23000' 2627
 ```
 
-### Agent mode
+`TrustServerCertificate=yes` is for local testing only, see [Security](#security).
 
-A CLI and Python API for LLM agents and terminals (ported from
-[arrowbricks](https://github.com/bmsuisse/arrowbricks)): compact typed TSV (or a
-Markdown table), explicit truncation, and actionable JSON errors. Rows are
-fetched lazily and formatted in Rust, without building Python row objects, so a
-capped preview of a huge table costs little more than the statement's start.
+## Arrow, DuckDB, polars, Delta
+
+```python
+import duckdb, arrowsql
+cur = arrowsql.connect(conn_str).cursor()
+
+# Zero-dependency Arrow table: DuckDB, polars and pyarrow read it via the Arrow PyCapsule interface
+t = cur.execute("SELECT * FROM dbo.yellow_trips_100k").fetchall_arrow()
+duckdb.sql("SELECT PULocationID, count(*) FROM t GROUP BY 1").show()
+
+# Streaming: the next batch is decoded in the background while DuckDB scans
+stream = cur.execute("SELECT * FROM dbo.yellow_trips").arrow_stream(batch_size=65_536)
+duckdb.sql("SELECT avg(total_amount) FROM stream").show()
+
+# Partitioned parallel read over 8 connections (integer partition column)
+big = arrowsql.read_arrow(conn_str, "SELECT * FROM dbo.yellow_trips", partition_on="trip_id", partitions=8)
+
+# The same read as a stream; closing it early cancels the running statements
+with arrowsql.read_arrow_stream(conn_str, "SELECT * FROM dbo.yellow_trips",
+                                partition_on="trip_id", partitions=8) as s:
+    duckdb.sql("SELECT avg(total_amount) FROM s").show()
+```
+
+- `fetchall_arrow()`, `fetchmany_arrow()`, `arrow_stream()` and `execute_arrow()` return native Arrow
+  objects; for polars use `pl.DataFrame(t)`. Upstream's `arrow()`, `arrow_batch()` and `arrow_reader()`
+  also work (they need pyarrow).
+- `read_arrow` / `read_arrow_stream` cut the key range into equal-width slices (skewed keys are not
+  rebalanced; partitions are not one snapshot). Pass `partition_bounds=[...]` (int, date/datetime,
+  Decimal or str) to use your own boundaries, such as quantiles, instead of a MIN/MAX probe.
+  `read_arrow_stream` returns a stream with a bounded buffer and unordered batches, which `deltalake`,
+  DuckDB, polars and pyarrow can consume while rows still arrive.
+- `nvarchar` / `nchar` / `ntext` travel as UTF-8 on SQL Server 2019+ and Azure SQL (about half the bytes
+  for ASCII text). Opt out with `utf8_strings=False` (`execute_arrow`, `read_arrow`, `read_arrow_stream`).
+
+Runnable scripts: [examples/](examples/).
+
+## Bulk loads
+
+```python
+cur.bulkcopy_arrow("dbo.target", duckdb_result_or_arrow_table)       # Arrow in, one connection
+cur.bulkcopy("dbo.target", rows)                                      # row tuples
+arrowsql.write_arrow(conn_str, "dbo.target", table, workers=8)       # parallel Arrow load
+arrowsql.write_rows(conn_str, "dbo.target", rows, workers=8)         # parallel row load
+```
+
+`write_arrow` / `write_rows` pick the lock from the target: TABLOCK for a heap, none for a clustered
+columnstore (batches of at least 102,400 rows), and one worker for other indexed tables. All of them
+accept `batch_size`, `column_mappings`, `keep_identity`, `check_constraints`, `keep_nulls` and
+`fire_triggers`. See [examples/write_arrow.py](examples/write_arrow.py).
+
+## Async
+
+```python
+from arrowsql import aio
+
+async with await aio.connect(conn_str) as conn:
+    rows = await conn.fetch("SELECT TOP 3 trip_id FROM dbo.yellow_trips WHERE PULocationID = ?", 132)
+
+pool = await aio.create_pool(conn_str, min_size=4, max_size=32)
+total = await pool.fetchval("SELECT SUM(total_amount) FROM dbo.yellow_trips")
+async with pool.acquire() as conn:
+    table = await (await conn.cursor().execute("SELECT * FROM dbo.yellow_trips_100k")).fetchall_arrow()
+await pool.close()
+```
+
+Waits never hold the GIL, and cancelling a task (including `asyncio.wait_for`) cancels the query on the
+server and leaves the connection usable. Unix only. Details: [docs/ASYNC.md](docs/ASYNC.md).
+
+## Agent mode
+
+For LLM agents and terminals: compact typed TSV (or Markdown), explicit truncation and actionable JSON errors.
 
 ```bash
 export MSSQL_CONNECTION_STRING='Server=...;Database=...;Uid=...;Pwd=...'   # or DB_CONNECTION_STRING
 arrowsql-agent -c "SELECT 1 AS answer, N'x' AS label"      # python -m arrowsql.agent works too
 ```
 
-```text
-answer:int	label:nvarchar(1)
-1	x
-
-rows_shown=1; complete=true; total_rows=1
-```
-
 ```python
 from arrowsql.agent import query
-
 text = query(conn_or_connection_string, "SELECT TOP 100 * FROM dbo.orders WHERE id > ?", [42],
-             format="tsv",          # or "markdown"
-             max_bytes=10_000,      # strict ceiling for the whole string, footer included
-             max_rows=1000, max_cell_chars=500, timeout_s=60,
-             tail_rows=0)           # N > 0: also keep the last N rows (reads the whole result)
+             format="tsv", max_bytes=10_000, max_rows=1000, max_cell_chars=500, timeout_s=60)
 ```
 
-- The header carries SQL types (`name:decimal(18,2)`). Tab, newline, CR and `\`
-  are backslash-escaped, control characters become `\uXXXX`, NULL is `\N`
-  (`NULL` in Markdown, where text is quoted so `"NULL"` differs), binary is `0x...`,
-  `datetimeoffset` is shown in UTC, `sql_variant` by its value.
-- The footer is `rows_shown=N; complete=true|false; total_rows=N` and says
-  `total_rows>=N` unless every row was read. Clipped cells end in
-  `…[truncated]` and set `cells_truncated=true`. With `tail_rows`, the footer
-  reads `sample=head+tail; rows_omitted=K` and the total is exact.
-- A batch prints every result set (footers from the second on start with
-  `result_set=k`), `-- rows_affected=N` for DML and `-- message: ...` for
-  PRINT / low-severity RAISERROR. After a truncated result set the rest of the
-  batch is left unread. Output beyond the byte budget is dropped whole and noted.
-- Failures return (CLI: stderr, exit 1) one JSON object: `category`
-  (`missing_table`, `missing_column`, `syntax_error`, `authentication`,
-  `permission_denied`, `deadlock`, `timeout`, `lock_timeout`, `constraint_violation`,
-  `conversion_error`, `connection`, `transient`, ...), `message` (the server's own text),
-  `next_step`, `retryable`, `sqlstate`, `native_error`. Advice only: SQL is never
-  rewritten, repaired or retried. A failure after earlier rows gives the error, not
-  a partial result with a success footer. Bad arguments exit 2, Ctrl-C exits 130.
-- `query_cursor(cursor, sql)` runs on an existing cursor; `render_cursor(cursor)`
-  renders one that has just executed. String connections use autocommit.
+Output format, footer fields, error categories: [docs/AGENT_MODE.md](docs/AGENT_MODE.md).
 
-## Support
+## Compatibility with mssql-python
 
-### Platforms and Python versions
-
-Honest status: Linux x86_64 (glibc) is the reference platform, the only one run
-against SQL Server by hand. CI (`.github/workflows/ci.yml`) runs the full suites
-against SQL Server 2022 on Linux x86_64 and against SQL Server Express on Windows
-x64, and the server-free tests plus `cargo test --lib` on macOS (arm64, x86_64),
-Windows (x64, arm64) and Linux arm64. The wheel workflow
-(`.github/workflows/wheels.yml`) builds every wheel below and import-tests it;
-publishing to PyPI is gated by `.github/workflows/workflow.yml`.
-
-| platform | wheel | import tested in CI | DB tests in CI |
-|---|---|---|---|
-| Linux x86_64, glibc (manylinux_2_28) | yes | native | SQL Server 2022 |
-| Linux aarch64, glibc (manylinux_2_28) | yes | native (arm runner) | no (no arm64 server image) |
-| Linux x86_64 / aarch64, musl (musllinux_1_2) | yes | Alpine container | no |
-| macOS arm64 / x86_64 | yes | native | no (server-free tests) |
-| Windows x64 | yes | native | SQL Server Express |
-| Windows arm64 | yes | native (arm runner) | no (server-free tests) |
-
-`aio` is Unix-only (needs `loop.add_reader`). Not built: ppc64le, s390x (cross images unusable with --find-interpreter, see docs/PACKAGING.md), 32-bit targets (i686,
-armv7: the vendored `mssql-tds` uses 64-bit `usize` constants) and PyPy.
-
-Python: CPython 3.10 to 3.15 plus free-threaded 3.14t and 3.15t where an
-interpreter exists for the platform.
-
-### Connection string
-
-Parsed natively (`src/connstr.rs`) and by the vendored Python layer.
-
-| keyword | status |
+| | |
 |---|---|
-| `Server` / `Address` / `Data Source`, `Database`, `Uid`, `Pwd`, `APP`, `WSID`, `Language` | supported |
-| `Encrypt` (`yes`/`no`/`strict`), `TrustServerCertificate`, `HostNameInCertificate`, `ServerCertificate` | supported (rustls; TLS 1.2 / 1.3). `Encrypt=strict` is implemented but not verifiable against the local SQL Server 2022 container |
-| `ConnectRetryCount`, `ConnectRetryInterval`, `MultiSubnetFailover`, `ApplicationIntent`, `PacketSize`, `Connection Timeout` | supported |
-| `Trusted_Connection=yes` / `Integrated Security=sspi` | Kerberos via GSSAPI (library loaded at runtime) on Unix, SSPI on Windows; not tested here |
-| `Authentication=ActiveDirectoryDefault`, `ActiveDirectoryInteractive`, `ActiveDirectoryDeviceCode`, `ActiveDirectoryMSI`, `ActiveDirectoryServicePrincipal` | acquired in Python with `azure-identity` (the `[azure]` extra) and passed as an access token; not tested against Entra ID here |
-| `token_provider=` / `attrs_before={1256: ...}` (access token) | supported |
-| `Authentication=ActiveDirectoryPassword`, `SqlPassword`, `ActiveDirectoryIntegrated`, NTLM (`DOMAIN\user`) | not supported |
-| Always Encrypted (`ColumnEncryption`) | not supported |
+| Identical | DB-API 2.0 surface, `?` parameters, connection-string keywords, exception hierarchy, `import mssql_python` alias; the upstream test suite is the compatibility bar |
+| Added | `sqlstate` / `native_error` on exceptions; `fetchall_arrow`, `fetchmany_arrow`, `arrow_stream`, `execute_arrow`; `read_arrow`, `read_arrow_stream`, `write_arrow`, `write_rows`, `bulkcopy_arrow`; `arrowsql.aio`; `arrowsql.agent` |
+| Different | No ODBC driver, unixODBC or `MSSQL_PYTHON_NATIVE_PROVIDER` effect; TLS via rustls; zero required dependencies; `aio` is Unix only |
+| Not supported | `Authentication=ActiveDirectoryPassword`, `SqlPassword`, `ActiveDirectoryIntegrated`, NTLM, Always Encrypted |
+
+Long version: [docs/CONTRACT.md](docs/CONTRACT.md) (every binding symbol and its status) and
+[docs/PYTHON_LAYER_CHANGES.md](docs/PYTHON_LAYER_CHANGES.md) (edits to the vendored Python layer).
+
+## Benchmarks
+
+NYC yellow taxi January 2024 (2,964,624 rows x 20 columns), SQL Server 2022 in podman on the same host,
+release build, median of 5, on a shared dev box: compare ratios, not absolute times. Upstream is
+mssql-python 1.16.0 (ODBC Driver 18); pyodbc uses `fast_executemany=True`.
+
+| workload | upstream | arrowsql | speedup | pyodbc / best other |
+|---|---:|---:|---:|---|
+| `fetchall()`, 100k rows | 0.351 s | 0.117 s | 3.0x | pyodbc 0.865 s |
+| `fetchmany`, 3M rows | 9.74 s | 2.75 s | 3.5x | pyodbc 27.0 s |
+| decimal-heavy `fetchmany` | 1.844 s | 0.430 s | 4.3x | pyodbc 5.0 s |
+| `cursor.arrow()`, 100k rows | 0.146 s | 0.060 s | 2.4x | connectorx 0.350 s |
+| `read_arrow(..., partitions=8)`, 3M rows | 4.253 s | 0.591 s | 7.2x | connectorx (8 partitions) 2.63 s |
+| `bulkcopy_arrow`, 3M rows, heap | 12.35 s | 6.07 s | 2.0x | `bcp` 6.67 s |
+| `write_arrow(..., workers=8)`, 3M rows | 12.35 s | 1.82 s | 6.8x | `bcp` 6.67 s |
+| `executemany`, 100k rows | 1.257 s | 0.653 s | 1.9x | pyodbc 0.762 s |
+| 16 threads x point lookups | 2.395 s | 0.429 s | 5.6x | FastMssql 0.612 s |
+| async point lookups, 64 concurrent | ~7k q/s | ~40k q/s | ~5x | FastMssql ~15k q/s |
+
+Short queries (`SELECT 1`, connect + close) are on par with pyodbc. Reproduce with
+`scripts/bench_reproduce.sh` (see [benchmarks/README.md](benchmarks/README.md)); the full multi-driver
+matrix is in [benchmarks/RESULTS.md](benchmarks/RESULTS.md), and the complete table with latency rows
+and notes in [docs/BENCHMARK_SUMMARY.md](docs/BENCHMARK_SUMMARY.md).
+
+## Platforms and Python versions
+
+- Wheels: Linux glibc and musl (x86_64, arm64), macOS (arm64, x86_64), Windows (x64, arm64).
+- CPython 3.10 to 3.15, plus free-threaded 3.14t and 3.15t. Not built: 32-bit targets, ppc64le, s390x, PyPy.
+- Full SQL Server tests run in CI on Linux x86_64 and Windows x64; other platforms run server-free tests.
+  Details and the build matrix: [docs/PLATFORMS_AND_CONNECTION.md](docs/PLATFORMS_AND_CONNECTION.md),
+  [docs/PACKAGING.md](docs/PACKAGING.md).
+
+**Connection string.** Standard keywords (`Server`, `Database`, `Uid`, `Pwd`, `Encrypt`,
+`TrustServerCertificate`, `ApplicationIntent`, `MultiSubnetFailover`, ...), Kerberos/SSPI via
+`Trusted_Connection=yes`, and Entra ID via `Authentication=ActiveDirectory*` or `token_provider=` (needs
+the `[azure]` extra). Full keyword table: [docs/PLATFORMS_AND_CONNECTION.md](docs/PLATFORMS_AND_CONNECTION.md).
+
+### Security
+
+`TrustServerCertificate=yes` switches certificate validation off. Use it for local test containers only.
+Otherwise use a certificate the client trusts (or `ServerCertificate=` / `HostNameInCertificate=`) and keep `Encrypt=yes`.
 
 ### Environment variables
 
 | variable | effect |
 |---|---|
-| `MSSQL_RS_BUSY_POLL` | `0`, `off` or `false` disables the short busy poll for the first response byte (default on, at most `min(cpus / 4, 2)` spinning threads; it trades a little CPU for lower latency on very short round trips) |
-| `MSSQL_RS_MULTISUBNET_FAILOVER_DEFAULT` | `true` / `false`: deployment-wide default for `MultiSubnetFailover` when the connection string does not set it |
-| `MSSQL_PYTHON_NATIVE_PROVIDER` | upstream's ODBC provider selector; has no effect on the Rust path |
-| `DB_CONNECTION_STRING` | used by the test suites and benchmarks only, never by the library |
+| `MSSQL_RS_BUSY_POLL` | `0`, `off` or `false` disables the short busy poll for the first response byte |
+| `MSSQL_RS_MULTISUBNET_FAILOVER_DEFAULT` | `true` / `false`: default for `MultiSubnetFailover` when the connection string omits it |
+| `MSSQL_CONNECTION_STRING`, `DB_CONNECTION_STRING` | read by `arrowsql-agent`; `DB_CONNECTION_STRING` is also used by tests, benchmarks and examples |
 
-### Do not install both packages
-
-The import name is `arrowsql`. For drop-in use the wheel also ships a
-`mssql_python` alias package (every `mssql_python.X` is the same module as
-`arrowsql.X`), which has the same name as Microsoft's
-[mssql-python](https://github.com/microsoft/mssql-python). Installing both into one
-environment makes them overwrite each other's files. Use one or the other, in a
-separate virtual environment.
-
-### Security note
-
-The quick-start connection strings above use `TrustServerCertificate=yes`, which
-switches certificate validation off. That is for **local testing against a
-container only**. For anything else use a certificate the client trusts (or
-`ServerCertificate=` / `HostNameInCertificate=`) and keep `Encrypt=yes`.
-
-## Benchmarks
-
-NYC yellow taxi data, January 2024 (2,964,624 rows × 20 columns), SQL Server
-2022 in podman on the same host. Upstream is mssql-python 1.16.0 (C++ + ODBC
-Driver 18); pyodbc runs with `fast_executemany=True` against the same ODBC
-driver. Release build of this project, median of 5, one measurement at a time
-(machine-wide lock), on a shared dev box with other jobs running (load average
-3.6-5.5): treat absolute times as indicative and compare ratios. Unmarked rows
-are from commit `d5476b1`; rows marked † are from commit `1182ec1`, rows marked
-* from earlier dedicated runs (Arrow agent, aio agent, free-threaded agent),
-rows marked ‡ from commit `b98b64d` at load average 14-20.
-
-**Reads**
-
-| workload | upstream | this project | speedup | pyodbc / best other |
-|---|---:|---:|---:|---|
-| `fetchall()`, 100k rows × 20 cols | 0.351 s | 0.117 s | 3.0x | pyodbc 0.865 s |
-| `fetchmany(10_000)`, 100k rows | 0.314 s | 0.098 s | 3.2x | pyodbc 0.851 s |
-| `fetchone()` loop, 100k rows | 0.436 s | 0.197 s | 2.2x | pyodbc 0.720 s |
-| `fetchmany`, 3M rows × 20 cols | 9.74 s | 2.75 s | 3.5x | pyodbc 27.0 s |
-| decimal-heavy `fetchmany` † | 1.844 s | 0.430 s | 4.3x | pyodbc 5.0 s |
-| string-heavy `fetchmany` † | 1.476 s | 0.819 s | 1.8x | pyodbc 1.10 s |
-| `cursor.arrow()`, 100k rows | 0.146 s | 0.060 s | 2.4x | connectorx 0.350 s † |
-| decimal-heavy Arrow † | 0.800 s | 0.238 s | 3.4x | connectorx 1.43 s |
-| DuckDB over the Arrow stream, 3M rows † | 4.595 s | 1.987 s | 2.3x | connectorx 9.85 s |
-| `read_arrow(..., partitions=8)`, 3M rows * | 4.253 s | 0.591 s | 7.2x | connectorx (8 partitions) 2.63 s |
-
-On a single connection SQL Server's row serialization is the limit (draining
-3M rows into a sink that discards every value takes about 2 s); the
-partitioned read is how to get past it.
-
-**Writes**
-
-| workload | upstream | this project | speedup | pyodbc / best other |
-|---|---:|---:|---:|---|
-| `bulkcopy_arrow`, 3M rows, heap + TABLOCK † | 12.35 s | 6.07 s | 2.0x | `bcp` 6.67 s |
-| `write_arrow(..., workers=8)`, 3M rows † | 12.35 s | 1.82 s | 6.8x | `bcp` 6.67 s |
-| `bulkcopy` (row tuples), 100k rows † | 1.561 s | 0.716 s | 2.2x | `bcp` 0.382 s |
-| `executemany`, 100k rows | 1.257 s | 0.653 s | 1.9x | pyodbc 0.762 s |
-| `INSERT ... VALUES`, 200 rows × 5 params per statement, 10k rows | 0.120 s | 0.094 s | 1.3x | pyodbc 0.096 s |
-| single-row `INSERT` × 1,000, one commit ‡ | 0.159 s | 0.129 s | 1.2x | pyodbc 0.143 s |
-
-**Latency and concurrency**
-
-| workload | upstream | this project | speedup | pyodbc / best other |
-|---|---:|---:|---:|---|
-| 1,000 point lookups ‡ | 0.350 s | 0.122 s | 2.9x | pyodbc 0.157 s |
-| 16 threads × point lookups † | 2.395 s | 0.429 s | 5.6x | FastMssql 0.612 s |
-| `SELECT 1` × 5,000 ‡ | 0.864 s | 0.730 s | 1.2x | pyodbc 0.727 s |
-| connect + close × 50 ‡ | 0.150 s | 0.120 s | 1.2x | pyodbc 0.130 s |
-| async point lookups, 64 concurrent (`aio`) * | ~7k q/s | ~40k q/s | ~5x | FastMssql ~15k q/s |
-| free-threaded 3.15t, 16 threads point lookups * | 4.3k q/s | 18.7k q/s | 4.4x | – |
-
-Point lookups are 15-20 % ahead of pyodbc (three runs); `SELECT 1` is even
-(within 2 % either way). Both drivers make one send and one receive per query.
-For short queries the synchronous driver busy-polls the socket for the first
-response byte instead of sleeping in epoll (adaptive, only while recent waits
-are under 300 µs, at most two threads, off on machines with fewer than 4
-CPUs). That trades one busy core during the wait for the scheduler's wake-up
-latency; set `MSSQL_RS_BUSY_POLL=0` to turn it off. A repeated result shape
-also reuses its parsed column metadata.
-
-Full multi-driver matrix (pyodbc, connectorx, arrow-odbc, pymssql, FastMssql,
-`bcp`): [benchmarks/RESULTS.md](benchmarks/RESULTS.md).
-
-```bash
-python benchmarks/run.py              # everything (benchmarks/README.md has filters)
-python benchmarks/report.py           # -> benchmarks/RESULTS.md + results/report.html
-```
-
-Methodology, profiles and the compression findings are in
-[docs/PERFORMANCE_RESEARCH.md](docs/PERFORMANCE_RESEARCH.md).
-
-## Install
-
-```bash
-# not on PyPI yet; wheels are CI artifacts (see Support)
-pip install arrowsql              # zero required dependencies
-pip install 'arrowsql[arrow]'     # + pyarrow for arrow() / bulkcopy_arrow
-pip install 'arrowsql[azure]'     # + azure-identity credentials
-```
-
-## Build and test
+## Development
 
 ```bash
 uv venv -p 3.13 .venv && VIRTUAL_ENV=.venv uv pip install -r requirements-dev.txt
-scripts/build.sh                 # dev build into .venv (--release for benchmarks)
-
-# SQL Server 2022 in podman; put DB_CONNECTION_STRING / MSSQL_SA_PASSWORD in .env.local
-source scripts/env.sh my-id      # private database per run
-cd tests/upstream && ../../.venv/bin/python -m pytest -q
+scripts/build.sh                      # dev build into .venv (--release for benchmarks)
+export DB_CONNECTION_STRING='Server=localhost,1433;Database=master;Uid=sa;Pwd=...;Encrypt=yes;TrustServerCertificate=yes'
+python -m pytest -q --timeout 120 tests/common_issues tests/port
 ```
 
-CI runs the same suites on every push; `scripts/check_upstream_baseline.py` checks the upstream results against the baseline. Test scope and the upstream baseline: [docs/TEST_SCOPE.md](docs/TEST_SCOPE.md).
-NYC taxi benchmark data: `scripts/load_taxi.py`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/TEST_SCOPE.md](docs/TEST_SCOPE.md). Design notes:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/PERFORMANCE_RESEARCH.md](docs/PERFORMANCE_RESEARCH.md),
+[docs/UPSTREAM_ISSUES.md](docs/UPSTREAM_ISSUES.md), [docs/UPSTREAM_BUGS_FOUND.md](docs/UPSTREAM_BUGS_FOUND.md),
+[docs/FEATURES.md](docs/FEATURES.md) (feature list and async notes moved from the old README).
 
-## Docs
+## License and credits
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): design, concurrency model, where things live
-- [docs/CONTRACT.md](docs/CONTRACT.md): every binding symbol and its status
-- [docs/PYTHON_LAYER_CHANGES.md](docs/PYTHON_LAYER_CHANGES.md): deliberate edits to the vendored Python layer
-- [docs/PERFORMANCE_RESEARCH.md](docs/PERFORMANCE_RESEARCH.md): where the time goes, roadmap, compression
-- [docs/UPSTREAM_ISSUES.md](docs/UPSTREAM_ISSUES.md), [docs/UPSTREAM_BUGS_FOUND.md](docs/UPSTREAM_BUGS_FOUND.md)
-
-## License
-
-MIT. Contains code from microsoft/mssql-python (MIT,
-[LICENSE.upstream-mssql-python](LICENSE.upstream-mssql-python)) and depends on
-microsoft/mssql-rs (MIT).
+MIT, see [LICENSE](LICENSE). Contains code from [microsoft/mssql-python](https://github.com/microsoft/mssql-python)
+(MIT, [LICENSE.upstream-mssql-python](LICENSE.upstream-mssql-python)) and builds on Microsoft's
+[mssql-tds](https://github.com/microsoft/mssql-rs) (MIT).
