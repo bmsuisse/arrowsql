@@ -28,10 +28,11 @@ import queue
 import threading
 import time
 import warnings
-from contextlib import closing
+from contextlib import ExitStack, closing
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any, Optional
 
+from arrowsql import ddbc_bindings
 from arrowsql.db_connection import connect
 
 # Cap on rows per slice. Smaller slices spread work across workers; larger
@@ -94,8 +95,9 @@ def write_arrow(
     ``rows_per_second`` and ``workers`` (connections used).
 
     Raises the first error from any worker or from reading the source. The
-    other workers stop taking new slices. ``workers > 1`` needs pyarrow to cut
-    the source.
+    other workers stop taking new slices. No Arrow library is needed: the
+    source is imported once through the Arrow C stream and cut into slices in
+    Rust (a streaming source is read on demand, not materialized).
     """
     _check_args(workers, batch_size, timeout)
     bulk_options = {
@@ -117,15 +119,8 @@ def write_arrow(
         result = _load_single(connection_str, table, source, table_lock, bulk_options, connect_kwargs)
         return _summarize([result], 1, started)
 
-    slice_rows = _slice_rows(source, workers)
-    results = _load_parallel(
-        connection_str,
-        workers,
-        _slices(source, slice_rows),
-        lambda cursor, first, pieces: _load_arrow_pieces(
-            cursor, table, first, pieces, table_lock, bulk_options
-        ),
-        connect_kwargs,
+    results = _load_native_parallel(
+        connection_str, table, source, workers, table_lock, bulk_options, connect_kwargs
     )
     return _summarize(results, workers, started)
 
@@ -235,17 +230,44 @@ def _slice_size(count, workers):
     return max(1, min(_MAX_SLICE_ROWS, -(-count // (workers * _SLICES_PER_WORKER))))
 
 
-def _slice_rows(source, workers):
-    num_rows = getattr(source, "num_rows", None)
-    if isinstance(num_rows, int) and num_rows > 0:
-        return _slice_size(num_rows, workers)
-    return _MAX_SLICE_ROWS
-
-
 def _load_single(connection_str, table, source, table_lock, bulk_options, connect_kwargs):
     with connect(connection_str, autocommit=True, **connect_kwargs) as conn:
         with closing(conn.cursor()) as cursor:
             return cursor.bulkcopy_arrow(table, source, table_lock=table_lock, **bulk_options)
+
+
+def _load_native_parallel(connection_str, table, source, workers, table_lock, bulk_options, connect_kwargs):
+    """One Rust call: N connections pull slices of ``source`` from a shared cursor."""
+    from arrowsql.cursor import _raise_native_bulk_error
+
+    with ExitStack() as stack:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mssql-bulk-connect") as pool:
+            futures = [
+                pool.submit(connect, connection_str, autocommit=True, **connect_kwargs)
+                for _ in range(workers)
+            ]
+        connections = []
+        failure = None
+        for future in futures:
+            try:
+                connections.append(stack.enter_context(future.result()))
+            except BaseException as exc:
+                failure = failure or exc
+        if failure is not None:
+            raise failure
+        cursors = [stack.enter_context(closing(conn.cursor())) for conn in connections]
+        handles = [cursor._native_bulk_handle("DDBCBulkCopyArrowParallel") for cursor in cursors]
+        if any(handle is None for handle in handles):
+            raise RuntimeError("write_arrow with workers > 1 needs the native (Rust) driver")
+        for cursor in cursors:
+            cursor._check_closed()
+            cursor._bulkcopy_connection_params()
+        try:
+            return ddbc_bindings.DDBCBulkCopyArrowParallel(
+                handles, table, source, table_lock=table_lock, **bulk_options
+            )
+        except RuntimeError as err:
+            _raise_native_bulk_error(err)
 
 
 def _load_parallel(connection_str, workers, pieces, load, connect_kwargs):
@@ -300,15 +322,6 @@ def _load_worker(connection_str, pending, stop, load, connect_kwargs):
             return load(cursor, first, pieces())
 
 
-def _load_arrow_pieces(cursor, table, first, pieces, table_lock, bulk_options):
-    import pyarrow as pa
-
-    # A RecordBatchReader is an Arrow C stream, which the native bulk
-    # copy consumes directly; a bare generator would need mssql_py_core.
-    reader = pa.RecordBatchReader.from_batches(first.schema, pieces)
-    return cursor.bulkcopy_arrow(table, reader, table_lock=table_lock, **bulk_options)
-
-
 def _load_row_pieces(cursor, table, first, pieces, table_lock, bulk_options):
     rows = itertools.chain.from_iterable(pieces)
     return cursor.bulkcopy(table, rows, table_lock=table_lock, **bulk_options)
@@ -328,27 +341,6 @@ def _row_slices(rows, workers):
         if not chunk:
             return
         yield chunk
-
-
-def _slices(source, slice_rows):
-    """Yield non-empty RecordBatch slices of at most ``slice_rows`` rows."""
-    for batch in _record_batches(source):
-        for offset in range(0, batch.num_rows, slice_rows):
-            yield batch.slice(offset, slice_rows)
-
-
-def _record_batches(source):
-    import pyarrow as pa
-
-    if isinstance(source, pa.Table):
-        return source.to_batches()
-    if isinstance(source, pa.RecordBatch):
-        return [source]
-    if isinstance(source, pa.RecordBatchReader) or hasattr(source, "__arrow_c_stream__"):
-        return pa.RecordBatchReader.from_stream(source)
-    if hasattr(source, "__arrow_c_array__"):
-        return [pa.record_batch(source)]
-    return source
 
 
 def _put(pending, item, stop):

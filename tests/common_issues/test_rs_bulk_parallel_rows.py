@@ -199,6 +199,15 @@ def _record_bulk_calls(monkeypatch):
             return _real(self, *args, **kwargs)
 
         monkeypatch.setattr(Cursor, name, wrapper)
+
+    # The parallel Arrow load is one native call that takes every worker's handle.
+    real_parallel = ddbc_bindings.DDBCBulkCopyArrowParallel
+
+    def parallel(handles, *args, **kwargs):
+        calls.extend((kwargs.get("table_lock"), kwargs.get("batch_size")) for _ in handles)
+        return real_parallel(handles, *args, **kwargs)
+
+    monkeypatch.setattr(ddbc_bindings, "DDBCBulkCopyArrowParallel", parallel)
     return calls
 
 
