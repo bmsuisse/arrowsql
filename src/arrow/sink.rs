@@ -30,6 +30,7 @@ use mssql_tds::datatypes::column_values::{
 use mssql_tds::datatypes::decoder::DecimalParts;
 use mssql_tds::datatypes::row_writer::{RowWriter, ValueKind};
 use mssql_tds::datatypes::sql_json::SqlJson;
+use mssql_tds::datatypes::sql_string::ResolvedEncoding;
 use mssql_tds::datatypes::sql_string::EncodingType;
 use mssql_tds::datatypes::sql_vector::SqlVector;
 use uuid::Uuid;
@@ -329,8 +330,9 @@ impl Column {
                 Ok(_) => data.extend_from_slice(bytes),
                 Err(_) => data.extend_from_slice(String::from_utf8_lossy(bytes).as_bytes()),
             },
-            other => match other.encoding() {
-                Some(encoding) => decode_into(encoding, bytes, data),
+            other => match other.resolved_encoding() {
+                Some(ResolvedEncoding::EncodingRs(encoding)) => decode_into(encoding, bytes, data),
+                Some(oem) => data.extend_from_slice(oem.decode_without_bom_handling(bytes).0.as_bytes()),
                 None => data.extend_from_slice(String::from_utf8_lossy(bytes).as_bytes()),
             },
         }
