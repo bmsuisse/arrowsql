@@ -377,9 +377,8 @@ def test_failed_disconnect_keeps_the_connection_usable(conn_str):
     statement = connection.alloc_statement_handle()
     try:
         assert ddbc.DDBCSQLExecDirect(statement, "CREATE TABLE #rs_core_open_txn (n INT)") in OK
-        with pytest.raises(OperationalError) as info:
+        with pytest.raises(RuntimeError, match="25000"):
             connection.close()
-        assert info.value.sqlstate == "25000"
         assert _scalar(statement, "SELECT 7") == 7
         connection.rollback()
     finally:
