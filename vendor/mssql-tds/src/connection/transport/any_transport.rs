@@ -75,6 +75,17 @@ impl AnyTransport {
         }
     }
 
+    /// VENDOR PATCH: type byte of the next token, without consuming it.
+    pub(crate) async fn peek_token_type(&mut self) -> TdsResult<Option<u8>> {
+        match self {
+            Self::Network(transport) => {
+                crate::io::token_stream::TdsTokenStreamReader::peek_token_type(transport).await
+            }
+            #[cfg(any(test, feature = "test-util", fuzzing))]
+            Self::Dynamic(transport) => transport.peek_token_type().await,
+        }
+    }
+
     #[cfg(not(any(test, feature = "test-util", fuzzing)))]
     pub(crate) fn receive_row_into<'a, W>(
         &'a mut self,

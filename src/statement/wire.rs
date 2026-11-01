@@ -217,7 +217,7 @@ pub(super) fn buffer_all(client: &mut SyncClient, state: &mut StmtState, budget:
                 .queued
                 .push_back(BufferedResult::without_rows(rows_affected.map_or(-1, |n| n as i64), info)),
             Ok(StatementResult::Rows) => {
-                let columns = Some(Arc::new(client.get_metadata().clone()));
+                let columns = Some(Arc::new(crate::decode::hidden::visible_columns(client.get_metadata())));
                 let mut rows = RowBuffer::new();
                 let outcome = read_rows(client, &mut rows, usize::MAX, budget.saturating_sub(used));
                 used += rows.byte_size();

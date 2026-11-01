@@ -17,7 +17,7 @@ use super::StmtShared;
 use super::cancel::StmtCancel;
 use super::wire::Slot;
 use crate::consts::*;
-use crate::decode::{RowBuffer, describe};
+use crate::decode::{RowBuffer, describe, hidden};
 use crate::diag::{self, DiagRecord};
 use crate::runtime::SyncClient;
 
@@ -121,14 +121,14 @@ impl StmtState {
     /// is repeated.
     pub(super) fn columns_of_current(&mut self, client: &SyncClient) -> Arc<Vec<ColumnMetadata>> {
         let Some(handle) = client.metadata_handle() else {
-            return Arc::new(client.get_metadata().clone());
+            return Arc::new(hidden::visible_columns(client.get_metadata()));
         };
         if let Some((last, columns)) = &self.last_columns
             && last.same_as(&handle)
         {
             return Arc::clone(columns);
         }
-        let columns = Arc::new(handle.columns().clone());
+        let columns = Arc::new(hidden::visible_columns(handle.columns()));
         self.last_columns = Some((handle, Arc::clone(&columns)));
         columns
     }
@@ -225,6 +225,30 @@ pub fn read_rows_into<W: RowWriter + Send>(
     max_rows: usize,
     max_bytes: usize,
 ) -> mssql_tds::core::TdsResult<bool> {
+    match hidden::visible_map(client.get_metadata()) {
+        None => read_loop(client, sink, rows_written, bytes_written, max_rows, max_bytes),
+        Some(map) => {
+            let mut filter = hidden::HiddenFilter::new(sink, &map);
+            read_loop(
+                client,
+                &mut filter,
+                |f| rows_written(&*f.inner),
+                |f| bytes_written(&*f.inner),
+                max_rows,
+                max_bytes,
+            )
+        }
+    }
+}
+
+fn read_loop<W: RowWriter + Send>(
+    client: &mut SyncClient,
+    sink: &mut W,
+    rows_written: impl Fn(&W) -> usize,
+    bytes_written: impl Fn(&W) -> usize,
+    max_rows: usize,
+    max_bytes: usize,
+) -> mssql_tds::core::TdsResult<bool> {
     client.block_on(|c| async move {
         let start = rows_written(sink);
         while rows_written(sink) - start < max_rows && (max_bytes == usize::MAX || bytes_written(sink) < max_bytes) {
@@ -241,9 +265,7 @@ pub fn read_rows_into<W: RowWriter + Send>(
         }
         Ok(false)
     })
-}
-
-/// Read rows of the current result into a Python-bound buffer.
+}/// Read rows of the current result into a Python-bound buffer.
 pub(super) fn read_rows(
     client: &mut SyncClient,
     sink: &mut RowBuffer,

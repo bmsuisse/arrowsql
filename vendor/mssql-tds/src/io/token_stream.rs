@@ -237,6 +237,12 @@ pub(crate) trait TdsTokenStreamReader {
         cancel_handle: Option<&CancelHandle>,
     ) -> TdsResult<Tokens>;
 
+    /// VENDOR PATCH: the type byte of the next token without consuming it
+    /// (`None` when the transport cannot look ahead).
+    async fn peek_token_type(&mut self) -> TdsResult<Option<u8>> {
+        Ok(None)
+    }
+
     // Object-safe fallbacks for cfg-gated dynamic transports. Production calls
     // the native inherent methods on its concrete transport representation.
     #[cfg_attr(not(any(test, feature = "test-util", fuzzing)), allow(dead_code))]

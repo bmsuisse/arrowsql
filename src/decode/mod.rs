@@ -10,6 +10,7 @@
 pub mod binary;
 pub mod buffer;
 pub mod describe;
+pub mod hidden;
 pub mod numeric;
 pub mod python;
 pub mod temporal;

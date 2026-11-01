@@ -3487,6 +3487,13 @@ impl TdsTokenStreamReader for NetworkTransport {
             .await
     }
 
+    async fn peek_token_type(&mut self) -> TdsResult<Option<u8>> {
+        if self.tds_read_buffer.get_buffered_slice().is_empty() {
+            self.refill_for(1).await?;
+        }
+        Ok(self.tds_read_buffer.get_buffered_slice().first().copied())
+    }
+
     async fn receive_row_into(
         &mut self,
         context: &ParserContext,

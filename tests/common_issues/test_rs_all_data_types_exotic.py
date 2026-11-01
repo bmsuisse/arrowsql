@@ -387,10 +387,11 @@ class TestTableAndCursorTypes:
             "DECLARE c CURSOR LOCAL FAST_FORWARD FOR SELECT CAST(1.5 AS decimal(5,2)), CAST('2024-01-02' AS date); "
             "OPEN c; FETCH NEXT FROM c; CLOSE c; DEALLOCATE c"
         )
-        # Known divergence from upstream (hidden columns are not stripped): the server appends
-        # a hidden int ROWSTAT column to T-SQL FETCH results; the ODBC driver hides it.
-        assert [d[0] for d in cur.description][2:] == ["ROWSTAT"]
-        assert tuple(cur.fetchone())[:2] == (D("1.50"), dt.date(2024, 1, 2))
+        # The server appends a hidden int ROWSTAT column to T-SQL FETCH results; like the
+        # ODBC driver, we hide it.
+        assert len(cur.description) == 2
+        assert "ROWSTAT" not in [d[0] for d in cur.description]
+        assert tuple(cur.fetchone()) == (D("1.50"), dt.date(2024, 1, 2))
 
 
 # ---------------------------------------------------------------- setinputsizes
