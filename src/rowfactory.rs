@@ -6,8 +6,10 @@ use pyo3::exceptions::{PyAttributeError, PyKeyError, PyTypeError};
 use pyo3::ffi;
 use pyo3::PyTypeInfo;
 use pyo3::prelude::*;
+use pyo3::{PyTraverseError, PyVisit};
 use pyo3::pyclass::CompareOp;
 use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyWeakrefMethods, PyWeakrefReference};
 use pyo3::types::{PyDict, PyInt, PyList, PySlice, PyString, PyTuple, PyType};
 use std::ptr;
 
@@ -24,9 +26,6 @@ unsafe extern "C" {
         suppress: std::os::raw::c_int,
     ) -> *mut ffi::PyObject;
 }
-
-/// Types already verified not to override a field descriptor.
-static PLAIN_TYPES: std::sync::Mutex<Vec<Py<PyType>>> = std::sync::Mutex::new(Vec::new());
 
 static ROW_MAPPING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DECIMAL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -85,6 +84,23 @@ impl RowCore {
 
 #[pymethods]
 impl RowCore {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.values)?;
+        visit.call(&self.column_map)?;
+        visit.call(&self.cursor)?;
+        visit.call(&self.column_map_lower)?;
+        visit.call(&self.column_names)
+    }
+
+    /// Drop the references (replaced by None, the fields are not optional) to break cycles.
+    fn __clear__(&mut self) {
+        Python::attach(|py| {
+            for f in [&mut self.values, &mut self.column_map, &mut self.cursor, &mut self.column_map_lower, &mut self.column_names] {
+                *f = py.None();
+            }
+        });
+    }
+
     #[new]
     #[pyo3(signature = (*_args, **_kwargs))]
     fn new(
@@ -264,11 +280,20 @@ impl RowCore {
 const FIELDS: [&str; 5] =
     ["_row_values", "_column_map", "_row_cursor", "_column_map_lower", "_column_names"];
 
+/// Subclasses already verified not to override a field descriptor. Held weakly
+/// so the cache does not keep (dynamically created) row classes alive.
+static PLAIN_TYPES: std::sync::Mutex<Vec<Py<PyWeakrefReference>>> = std::sync::Mutex::new(Vec::new());
+
 /// False when `row_type` (a subclass) overrides any of the field descriptors;
-/// `new_row` then assigns through `setattr` so the override runs.
+/// `new_row` then assigns through `setattr` so the override runs. A positive
+/// answer is cached per class (weakly), so a descriptor added to a class after
+/// its first row is not noticed.
 pub(crate) fn plain_fields(py: Python<'_>, row_type: &Bound<'_, PyType>) -> PyResult<bool> {
-    if PLAIN_TYPES.lock().unwrap().iter().any(|t| t.is(row_type)) {
-        return Ok(true);
+    {
+        let cache = PLAIN_TYPES.lock().unwrap();
+        if cache.iter().any(|w| w.bind(py).upgrade().is_some_and(|t| t.is(row_type))) {
+            return Ok(true);
+        }
     }
     let core = py.get_type::<RowCore>();
     for name in FIELDS {
@@ -276,7 +301,9 @@ pub(crate) fn plain_fields(py: Python<'_>, row_type: &Bound<'_, PyType>) -> PyRe
             return Ok(false);
         }
     }
-    PLAIN_TYPES.lock().unwrap().push(row_type.clone().unbind());
+    let mut cache = PLAIN_TYPES.lock().unwrap();
+    cache.retain(|w| w.bind(py).upgrade().is_some());
+    cache.push(PyWeakrefReference::new(row_type.as_any())?.unbind());
     Ok(true)
 }
 

@@ -14,6 +14,11 @@ Version numbers in this project are deliberately three different things:
 
 ## [Unreleased]
 
+### Fixed
+
+- `RowCore` takes part in the cyclic GC (`__traverse__` / `__clear__`): a row referenced from its own values or cursor is now collected.
+- The verified-subclass cache of `make_row_fast` / `construct_rows` holds row classes weakly instead of keeping them alive forever.
+
 ## [0.2.0] - 2026-11-01
 
 ### Added

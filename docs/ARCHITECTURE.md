@@ -75,9 +75,12 @@ decode/buffer.rs RowBuffer (GIL-free) ──► decode/python.rs (GIL held) ─�
 Every `DDBCSQL*` function returns an ODBC return code (`SQL_SUCCESS` 0,
 `SQL_SUCCESS_WITH_INFO` 1, `SQL_NO_DATA` 100, `SQL_ERROR` -1,
 `SQL_INVALID_HANDLE` -2) and mutates the out-lists it is given (`row`,
-`rows`, `ColumnMetadata`, `messages`). Errors are not raised from Rust:
-they are stored as `DiagRecord`s on the statement, and the Python layer
-calls `DDBCSQLCheckError` / `DDBCSQLGetAllDiagRecords` to raise. Message
+`rows`, `ColumnMetadata`, `messages`). Statement errors are stored as
+`DiagRecord`s on the statement. DB-API exceptions are built and raised in
+Rust (`src/errors.rs`: the SQLSTATE-to-class table, the 1222 / 2628 / 8114
+promotions, the `sqlstate` / `native_error` attributes); `DDBCRaiseFor` raises
+for a statement, and the Python layer still calls `DDBCSQLCheckError` /
+`DDBCSQLGetAllDiagRecords` where it needs the records. Message
 text keeps msodbcsql's `[Microsoft][ODBC Driver 18 for SQL Server][SQL Server]`
 prefix. Connection-level failures raise
 `RuntimeError("SQLSTATE:XXXXX:NATIVE:<n>:<message>")`.
