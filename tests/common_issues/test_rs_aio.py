@@ -504,3 +504,53 @@ def test_closed_event_loop_is_collected():
     del loop
     gc.collect()
     assert ref() is None
+
+
+@pytest.mark.asyncio
+async def test_executemany_datetime_decimal_null_cells(conn):
+    cur = conn.cursor()
+    await cur.execute("CREATE TABLE #g4em (i int, d datetime2, n decimal(18,4), s int NULL)")
+    d = datetime.datetime(2024, 1, 2, 3, 4, 5, 123000)
+    data = [(1, d, decimal.Decimal("123.4567"), None), [2, d, decimal.Decimal("-0.5"), 7]]
+    await cur.executemany("INSERT INTO #g4em VALUES (?,?,?,?)", data)
+    await cur.executemany("INSERT INTO #g4em VALUES (?,?,?,?)", tuple(data))
+    await cur.executemany("INSERT INTO #g4em VALUES (?,?,?,?)", iter(data))
+    await cur.execute("SELECT i, d, n, s FROM #g4em ORDER BY i")
+    rows = [tuple(r) for r in await cur.fetchall()]
+    assert len(rows) == 6
+    assert rows[0] == (1, d, decimal.Decimal("123.4567"), None)
+    assert rows[5] == (2, d, decimal.Decimal("-0.5000"), 7)
+
+
+@pytest.mark.asyncio
+async def test_mixed_fetchone_async_for_fetchmany_fetchall(conn):
+    cur = conn.cursor()
+    await cur.execute("SELECT TOP 40 object_id AS x FROM sys.all_columns ORDER BY object_id, column_id")
+    first = await cur.fetchone()
+    got = [first[0]]
+    async for r in cur:
+        got.append(r[0])
+        if len(got) == 3:
+            break
+    got += [r[0] for r in await cur.fetchmany(5)]
+    got.append((await cur.fetchone())[0])
+    got += [r[0] for r in await cur.fetchall()]
+    assert len(got) == 40 and got == sorted(got)
+    assert await cur.fetchone() is None and await cur.fetchall() == []
+    async for _ in cur:
+        raise AssertionError("exhausted cursor yielded a row")
+
+
+@pytest.mark.asyncio
+async def test_schema_change_between_executes_same_cursor(conn):
+    cur = conn.cursor()
+    await cur.execute("SELECT 1 AS a")
+    assert [d[0] for d in cur.description] == ["a"]
+    assert (await cur.fetchone())[0] == 1
+    await cur.execute("SELECT 1 AS a, N'x' AS b")
+    assert [d[0] for d in cur.description] == ["a", "b"]
+    r = await cur.fetchone()
+    assert r.b == "x"
+    await cur.execute("SELECT CAST(1 AS bigint) AS c")
+    assert [d[0] for d in cur.description] == ["c"]
+    assert (await cur.fetchone()).c == 1

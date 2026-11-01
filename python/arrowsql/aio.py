@@ -164,14 +164,20 @@ class AsyncCursor:
             out = batch.take(n)
         if len(out) < n and self._pos < len(self._rows):
             end = self._pos + (n - len(out))
-            out.extend(self._rows[self._pos:end])
+            if out:
+                out.extend(self._rows[self._pos:end])
+            else:
+                out = self._rows[self._pos:end]
             self._pos = min(end, len(self._rows))
         return out
 
     async def fetchone(self) -> Optional[Any]:
         batch = self._batch
-        if batch is not None and batch.remaining():
-            return batch.next()
+        if batch is not None:
+            row = batch.next()
+            if row is not None:
+                return row
+            self._batch = None
         if self._pos < len(self._rows):
             row = self._rows[self._pos]
             self._pos += 1
@@ -186,13 +192,21 @@ class AsyncCursor:
         size = self.arraysize if size is None else size
         out = self._local(size)
         while len(out) < size and not self._done:
-            out.extend(await self._more(size - len(out)))
+            more = await self._more(size - len(out))
+            if out:
+                out.extend(more)
+            else:
+                out = more
         return out
 
     async def fetchall(self) -> list:
         out = self._local(2**62)
         while not self._done:  # a result that fails after some rows ends with the error
-            out.extend(await self._more(2**62))
+            more = await self._more(2**62)
+            if out:
+                out.extend(more)
+            else:
+                out = more
         return out
 
     async def fetchall_arrow(self, batch_size: int = 65_536):
@@ -239,6 +253,15 @@ class AsyncCursor:
         return self
 
     async def __anext__(self):
+        batch = self._batch
+        if batch is not None:
+            row = batch.next()
+            if row is not None:
+                return row
+        elif self._pos < len(self._rows):
+            row = self._rows[self._pos]
+            self._pos += 1
+            return row
         row = await self.fetchone()
         if row is None:
             raise StopAsyncIteration

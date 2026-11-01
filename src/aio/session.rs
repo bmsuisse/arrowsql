@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
-use mssql_tds::connection::tds_client::{ExecuteOptions, PreparedStatement, ResultSet, StatementResult, TdsClient};
+use mssql_tds::connection::tds_client::{ExecuteOptions, PreparedStatement, MetadataHandle, ResultSet, StatementResult, TdsClient};
 use mssql_tds::core::CancelHandle;
 use mssql_tds::datatypes::sqltypes::SqlType;
 use mssql_tds::message::transaction_management::TransactionIsolationLevel;
@@ -134,6 +134,9 @@ pub struct Session {
     owner_handle: Option<Arc<CancelHandle>>,
     cursors: HashMap<u64, CursorState>,
     param_types: HashMap<String, Arc<[(String, String)]>>,
+    /// Columns of the previous row-producing result, shared with the next one
+    /// when the server sent the same metadata (a repeated query).
+    last_columns: Option<(MetadataHandle, Arc<Vec<ColumnMetadata>>)>,
     /// When the TDS login finished (pool `max_lifetime`).
     born: Instant,
 }
@@ -172,6 +175,7 @@ impl Session {
             owner_handle: None,
             cursors: HashMap::new(),
             param_types: HashMap::new(),
+            last_columns: None,
             born: Instant::now(),
         }
     }
@@ -327,16 +331,17 @@ impl Session {
                         Some((rows.text(row.get(1)?)?, rows.text(row.get(3)?)?))
                     })
                     .collect();
-                if self.param_types.len() >= PARAM_TYPE_CACHE_SIZE {
-                    self.param_types.clear();
+                if self.param_types.len() >= PARAM_TYPE_CACHE_SIZE
+                    && let Some(victim) = self.param_types.keys().next().cloned()
+                {
+                    self.param_types.remove(&victim);
                 }
                 self.param_types.insert(sql.to_string(), Arc::clone(&types));
                 types
             }
         };
         for &i in &params.untyped_nulls {
-            let name = format!("@P{}", i + 1);
-            if let Some((_, type_name)) = described.iter().find(|(n, _)| n.eq_ignore_ascii_case(&name))
+            if let Some((_, type_name)) = described.iter().find(|(n, _)| is_param_name(n, i + 1))
                 && let Some(sql_type) = crate::params::null_types::null_of(type_name)
             {
                 params.types[i] = sql_type;
@@ -395,7 +400,7 @@ impl Session {
         match result {
             Ok(StatementResult::Rows) => {
                 let mut failed = false;
-                let columns = Arc::new(client.get_metadata().clone());
+                let columns = columns_of_current(&mut self.last_columns, client);
                 let read = read_rows(
                     client,
                     &mut out.rows,
@@ -544,7 +549,7 @@ impl Session {
         let result = match advanced {
             Ok(StatementResult::Rows) => {
                 let mut failed = false;
-                let columns = Arc::new(client.get_metadata().clone());
+                let columns = columns_of_current(&mut self.last_columns, client);
                 let read = read_rows(client, &mut out.rows, |b| b.rows, RowBuffer::byte_size, prefetch.max(1), PREFETCH_BYTES, Some(cancel)).await;
                 info.extend(diag::info_records(&client.take_info_messages()));
                 match read {
@@ -778,6 +783,31 @@ impl Session {
 
 fn invalid_cursor() -> Diag {
     vec![DiagRecord::new("24000", 0, "[Microsoft][ODBC Driver Manager] Invalid cursor state")]
+}
+
+/// `name` is the `@P<ordinal>` parameter name (any case).
+fn is_param_name(name: &str, ordinal: usize) -> bool {
+    name.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("@P"))
+        && name[2..].parse::<usize>().is_ok_and(|n| n == ordinal)
+}
+
+/// The client's current columns, shared with the previous result's when the
+/// server sent the same metadata (as the sync cursor does).
+fn columns_of_current(
+    last: &mut Option<(MetadataHandle, Arc<Vec<ColumnMetadata>>)>,
+    client: &TdsClient,
+) -> Arc<Vec<ColumnMetadata>> {
+    let Some(handle) = client.metadata_handle() else {
+        return Arc::new(client.get_metadata().clone());
+    };
+    if let Some((prev, columns)) = last
+        && prev.same_as(&handle)
+    {
+        return Arc::clone(columns);
+    }
+    let columns = Arc::new(handle.columns().clone());
+    *last = Some((handle, Arc::clone(&columns)));
+    columns
 }
 
 /// Move everything still on the wire for `state`'s cursor into its buffers.

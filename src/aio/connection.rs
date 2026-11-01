@@ -14,7 +14,7 @@ use mssql_tds::connection_provider::tds_connection_provider::TdsConnectionProvid
 use mssql_tds::datatypes::sqltypes::SqlType;
 use parking_lot::Mutex;
 use pyo3::prelude::*;
-use pyo3::types::PySequence;
+use pyo3::types::{PyList, PySequence, PyTuple};
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::diag::DiagRecord;
@@ -209,21 +209,40 @@ impl AioConnection {
         seq_of_params: &Bound<'py, PyAny>,
     ) -> Op<'py> {
         let (sql, _) = crate::params::placeholders::rewrite_qmarks(&sql);
-        let mut rows: Vec<Vec<SqlType>> = Vec::new();
-        let mut nulls: Vec<Vec<bool>> = Vec::new();
-        for row in seq_of_params.try_iter()? {
-            let row = row?;
-            let row = row.cast::<PySequence>()?;
-            let n = row.len()?;
-            let mut types = Vec::with_capacity(n);
-            let mut null_row = Vec::with_capacity(n);
-            for i in 0..n {
-                let value = row.get_item(i)?;
-                null_row.push(value.is_none());
-                types.push(py_to_sql_type(&value).map_err(|e| crate::params::conversion_error(&e))?);
-            }
+        let cap = if let Ok(l) = seq_of_params.cast::<PyList>() {
+            l.len()
+        } else if let Ok(t) = seq_of_params.cast::<PyTuple>() {
+            t.len()
+        } else {
+            0
+        };
+        let mut rows: Vec<Vec<SqlType>> = Vec::with_capacity(cap);
+        let mut nulls: Vec<Vec<bool>> = Vec::with_capacity(cap);
+        let mut push_row = |row: Bound<'py, PyAny>| -> PyResult<()> {
+            let (types, null_row) = if let Ok(t) = row.cast::<PyTuple>() {
+                param_row(t.len(), |i| t.get_item(i))?
+            } else if let Ok(l) = row.cast::<PyList>() {
+                param_row(l.len(), |i| l.get_item(i))?
+            } else {
+                let seq = row.cast::<PySequence>()?;
+                param_row(seq.len()?, |i| seq.get_item(i))?
+            };
             rows.push(types);
             nulls.push(null_row);
+            Ok(())
+        };
+        if let Ok(list) = seq_of_params.cast::<PyList>() {
+            for row in list.iter() {
+                push_row(row)?;
+            }
+        } else if let Ok(tuple) = seq_of_params.cast::<PyTuple>() {
+            for row in tuple.iter() {
+                push_row(row)?;
+            }
+        } else {
+            for row in seq_of_params.try_iter()? {
+                push_row(row?)?;
+            }
         }
         let all_null = crate::params::batch::normalize(&mut rows, &nulls)
             .map_err(|e| crate::params::conversion_error(&e))?;
@@ -438,3 +457,22 @@ impl AioOpening {
     }
 }
 
+
+/// One executemany row: SQL types plus a NULL mask. Per cell the choice is the
+/// one `params::bind` makes (fast path for naive datetime / Decimal).
+fn param_row<'py>(
+    n: usize,
+    get: impl Fn(usize) -> PyResult<Bound<'py, PyAny>>,
+) -> PyResult<(Vec<SqlType>, Vec<bool>)> {
+    let mut types = Vec::with_capacity(n);
+    let mut null_row = Vec::with_capacity(n);
+    for i in 0..n {
+        let value = get(i)?;
+        null_row.push(value.is_none());
+        let cell = crate::statement::batch_rpc::fast_param_cell(&value)
+            .map_or_else(|| py_to_sql_type(&value), Ok)
+            .map_err(|e| crate::params::conversion_error(&e))?;
+        types.push(cell);
+    }
+    Ok((types, null_row))
+}

@@ -1,6 +1,7 @@
 """Asynchronous result fetching through mssql-py-core."""
 
 import asyncio
+import logging
 
 from typing import TYPE_CHECKING, Any
 
@@ -8,7 +9,11 @@ from ..exceptions import ProgrammingError
 from ..logging import logger
 from ..row import Row
 from .async_execute import _get_py_core_async_cursor
-from .exception_translator import is_connection_busy, translate_py_core_exceptions
+from .exception_translator import (
+    is_connection_busy,
+    translate_py_core_exception,
+    translate_py_core_exceptions,
+)
 
 if TYPE_CHECKING:
     from .async_cursor import _AsyncCursor  # pyright: ignore[reportPrivateUsage]
@@ -46,6 +51,8 @@ def _reconcile_failed_fetch(
 
 def _wrap_row(snapshot: _ResultSnapshot, values: tuple[Any, ...]) -> Row:
     _, column_map, uuid_str_indices, column_map_lower, column_names = snapshot
+    if not uuid_str_indices:
+        return Row._fast_create(list(values), column_map, None, column_map_lower, column_names)  # pyright: ignore[reportPrivateUsage]
     return Row(
         list(values),
         column_map,
@@ -55,31 +62,47 @@ def _wrap_row(snapshot: _ResultSnapshot, values: tuple[Any, ...]) -> Row:
     )
 
 
+def _wrap_rows(snapshot: _ResultSnapshot, rows: list[tuple[Any, ...]]) -> list[Row]:
+    _, column_map, uuid_str_indices, column_map_lower, column_names = snapshot
+    if uuid_str_indices:
+        return [_wrap_row(snapshot, row) for row in rows]
+    create = Row._fast_create  # pyright: ignore[reportPrivateUsage]
+    return [create(list(row), column_map, None, column_map_lower, column_names) for row in rows]
+
+
 async def fetchone(cursor: "_AsyncCursor") -> Row | None:
     """Fetch the next row through the py-core async cursor."""
     logger.debug("AsyncCursor.fetchone: starting")
-    await cursor._wait_for_result_publication()  # pyright: ignore[reportPrivateUsage]
+    if not cursor._result_ready.is_set():  # pyright: ignore[reportPrivateUsage]
+        await cursor._wait_for_result_publication()  # pyright: ignore[reportPrivateUsage]
     snapshot = _snapshot_result(cursor)
     try:
-        with translate_py_core_exceptions():
+        try:
             row = await _get_py_core_async_cursor(cursor).fetchone()
+        except Exception as error:
+            translated = translate_py_core_exception(error)
+            if translated is error:
+                raise
+            raise translated from error
     except (Exception, asyncio.CancelledError) as error:
         _reconcile_failed_fetch(cursor, snapshot[0], "fetchone", error)
         raise
     cursor._record_fetch(  # pyright: ignore[reportPrivateUsage]
         snapshot[0], row is not None, row is None
     )
-    logger.debug(
-        "AsyncCursor.fetchone: completed; row_found=%s; rowcount=%d",
-        row is not None,
-        cursor.rowcount,
-    )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "AsyncCursor.fetchone: completed; row_found=%s; rowcount=%d",
+            row is not None,
+            cursor.rowcount,
+        )
     return None if row is None else _wrap_row(snapshot, row)
 
 
 async def fetchmany(cursor: "_AsyncCursor", size: int | None = None) -> list[Row]:
     """Fetch up to size rows, using cursor arraysize when size is omitted."""
-    await cursor._wait_for_result_publication()  # pyright: ignore[reportPrivateUsage]
+    if not cursor._result_ready.is_set():  # pyright: ignore[reportPrivateUsage]
+        await cursor._wait_for_result_publication()  # pyright: ignore[reportPrivateUsage]
     cursor._check_closed()  # pyright: ignore[reportPrivateUsage]
     requested_size = cursor.arraysize if size is None else size
     logger.debug("AsyncCursor.fetchmany: starting; requested_size=%s", requested_size)
@@ -106,13 +129,14 @@ async def fetchmany(cursor: "_AsyncCursor", size: int | None = None) -> list[Row
         len(rows),
         cursor.rowcount,
     )
-    return [_wrap_row(snapshot, row) for row in rows]
+    return _wrap_rows(snapshot, rows)
 
 
 async def fetchall(cursor: "_AsyncCursor") -> list[Row]:
     """Fetch all remaining rows through the py-core async cursor."""
     logger.debug("AsyncCursor.fetchall: starting")
-    await cursor._wait_for_result_publication()  # pyright: ignore[reportPrivateUsage]
+    if not cursor._result_ready.is_set():  # pyright: ignore[reportPrivateUsage]
+        await cursor._wait_for_result_publication()  # pyright: ignore[reportPrivateUsage]
     snapshot = _snapshot_result(cursor)
     try:
         with translate_py_core_exceptions():
@@ -126,4 +150,4 @@ async def fetchall(cursor: "_AsyncCursor") -> list[Row]:
         len(rows),
         cursor.rowcount,
     )
-    return [_wrap_row(snapshot, row) for row in rows]
+    return _wrap_rows(snapshot, rows)
