@@ -124,6 +124,10 @@ def probe(conn_str, ca=None):
     return json.loads(out.stdout.strip().splitlines()[-1])
 
 
+# The driver validates against the OS store on Windows (Schannel), not SSL_CERT_FILE.
+needs_ca_env = pytest.mark.skipif(sys.platform == "win32", reason="Schannel ignores SSL_CERT_FILE")
+
+
 @pytest.fixture
 def tls_server(start_mock, tls_material):
     def make(mode):
@@ -149,6 +153,7 @@ def test_strict_ignores_trust_server_certificate(tls_server):
         mssql_python.connect(server.conn_str(Encrypt="strict", TrustServerCertificate="yes"))
 
 
+@needs_ca_env
 @pytest.mark.parametrize("mode", ["optional", "strict"])
 def test_tls_validates_chain_and_hostname_with_trusted_ca(tls_server, tls_material, mode):
     server = tls_server(mode)
@@ -167,6 +172,7 @@ def test_tls_rejects_untrusted_certificate(tls_server, mode):
     assert result["error"] in {"OperationalError", "InterfaceError", "DatabaseError"}
 
 
+@needs_ca_env
 def test_tls_hostname_mismatch_is_rejected(tls_server, tls_material):
     server = tls_server("optional")
     cs = server.conn_str(
@@ -176,6 +182,7 @@ def test_tls_hostname_mismatch_is_rejected(tls_server, tls_material):
     assert probe(cs, ca=tls_material.ca_pem)["ok"] is False
 
 
+@needs_ca_env
 def test_tls_hostname_in_certificate_overrides_server_name(tls_server, tls_material):
     server = tls_server("optional")
     cs = server.conn_str(

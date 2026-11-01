@@ -173,7 +173,7 @@ def tls_material(tmp_path_factory):
     pytest.importorskip("cryptography")
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
     root = tmp_path_factory.mktemp("mock-tls")
@@ -182,7 +182,7 @@ def tls_material(tmp_path_factory):
     def name(cn):
         return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
 
-    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_key = rsa.generate_private_key(65537, 2048)
     ca = (
         x509.CertificateBuilder().subject_name(name("arrowsql mock CA")).issuer_name(name("arrowsql mock CA"))
         .public_key(ca_key.public_key()).serial_number(x509.random_serial_number())
@@ -191,7 +191,7 @@ def tls_material(tmp_path_factory):
         .add_extension(x509.KeyUsage(True, False, False, False, False, True, True, False, False), critical=True)
         .sign(ca_key, hashes.SHA256())
     )
-    key = ec.generate_private_key(ec.SECP256R1())
+    key = rsa.generate_private_key(65537, 2048)
     leaf = (
         x509.CertificateBuilder().subject_name(name("localhost")).issuer_name(ca.subject)
         .public_key(key.public_key()).serial_number(x509.random_serial_number())
@@ -210,8 +210,13 @@ def tls_material(tmp_path_factory):
         from cryptography.hazmat.primitives.serialization import pkcs12
 
         pfx = root / "server.pfx"
-        pfx.write_bytes(pkcs12.serialize_key_and_certificates(
-            b"mock", key, leaf, [ca], serialization.BestAvailableEncryption(b"mock")))
+        # 3DES/SHA1 PBE: the oldest scheme, accepted by every Schannel version.
+        enc = (
+            serialization.PrivateFormat.PKCS12.encryption_builder()
+            .kdf_rounds(2048).key_cert_algorithm(pkcs12.PBES.PBESv1SHA1And3KeyTripleDESCBC)
+            .hmac_hash(hashes.SHA1()).build(b"mock")
+        )
+        pfx.write_bytes(pkcs12.serialize_key_and_certificates(b"mock", key, leaf, [ca], enc))
         server_args = ["--pfx", str(pfx), "--pfx-password", "mock"]
     else:
         cert_file, key_file = root / "server.pem", root / "server.key"
