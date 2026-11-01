@@ -13,7 +13,7 @@ import threading
 import time
 
 import pytest
-from mssql_python import OperationalError, connect, ddbc_bindings as ddbc
+from mssql_python import Error, OperationalError, connect, ddbc_bindings as ddbc
 
 SQL_DECIMAL = 3
 SQL_ATTR_CURRENT_CATALOG = 109
@@ -195,7 +195,7 @@ def test_set_attr_isolation_supersedes_constructor_isolation(conn_str):
 
 @pytest.mark.parametrize("token", [b"x", b"\x04\x00\x00\x00ab", "not-bytes"], ids=["short", "bad-length", "str"])
 def test_malformed_access_token_is_rejected(conn_str, token):
-    with pytest.raises(RuntimeError, match="(?i)access.token"):
+    with pytest.raises(Error, match="(?i)access.token"):
         ddbc.Connection(conn_str, False, {SQL_ATTR_AUTOCOMMIT: 1, SQL_COPT_SS_ACCESS_TOKEN: token})
 
 

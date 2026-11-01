@@ -226,16 +226,21 @@ _SQL_COPT_SS_ACCESS_TOKEN = ConstantsDDBC.SQL_COPT_SS_ACCESS_TOKEN.value
 _CONN_STR_CACHE: Dict[Any, Tuple[str, Dict[str, str]]] = {}
 _CONN_STR_CACHE_SIZE = 64
 
+# The native Connection raises typed DB-API errors; mocks still raise RuntimeError.
+_NATIVE_ERRORS = (RuntimeError, Error)
+
 _SQLSTATE_RE = re.compile(r"^SQLSTATE:([A-Z0-9]{0,5}):(?:NATIVE:(-?\d+):)?(.*)", re.DOTALL)
 
 
-def _raise_connection_error(e: RuntimeError) -> None:
-    """Map a RuntimeError from the C++ pybind layer to the correct DB-API 2.0 exception.
+def _raise_connection_error(e: BaseException) -> None:
+    """Re-raise a native connection error as a DB-API 2.0 exception.
 
-    Connection::checkError() throws "SQLSTATE:XXXXX:<odbc_message>" (optionally
-    "SQLSTATE:XXXXX:NATIVE:<number>:<odbc_message>") so the SQLSTATE can be mapped via
-    sqlstate_to_exception(), consistent with cursor-level error handling.
+    The native Connection already raises typed errors, which pass through. A
+    RuntimeError "SQLSTATE:XXXXX:[NATIVE:<number>:]<odbc_message>" (what a
+    mocked native layer raises) is mapped via sqlstate_to_exception().
     """
+    if isinstance(e, Error):
+        raise e
     error_msg = str(e)
     match = _SQLSTATE_RE.match(error_msg)
     if match:
@@ -887,7 +892,7 @@ class Connection:
             )
             if self._conn.get_autocommit() != autocommit:
                 self.setautocommit(autocommit)
-        except RuntimeError as e:
+        except _NATIVE_ERRORS as e:
             _raise_connection_error(e)
 
         # Register this connection for cleanup before Python shutdown
@@ -1179,7 +1184,7 @@ class Connection:
         """
         try:
             return self._conn.get_autocommit()
-        except RuntimeError as e:
+        except _NATIVE_ERRORS as e:
             _raise_connection_error(e)
 
     @autocommit.setter
@@ -1222,7 +1227,7 @@ class Connection:
         """
         try:
             self._conn.set_autocommit(value)
-        except RuntimeError as e:
+        except _NATIVE_ERRORS as e:
             _raise_connection_error(e)
 
     def setencoding(self, encoding: Optional[str] = None, ctype: Optional[int] = None) -> None:
@@ -2162,7 +2167,7 @@ class Connection:
         # Commit the current transaction
         try:
             self._conn.commit()
-        except RuntimeError as e:
+        except _NATIVE_ERRORS as e:
             _raise_connection_error(e)
         logger.info("Transaction committed successfully.")
 
@@ -2188,7 +2193,7 @@ class Connection:
         # Roll back the current transaction
         try:
             self._conn.rollback()
-        except RuntimeError as e:
+        except _NATIVE_ERRORS as e:
             _raise_connection_error(e)
         logger.info("Transaction rolled back successfully.")
 
@@ -2234,7 +2239,7 @@ class Connection:
                 manual_commit = False
                 try:
                     manual_commit = not self._conn.get_autocommit()
-                except RuntimeError as e:
+                except _NATIVE_ERRORS as e:
                     autocommit_error = e
                 if manual_commit:
                     # End caller work before native close. Pooled connections are
@@ -2243,13 +2248,13 @@ class Connection:
                     logger.debug("Rolling back uncommitted changes before closing connection.")
                     try:
                         self._conn.rollback()
-                    except RuntimeError as e:
+                    except _NATIVE_ERRORS as e:
                         rollback_error = e
                 # TODO: Check potential race conditions in case of multithreaded scenarios
                 # Close the connection
                 try:
                     self._conn.close(manual_commit and rollback_error is None)
-                except RuntimeError as e:
+                except _NATIVE_ERRORS as e:
                     _raise_connection_error(e)
                 finally:
                     self._conn = None

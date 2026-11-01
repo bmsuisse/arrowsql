@@ -155,10 +155,7 @@ pub(crate) fn error_text(record: &DiagRecord) -> String {
 }
 
 fn runtime_error(records: &[DiagRecord]) -> PyErr {
-    match records.first() {
-        Some(record) => PyRuntimeError::new_err(error_text(record)),
-        None => PyRuntimeError::new_err("SQLSTATE:HY000:NATIVE:0:Unknown error"),
-    }
+    Python::attach(|py| crate::errors::raise_connection_records(py, records))
 }
 
 fn driver_error(sqlstate: &str, message: impl AsRef<str>) -> PyErr {
@@ -408,7 +405,9 @@ impl Connection {
         // Like SQLDisconnect: a plain disconnect refuses to drop a transaction
         // that holds work. The connection stays usable so the caller can end it.
         if !pooled && !transaction_already_rolled_back && open_transaction_has_work(&mut slot) {
-            return Err(driver_error("25000", "Invalid transaction state"));
+            // Stays a RuntimeError: upstream's pooling test matches "25000" on it, and
+            // Connection.close maps it to OperationalError through _raise_connection_error.
+            return Err(PyRuntimeError::new_err(error_text(&DiagRecord::driver("25000", "Invalid transaction state"))));
         }
         crate::statement::discard_all(&mut slot);
         self.closed.store(true, Ordering::Release);

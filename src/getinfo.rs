@@ -15,7 +15,6 @@ use std::borrow::Cow;
 
 use mssql_tds::connection::tds_client::StatementResult;
 use mssql_tds::core::Version;
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
@@ -188,17 +187,11 @@ fn format_version(version: Version) -> String {
 }
 
 fn connection_closed() -> PyErr {
-    PyRuntimeError::new_err("SQLSTATE:08003:NATIVE:0:Connection is closed")
+    native_error(&[diag::DiagRecord::new("08003", 0, "Connection is closed")])
 }
 
 fn native_error(records: &[diag::DiagRecord]) -> PyErr {
-    match records.first() {
-        Some(record) => PyRuntimeError::new_err(format!(
-            "SQLSTATE:{}:NATIVE:{}:{}",
-            record.sqlstate, record.native_error, record.message
-        )),
-        None => PyRuntimeError::new_err("SQLSTATE:HY000:NATIVE:0:Unknown error"),
-    }
+    Python::attach(|py| crate::errors::raise_connection_records(py, records))
 }
 
 /// Serialise one answer as upstream's raw dict.
@@ -220,9 +213,11 @@ pub fn get_info(py: Python<'_>, conn: &ConnShared, info_type: u16) -> PyResult<P
         13 | 16 | 18 => server_text(py, conn, info_type)?,
         47 => user_name(py, conn)?,
         _ => static_value(info_type).ok_or_else(|| {
-            PyRuntimeError::new_err(format!(
-                "SQLSTATE:HY096:NATIVE:0:Information type {info_type} not supported by Rust port"
-            ))
+            native_error(&[diag::DiagRecord::new(
+                "HY096",
+                0,
+                format!("Information type {info_type} not supported by Rust port"),
+            )])
         })?,
     };
     raw_result(py, info_type, value)
