@@ -247,6 +247,20 @@ def _writes_small():
                   note="200 rows / statement, 5 params each", **hooks))
 
 
+# Compressing a 100k-row batch of the 19-column taxi table asks for ~370 MB of query memory. When the
+# server's grant pool is smaller, every batch sits on RESOURCE_SEMAPHORE until its grant times out
+# (~2 minutes), so 100k rows take minutes and 1M rows never finish. Skip instead of measuring that.
+CCI_MIN_GRANT_MB = 512
+
+
+def _require_columnstore_grant(d):
+    mb = d.scalar("SELECT MAX(available_memory_kb) / 1024 FROM sys.dm_exec_query_resource_semaphores "
+                  "WHERE resource_semaphore_id = 0")
+    if mb is not None and int(mb) < CCI_MIN_GRANT_MB:
+        raise Unsupported(f"columnstore bulk load needs ~{CCI_MIN_GRANT_MB} MB of query memory grant, "
+                          f"server offers {int(mb)} MB (memory-starved SQL Server: loads stall on RESOURCE_SEMAPHORE)")
+
+
 def _writes_bulk():
     def make(kind, size_label, n_full, n_quick, layout, tablock, batch, batch_label, stream=False):
         base = f"write.bulk_{kind}_{size_label}.{layout}.{'tablock' if tablock else 'notablock'}"
@@ -264,6 +278,8 @@ def _writes_bulk():
             d.execute(taxi_target_ddl(t, layout))
 
         def prepare(d, ctx):
+            if layout == "cci":
+                _require_columnstore_grant(d)
             p = ctx.payload(n_of(ctx))
             d.prepare_payload(p)
             if d.name != "bcp" and kind == "arrow":
