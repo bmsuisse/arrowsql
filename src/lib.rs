@@ -26,6 +26,7 @@ mod pooling;
 mod rowfactory;
 mod runtime;
 mod statement;
+mod txn_abort;
 mod types;
 mod utf8_wrap;
 #[cfg(unix)]

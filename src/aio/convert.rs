@@ -135,21 +135,28 @@ impl RowBatch {
         Self { state: Mutex::new((Arc::new(rows), 0)), ncols, shape, as_tuple }
     }
 
-    /// The buffer and the next row position, to convert outside the lock.
-    fn snapshot(&self) -> (Arc<RowBuffer>, usize) {
-        let state = self.state.lock();
-        (Arc::clone(&state.0), state.1)
+    /// Reserve up to `n` rows for the caller, to convert outside the lock.
+    /// Concurrent or re-entrant callers get disjoint ranges.
+    fn reserve(&self, n: usize) -> (Arc<RowBuffer>, usize, usize) {
+        let mut state = self.state.lock();
+        let buf = Arc::clone(&state.0);
+        let pos = state.1;
+        let count = n.min(buf.rows - pos);
+        state.1 += count;
+        if count > 0 && state.1 >= buf.rows {
+            *state = (Arc::new(RowBuffer::default()), 0);
+        }
+        (buf, pos, count)
     }
 
-    /// Mark `count` rows (starting at `from`) delivered.
-    fn advance(&self, from: usize, count: usize) {
+    /// Give a reserved range back after a failed conversion, when nothing was
+    /// reserved behind it. The rows stay undelivered.
+    fn release(&self, buf: &Arc<RowBuffer>, pos: usize, count: usize) {
         let mut state = self.state.lock();
-        if state.1 != from {
-            return; // someone else moved the batch while we converted
-        }
-        state.1 += count;
-        if state.1 >= state.0.rows {
-            *state = (Arc::new(RowBuffer::default()), 0);
+        if Arc::ptr_eq(&state.0, buf) && state.1 == pos + count {
+            state.1 = pos;
+        } else if state.0.rows == 0 && state.1 == 0 && pos + count == buf.rows {
+            *state = (Arc::clone(buf), pos);
         }
     }
 
@@ -175,22 +182,20 @@ impl RowBatch {
     /// Up to `n` rows (all remaining when `n` is None).
     #[pyo3(signature = (n=None))]
     fn take<'py>(&self, py: Python<'py>, n: Option<usize>) -> PyResult<Bound<'py, PyList>> {
-        let (buf, pos) = self.snapshot();
-        let count = n.unwrap_or(usize::MAX).min(buf.rows - pos);
-        let list = rows_range(py, &buf, self.ncols, pos, count, Some(&self.shape), self.as_tuple)?;
-        self.advance(pos, count);
-        Ok(list)
+        let (buf, pos, count) = self.reserve(n.unwrap_or(usize::MAX));
+        rows_range(py, &buf, self.ncols, pos, count, Some(&self.shape), self.as_tuple).inspect_err(|_| self.release(&buf, pos, count))
     }
 
     /// The next row, or None when the batch is exhausted.
     fn next<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        let (buf, pos) = self.snapshot();
-        if pos >= buf.rows {
+        let (buf, pos, count) = self.reserve(1);
+        if count == 0 {
             return Ok(None);
         }
-        let row = rows_range(py, &buf, self.ncols, pos, 1, Some(&self.shape), self.as_tuple)?.get_item(0)?;
-        self.advance(pos, 1);
-        Ok(Some(row))
+        rows_range(py, &buf, self.ncols, pos, 1, Some(&self.shape), self.as_tuple)
+            .and_then(|list| list.get_item(0))
+            .map(Some)
+            .inspect_err(|_| self.release(&buf, pos, 1))
     }
 
     fn remaining(&self) -> usize {

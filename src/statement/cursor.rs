@@ -273,6 +273,7 @@ pub(super) fn read_rows(
     max_bytes: usize,
 ) -> mssql_tds::core::TdsResult<bool> {
     sink.row_hint = sink.rows.saturating_add(max_rows);
+    sink.byte_budget = max_bytes;
     read_rows_into(client, sink, |b| b.rows, RowBuffer::byte_size, max_rows, max_bytes)
 }
 

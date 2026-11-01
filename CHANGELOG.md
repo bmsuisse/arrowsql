@@ -21,6 +21,13 @@ Version numbers in this project are deliberately three different things:
 - `write_arrow(..., workers > 1)` reads a native `cursor.arrow_stream()` on demand instead of
   draining it into memory before the workers start; the drain remains for single-connection
   `bulkcopy_arrow`, where it avoids a deadlock (r5 F15).
+- Async `executemany` with a leading NULL decimal no longer declares the whole
+  batch `decimal(18,10)` (later values lost digits).
+- Async manual-commit `BEGIN` obeys cancellation.
+- After a server-side rollback under XACT_ABORT, writes stay rejected (25000)
+  until `commit()`/`rollback()`: the guard sees through comments, CTEs and
+  `BEGIN TRY` blocks, is no longer consumed by the first rejection and also
+  covers the async API.
 
 ## [0.2.0] - 2026-11-01
 
