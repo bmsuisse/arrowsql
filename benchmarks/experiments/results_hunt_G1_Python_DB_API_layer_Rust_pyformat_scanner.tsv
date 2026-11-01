@@ -1,0 +1,11 @@
+item	trial	baseline	result	decision	note
+1+2+3 pyformat guard, native scanner, single scan	detect_and_convert 2KB sql tuple params (us, median of 7)	77.0/89.3	1.6/1.8	kept	interleaved old/new x2
+1+2+3	detect_and_convert 200B sql tuple	11.1	0.38/0.53	kept	
+1+2+3	detect_and_convert 2KB dict	158.5/196.2	4.4/4.6	kept	
+1+2+3	detect_and_convert small dict	10.3/10.5	1.6	kept	
+4 logging early-out + gated debug args	cursor.execute alternating 2 SQL x1500 (ms, median of 3)	138.8	126.6	kept	all of items combined in this build; one A/B round
+5 RowMapping cache	fetchall 100k x 20 cols dict(r._mapping)	not measured	not measured	kept (unmeasured)	box lock queue never freed in time
+6 converter pairs	fetchall 100k x 20 cols 1 converter	not measured	not measured	kept (unmeasured)	
+7 executemany slow path	100k rows Decimal+NULL	not measured	not measured	kept (unmeasured)	
+8 decimal locals / itemgetter / _max_binary_len	executemany dict rows	not measured	not measured	kept (unmeasured)	
+9 fetchmany cache / bulk iterator	fetchmany	not measured	not measured	kept (unmeasured)	
