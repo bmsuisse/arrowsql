@@ -10,7 +10,8 @@
 //!   reading a batch (a schema peek) leaves it available for the next export.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::atomic::AtomicUsize;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -402,4 +403,281 @@ fn take_reader(core: &Arc<StreamCore>) -> PyResult<ExportReader> {
         return Err(PyValueError::new_err("ArrowStream is already being read"));
     }
     Ok(ExportReader { core: core.clone(), pulled: false })
+}
+
+/// Shared by the `ArrowMergeStream` object, the worker threads that feed it
+/// and any C stream exported from it.
+struct MergeCore {
+    schema: SchemaRef,
+    /// Master sender, cloned per `pump`; dropped when the last worker is done,
+    /// which ends the merged stream.
+    tx: Mutex<Option<SyncSender<BatchResult>>>,
+    workers: AtomicUsize,
+    rx: Mutex<Option<Receiver<BatchResult>>>,
+    /// The consumer side is finished or closed.
+    closing: AtomicBool,
+    /// Workers must stop (closed, or a worker failed).
+    stop: AtomicBool,
+    /// Streams being pumped right now, so a stop can interrupt their reads.
+    active: Mutex<Vec<Arc<StreamCore>>>,
+    exporting: AtomicBool,
+    consumed: AtomicBool,
+}
+
+impl MergeCore {
+    /// Interrupt every stream being pumped (workers then see `stop`).
+    fn cancel_active(&self) {
+        let active: Vec<Arc<StreamCore>> = self.active.lock().unwrap().clone();
+        for core in active {
+            core.shutdown();
+        }
+    }
+
+    /// End the merged stream: discard buffered batches and stop the workers.
+    /// Never waits for a reader parked in `recv` (it wakes when the workers are
+    /// done and the last sender is gone).
+    fn shutdown(&self) {
+        self.closing.store(true, Ordering::Release);
+        self.stop.store(true, Ordering::Release);
+        self.cancel_active();
+        if let Ok(mut rx) = self.rx.try_lock() {
+            drop(rx.take());
+        }
+    }
+
+    fn send_error(&self, message: String) {
+        self.stop.store(true, Ordering::Release);
+        let tx = self.tx.lock().unwrap().clone();
+        if let Some(tx) = tx {
+            let _ = tx.send(Err(message));
+        }
+        self.cancel_active();
+    }
+}
+
+struct MergeReader {
+    core: Arc<MergeCore>,
+    pulled: bool,
+}
+
+impl Iterator for MergeReader {
+    type Item = Result<RecordBatch, ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.pulled = true;
+        self.core.consumed.store(true, Ordering::Release);
+        if self.core.closing.load(Ordering::Acquire) {
+            return None;
+        }
+        let item = {
+            let rx = self.core.rx.lock().unwrap();
+            rx.as_ref()?.recv()
+        };
+        match item {
+            _ if self.core.closing.load(Ordering::Acquire) => None,
+            Ok(Ok(batch)) => Some(Ok(batch)),
+            Ok(Err(message)) => {
+                self.core.shutdown();
+                Some(Err(ArrowError::ExternalError(message.into())))
+            }
+            Err(_) => None, // every worker is done
+        }
+    }
+}
+
+impl RecordBatchReader for MergeReader {
+    fn schema(&self) -> SchemaRef {
+        self.core.schema.clone()
+    }
+}
+
+impl Drop for MergeReader {
+    fn drop(&mut self) {
+        self.core.exporting.store(false, Ordering::Release);
+        if self.pulled {
+            Python::attach(|py| py.detach(|| self.core.shutdown()));
+        }
+    }
+}
+
+/// Batches of several `ArrowStream`s (one per worker connection) as one
+/// unordered stream with a bounded buffer. Worker threads call `pump` with the
+/// stream of each slice they read; the consumer exports the merge as an Arrow
+/// C stream (one-shot). `close()` / dropping the exported stream early stops
+/// the workers and cancels their statements.
+#[pyclass(name = "ArrowMergeStream", module = "arrowsql.ddbc_bindings", frozen)]
+pub struct ArrowMergeStream {
+    core: Arc<MergeCore>,
+}
+
+#[pymethods]
+impl ArrowMergeStream {
+    /// `schema_from`: a stream with the result's columns (it is not consumed).
+    /// `workers`: how many threads will call `worker_done()`. `depth`: batches
+    /// buffered between the workers and the consumer.
+    #[new]
+    #[pyo3(signature = (schema_from, workers, depth=8))]
+    fn new(schema_from: &ArrowStream, workers: usize, depth: usize) -> ArrowMergeStream {
+        let (tx, rx) = sync_channel(depth.max(1));
+        ArrowMergeStream {
+            core: Arc::new(MergeCore {
+                schema: schema_from.core.schema.clone(),
+                tx: Mutex::new(if workers == 0 { None } else { Some(tx) }),
+                workers: AtomicUsize::new(workers),
+                rx: Mutex::new(Some(rx)),
+                closing: AtomicBool::new(false),
+                stop: AtomicBool::new(false),
+                active: Mutex::new(Vec::new()),
+                exporting: AtomicBool::new(false),
+                consumed: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// Move every batch of `stream` into the merge (blocks, without the GIL,
+    /// until the stream ends, the merge stops or a read fails; a failure is
+    /// delivered to the consumer). The stream is closed on return.
+    fn pump(&self, py: Python<'_>, stream: &ArrowStream) -> PyResult<()> {
+        let core = self.core.clone();
+        let source = stream.core.clone();
+        py.detach(move || {
+            let mut reader = take_reader(&source)?;
+            core.active.lock().unwrap().push(source.clone());
+            let tx = core.tx.lock().unwrap().clone();
+            if let Some(tx) = tx {
+                while !core.stop.load(Ordering::Acquire) {
+                    match reader.next() {
+                        None => break,
+                        Some(Ok(batch)) => {
+                            let batch = if batch.schema() == core.schema {
+                                batch
+                            } else {
+                                batch.clone().with_schema(core.schema.clone()).unwrap_or(batch)
+                            };
+                            if tx.send(Ok(batch)).is_err() {
+                                break;
+                            }
+                        }
+                        Some(Err(err)) => {
+                            core.send_error(err.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+            drop(reader);
+            core.active.lock().unwrap().retain(|c| !Arc::ptr_eq(c, &source));
+            Ok(())
+        })
+    }
+
+    /// A worker is finished; the last one ends the stream.
+    fn worker_done(&self) {
+        if self.core.workers.fetch_sub(1, Ordering::AcqRel) == 1 {
+            drop(self.core.tx.lock().unwrap().take());
+        }
+    }
+
+    /// Report a worker failure to the consumer and stop the other workers.
+    fn fail(&self, py: Python<'_>, message: String) {
+        let core = self.core.clone();
+        py.detach(move || core.send_error(message));
+    }
+
+    /// Workers should stop picking up work (closed or failed).
+    #[getter]
+    fn stopped(&self) -> bool {
+        self.core.stop.load(Ordering::Acquire)
+    }
+
+    #[getter]
+    fn closed(&self) -> bool {
+        self.core.closing.load(Ordering::Acquire)
+    }
+
+    /// The stream was handed to a consumer (export in progress or done).
+    #[getter]
+    fn in_use(&self) -> bool {
+        self.core.exporting.load(Ordering::Acquire) || self.core.consumed.load(Ordering::Acquire)
+    }
+
+    #[getter]
+    fn column_names(&self) -> Vec<String> {
+        self.core.schema.fields().iter().map(|f| f.name().clone()).collect()
+    }
+
+    #[getter]
+    fn num_columns(&self) -> usize {
+        self.core.schema.fields().len()
+    }
+
+    /// Stop the workers and discard unread batches.
+    fn close(&self, py: Python<'_>) {
+        let core = self.core.clone();
+        py.detach(move || core.shutdown());
+    }
+
+    /// Read all remaining batches into an `ArrowTable` (Ctrl-C interrupts).
+    fn read_all(&self, py: Python<'_>) -> PyResult<ArrowTable> {
+        let core = self.core.clone();
+        let _reader = take_merge_reader(&core)?;
+        let mut batches = Vec::new();
+        loop {
+            if core.closing.load(Ordering::Acquire) {
+                break;
+            }
+            let item = py.detach(|| {
+                let rx = core.rx.lock().unwrap();
+                match rx.as_ref() {
+                    Some(rx) => rx.recv_timeout(Duration::from_millis(100)),
+                    None => Err(RecvTimeoutError::Disconnected),
+                }
+            });
+            match item {
+                Ok(Ok(batch)) => batches.push(batch),
+                Ok(Err(message)) => {
+                    py.detach(|| core.shutdown());
+                    return Err(PyRuntimeError::new_err(message));
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Err(err) = py.check_signals() {
+                        py.detach(|| core.shutdown());
+                        return Err(err);
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        core.consumed.store(true, Ordering::Release);
+        py.detach(|| core.shutdown());
+        Ok(ArrowTable::new(core.schema.clone(), batches))
+    }
+
+    #[pyo3(signature = (requested_schema=None))]
+    fn __arrow_c_stream__<'py>(
+        &self,
+        py: Python<'py>,
+        requested_schema: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyCapsule>> {
+        let _ = requested_schema;
+        let reader = take_merge_reader(&self.core)?;
+        stream_capsule(py, Box::new(reader))
+    }
+
+    fn __arrow_c_schema__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
+        schema_capsule(py, &self.core.schema)
+    }
+}
+
+fn take_merge_reader(core: &Arc<MergeCore>) -> PyResult<MergeReader> {
+    if core.closing.load(Ordering::Acquire) {
+        return Err(PyValueError::new_err("stream is closed"));
+    }
+    if core.consumed.load(Ordering::Acquire) {
+        return Err(PyValueError::new_err("stream was already consumed"));
+    }
+    if core.exporting.swap(true, Ordering::AcqRel) {
+        return Err(PyValueError::new_err("stream is already being read"));
+    }
+    Ok(MergeReader { core: core.clone(), pulled: false })
 }
