@@ -21,52 +21,56 @@ import mssql_python
 D = decimal.Decimal
 
 
+@pytest.fixture
+def pooled():
+    """Explicit pooling for one test; afterwards back to the never-configured state so
+    later tests see the default auto-enable behaviour."""
+    from mssql_python.pooling import PoolingManager
+
+    mssql_python.pooling(max_size=2, idle_timeout=60)
+    yield
+    mssql_python.pooling(enabled=False)
+    PoolingManager._reset_for_testing()
+
+
 # --- reset_connection -------------------------------------------------------------------
 
-def test_pooled_connection_is_reset_between_uses(conn_str):
+def test_pooled_connection_is_reset_between_uses(conn_str, pooled):
     """test_reset_connection.rs: session state must not leak across pool checkouts."""
-    mssql_python.pooling(max_size=2, idle_timeout=60)
-    try:
-        c1 = mssql_python.connect(conn_str)
-        cur = c1.cursor()
-        spid = cur.execute("SELECT @@SPID").fetchone()[0]
-        cur.execute("SET LANGUAGE German")
-        cur.execute("SET DATEFIRST 3")
-        cur.execute("CREATE TABLE #leak (x INT)")
-        c1.commit()
-        c1.close()
+    c1 = mssql_python.connect(conn_str)
+    cur = c1.cursor()
+    spid = cur.execute("SELECT @@SPID").fetchone()[0]
+    cur.execute("SET LANGUAGE German")
+    cur.execute("SET DATEFIRST 3")
+    cur.execute("CREATE TABLE #leak (x INT)")
+    c1.commit()
+    c1.close()
 
-        c2 = mssql_python.connect(conn_str)
-        cur = c2.cursor()
-        row = cur.execute("SELECT @@SPID, @@LANGUAGE, @@DATEFIRST").fetchone()
-        cur.execute("SELECT OBJECT_ID('tempdb..#leak')")
-        leaked = cur.fetchone()[0]
-        c2.close()
-        assert row[1] == "us_english", "SET LANGUAGE leaked through the pool"
-        assert row[2] == 7, "SET DATEFIRST leaked through the pool"
-        assert leaked is None, "temp table leaked through the pool"
-        # not asserted: whether the physical session (spid) was reused
-        assert isinstance(spid, int)
-    finally:
-        mssql_python.pooling(enabled=False)
+    c2 = mssql_python.connect(conn_str)
+    cur = c2.cursor()
+    row = cur.execute("SELECT @@SPID, @@LANGUAGE, @@DATEFIRST").fetchone()
+    cur.execute("SELECT OBJECT_ID('tempdb..#leak')")
+    leaked = cur.fetchone()[0]
+    c2.close()
+    assert row[1] == "us_english", "SET LANGUAGE leaked through the pool"
+    assert row[2] == 7, "SET DATEFIRST leaked through the pool"
+    assert leaked is None, "temp table leaked through the pool"
+    # not asserted: whether the physical session (spid) was reused
+    assert isinstance(spid, int)
 
 
-def test_open_transaction_is_rolled_back_when_connection_returns_to_pool(conn_str, table_name):
-    mssql_python.pooling(max_size=2, idle_timeout=60)
-    try:
-        setup = mssql_python.connect(conn_str, autocommit=True)
-        setup.cursor().execute(f"CREATE TABLE dbo.{table_name} (x INT)")
-        c1 = mssql_python.connect(conn_str)  # autocommit off
-        c1.cursor().execute(f"INSERT INTO dbo.{table_name} VALUES (1)")
-        c1.close()  # uncommitted
-        c2 = mssql_python.connect(conn_str)
-        count = c2.cursor().execute(f"SELECT COUNT(*) FROM dbo.{table_name}").fetchone()[0]
-        c2.close()
-        assert count == 0
-        setup.cursor().execute(f"DROP TABLE dbo.{table_name}")
-        setup.close()
-    finally:
-        mssql_python.pooling(enabled=False)
+def test_open_transaction_is_rolled_back_when_connection_returns_to_pool(conn_str, table_name, pooled):
+    setup = mssql_python.connect(conn_str, autocommit=True)
+    setup.cursor().execute(f"CREATE TABLE dbo.{table_name} (x INT)")
+    c1 = mssql_python.connect(conn_str)  # autocommit off
+    c1.cursor().execute(f"INSERT INTO dbo.{table_name} VALUES (1)")
+    c1.close()  # uncommitted
+    c2 = mssql_python.connect(conn_str)
+    count = c2.cursor().execute(f"SELECT COUNT(*) FROM dbo.{table_name}").fetchone()[0]
+    c2.close()
+    assert count == 0
+    setup.cursor().execute(f"DROP TABLE dbo.{table_name}")
+    setup.close()
 
 
 # --- timeout and cancel (timeout_and_cancel.rs) ---------------------------------------------
