@@ -32,11 +32,11 @@ def test_bulkcopy_times_out_when_table_is_locked_and_connection_recovers(conn_st
         result = lc.bulkcopy(f"dbo.{table_name}", [(1,), (2,)])
         assert result["rows_copied"] == 2
     finally:
+        loader.close()  # releases anything it still holds before the table is dropped
         owner.rollback()
         owner.cursor().execute(f"DROP TABLE IF EXISTS dbo.{table_name}")
         owner.commit()
         owner.close()
-        loader.close()
 
 
 def test_hierarchyid_udt_bulkcopy_as_bytes(cursor, table_name):
