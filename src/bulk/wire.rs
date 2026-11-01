@@ -175,12 +175,30 @@ pub fn put_small_money(out: &mut Vec<u8>, layout: Layout, scaled: i32) {
 
 /// A decimal given as sign and magnitude already scaled to the column.
 pub fn put_decimal(out: &mut Vec<u8>, layout: Layout, positive: bool, magnitude: u128) {
-    let value_bytes = decimal_value_bytes(layout.precision);
+    let mut value_bytes = decimal_value_bytes(layout.precision);
+    if adaptive_decimal() && !layout.fixed_length {
+        value_bytes = value_bytes.min(decimal_magnitude_bytes(magnitude));
+    }
     if !layout.fixed_length {
         out.push(1 + value_bytes as u8);
     }
     out.push(u8::from(positive));
     out.extend_from_slice(&magnitude.to_le_bytes()[..value_bytes]);
+}
+
+fn adaptive_decimal() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ARROWSQL_DECIMAL_FIXED").is_none())
+}
+
+/// Smallest legal DECIMAL magnitude width (4, 8, 12 or 16 bytes) holding `magnitude`.
+fn decimal_magnitude_bytes(magnitude: u128) -> usize {
+    match magnitude {
+        0..=0xFFFF_FFFF => 4,
+        0x1_0000_0000..=0xFFFF_FFFF_FFFF_FFFF => 8,
+        0x1_0000_0000_0000_0000..=0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF => 12,
+        _ => 16,
+    }
 }
 
 pub fn decimal_value_bytes(precision: u8) -> usize {
