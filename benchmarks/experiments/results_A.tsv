@@ -1,0 +1,14 @@
+commit	change	metric	result	kept
+main	baseline read_arrow (materialize slices + concat), 4 parts, 5 reps interleaved	read s / peak RSS MB	0.69 s / 852 MB	baseline
+main	baseline read_arrow, 8 parts	read s / peak RSS MB	0.52 s / 876 MB	baseline
+018c1c1	A1 read_arrow_stream drained (native ArrowMergeStream), 4 parts	read s / peak RSS MB	0.72 s / 231 MB	yes (RSS -73%, time equal)
+018c1c1	A1 read_arrow_stream drained, 8 parts	read s / peak RSS MB	0.57 s / 329 MB	yes (RSS -62%, time within noise)
+018c1c1	A1 1 part: read_table vs stream	read s / RSS	3.28 s / 760 MB vs 3.17 s / 132 MB	yes
+018c1c1	A1 DuckDB aggregate table vs stream, 4 parts	s / RSS	1.44 s / 827 MB vs 1.30 s / 554 MB	yes
+018c1c1	A1 DuckDB aggregate table vs stream, 8 parts	s / RSS	0.99 s / 821 MB vs 0.91 s / 658 MB	yes (noisy: rep4 0.44 vs 0.81)
+018c1c1	A1 deltalake write table vs stream, 1 part	s / RSS	3.99 s / 926 MB vs 3.27 s / 380 MB	yes
+018c1c1	A1 deltalake write table vs stream, 4 parts	s / RSS	2.30 s / 951 MB vs 0.97 s / 472 MB	yes (2.4x faster)
+018c1c1	A1 deltalake write table vs stream, 8 parts	s / RSS	1.73 s / 962 MB vs 1.06 s / 736 MB	yes (1.6x faster)
+018c1c1	A1 time to first batch, 1/4/8 parts	s	0.16 / 0.17 / 0.15 s (table path: whole read, 0.8-3.3 s)	yes
+018c1c1	A2 partition_bounds: no MIN/MAX or size probe (only a nullability describe unless partition_nullable given)	correctness tests (int/date/datetime/Decimal/str, NULL slice)	21 stream tests pass	yes
+018c1c1	read_arrow now built on stream (read_all)	read s 4 parts, interleaved vs old, 1 sample under box contention	0.68 vs 2.25 / 0.94 vs 0.86 (contended, inconclusive)	yes (same code path as drained stream: 0.72 vs 0.69)

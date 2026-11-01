@@ -1,0 +1,105 @@
+{"mode": "read_table", "parts": 1, "seconds": 3.429848433006555, "total": 3.429848433006555, "rss_mb": 658.3359375, "rows": 2964624, "rep": 0}
+{"mode": "read_stream", "parts": 1, "seconds": 3.0641554489266127, "total": 3.0641554489266127, "rss_mb": 126.140625, "rows": 2964624, "rep": 0}
+{"mode": "duck_table", "parts": 1, "seconds": 2.8860706919804215, "total": 2.8860706919804215, "rss_mb": 724.63671875, "rows": 2964624, "rep": 0}
+{"mode": "duck_stream", "parts": 1, "seconds": 2.515656662057154, "total": 2.515656662057154, "rss_mb": 511.89453125, "rows": 2964624, "rep": 0}
+{"mode": "delta_table", "parts": 1, "seconds": 3.259988851030357, "total": 3.259988851030357, "rss_mb": 915.36328125, "rep": 0}
+{"mode": "delta_stream", "parts": 1, "seconds": 2.3249765950022265, "total": 2.3249765950022265, "rss_mb": 390.359375, "rep": 0}
+{"mode": "first_batch", "parts": 1, "seconds": 0.12592519505415112, "total": 0.13113058905582875, "rss_mb": 95.40234375, "first_batch": 0.12592519505415112, "rep": 0}
+{"mode": "read_table", "parts": 4, "seconds": 0.8954837269848213, "total": 0.8954837269848213, "rss_mb": 686.26953125, "rows": 2964624, "rep": 0}
+{"mode": "read_stream", "parts": 4, "seconds": 0.6875107719097286, "total": 0.6875107719097286, "rss_mb": 220.70703125, "rows": 2964624, "rep": 0}
+{"mode": "duck_table", "parts": 4, "seconds": 1.3172593100462109, "total": 1.3172593100462109, "rss_mb": 748.109375, "rows": 2964624, "rep": 0}
+{"mode": "duck_stream", "parts": 4, "seconds": 1.2056911009131, "total": 1.2056911009131, "rss_mb": 506.234375, "rows": 2964624, "rep": 0}
+{"mode": "delta_table", "parts": 4, "seconds": 2.4872614099876955, "total": 2.4872614099876955, "rss_mb": 926.421875, "rep": 0}
+{"mode": "delta_stream", "parts": 4, "seconds": 0.9541986980475485, "total": 0.9541986980475485, "rss_mb": 532.625, "rep": 0}
+{"mode": "first_batch", "parts": 4, "seconds": 0.16508006700314581, "total": 0.18546032393351197, "rss_mb": 196.00390625, "first_batch": 0.16508006700314581, "rep": 0}
+{"mode": "read_table", "parts": 8, "seconds": 0.6949536589672789, "total": 0.6949536589672789, "rss_mb": 718.37890625, "rows": 2964624, "rep": 0}
+{"mode": "read_stream", "parts": 8, "seconds": 0.6418815409997478, "total": 0.6418815409997478, "rss_mb": 313.3046875, "rows": 2964624, "rep": 0}
+{"mode": "duck_table", "parts": 8, "seconds": 0.9877054759999737, "total": 0.9877054759999737, "rss_mb": 781.86328125, "rows": 2964624, "rep": 0}
+{"mode": "duck_stream", "parts": 8, "seconds": 0.9015717289876193, "total": 0.9015717289876193, "rss_mb": 609.9296875, "rows": 2964624, "rep": 0}
+{"mode": "delta_table", "parts": 8, "seconds": 2.1409745960263535, "total": 2.1409745960263535, "rss_mb": 949.62890625, "rep": 0}
+{"mode": "delta_stream", "parts": 8, "seconds": 0.9872979469364509, "total": 0.9872979469364509, "rss_mb": 786.34375, "rep": 0}
+{"mode": "first_batch", "parts": 8, "seconds": 0.15447826904710382, "total": 0.18741447804495692, "rss_mb": 280.45703125, "first_batch": 0.15447826904710382, "rep": 0}
+{"mode": "read_table", "parts": 1, "seconds": 2.2984743749257177, "total": 2.2984743749257177, "rss_mb": 697.1875, "rows": 2964624, "rep": 1}
+{"mode": "read_stream", "parts": 1, "seconds": 2.2611613200278953, "total": 2.2611613200278953, "rss_mb": 131.703125, "rows": 2964624, "rep": 1}
+{"mode": "duck_table", "parts": 1, "seconds": 2.821587319020182, "total": 2.821587319020182, "rss_mb": 760.53515625, "rows": 2964624, "rep": 1}
+{"mode": "duck_stream", "parts": 1, "seconds": 2.657055451069027, "total": 2.657055451069027, "rss_mb": 538.01171875, "rows": 2964624, "rep": 1}
+{"mode": "delta_table", "parts": 1, "seconds": 3.988903376972303, "total": 3.988903376972303, "rss_mb": 926.44140625, "rep": 1}
+{"mode": "delta_stream", "parts": 1, "seconds": 3.274430337944068, "total": 3.274430337944068, "rss_mb": 388.859375, "rep": 1}
+{"mode": "first_batch", "parts": 1, "seconds": 0.16923686303198338, "total": 0.17452574707567692, "rss_mb": 97.515625, "first_batch": 0.16923686303198338, "rep": 1}
+{"mode": "read_table", "parts": 4, "seconds": 2.0732849329942837, "total": 2.0732849329942837, "rss_mb": 763.34375, "rows": 2964624, "rep": 1}
+{"mode": "read_stream", "parts": 4, "seconds": 0.9834858790272847, "total": 0.9834858790272847, "rss_mb": 232.3203125, "rows": 2964624, "rep": 1}
+{"mode": "duck_table", "parts": 4, "seconds": 2.471442147041671, "total": 2.471442147041671, "rss_mb": 827.0859375, "rows": 2964624, "rep": 1}
+{"mode": "duck_stream", "parts": 4, "seconds": 1.300506221014075, "total": 1.300506221014075, "rss_mb": 544.61328125, "rows": 2964624, "rep": 1}
+{"mode": "delta_table", "parts": 4, "seconds": 3.023984280996956, "total": 3.023984280996956, "rss_mb": 953.1328125, "rep": 1}
+{"mode": "delta_stream", "parts": 4, "seconds": 1.925730684073642, "total": 1.925730684073642, "rss_mb": 471.515625, "rep": 1}
+{"mode": "first_batch", "parts": 4, "seconds": 0.1746289769653231, "total": 0.19500713504385203, "rss_mb": 182.37890625, "first_batch": 0.1746289769653231, "rep": 1}
+{"mode": "read_table", "parts": 8, "seconds": 1.160340259084478, "total": 1.160340259084478, "rss_mb": 818.40625, "rows": 2964624, "rep": 1}
+{"mode": "read_stream", "parts": 8, "seconds": 0.9087446969933808, "total": 0.9087446969933808, "rss_mb": 329.26171875, "rows": 2964624, "rep": 1}
+{"mode": "duck_table", "parts": 8, "seconds": 1.3386158249340951, "total": 1.3386158249340951, "rss_mb": 821.125, "rows": 2964624, "rep": 1}
+{"mode": "duck_stream", "parts": 8, "seconds": 1.023324306937866, "total": 1.023324306937866, "rss_mb": 637.90625, "rows": 2964624, "rep": 1}
+{"mode": "delta_table", "parts": 8, "seconds": 1.311787587008439, "total": 1.311787587008439, "rss_mb": 961.91015625, "rep": 1}
+{"mode": "delta_stream", "parts": 8, "seconds": 1.0707483019214123, "total": 1.0707483019214123, "rss_mb": 725.42578125, "rep": 1}
+{"mode": "first_batch", "parts": 8, "seconds": 0.13145771902054548, "total": 0.14432434004265815, "rss_mb": 312.98046875, "first_batch": 0.13145771902054548, "rep": 1}
+{"mode": "read_table", "parts": 1, "seconds": 3.283070271019824, "total": 3.283070271019824, "rss_mb": 774.6640625, "rows": 2964624, "rep": 2}
+{"mode": "read_stream", "parts": 1, "seconds": 3.373547335038893, "total": 3.373547335038893, "rss_mb": 131.7421875, "rows": 2964624, "rep": 2}
+{"mode": "duck_table", "parts": 1, "seconds": 3.934505912940949, "total": 3.934505912940949, "rss_mb": 781.03125, "rows": 2964624, "rep": 2}
+{"mode": "duck_stream", "parts": 1, "seconds": 3.159469357924536, "total": 3.159469357924536, "rss_mb": 529.203125, "rows": 2964624, "rep": 2}
+{"mode": "delta_table", "parts": 1, "seconds": 4.370957870967686, "total": 4.370957870967686, "rss_mb": 956.5546875, "rep": 2}
+{"mode": "delta_stream", "parts": 1, "seconds": 3.168672460014932, "total": 3.168672460014932, "rss_mb": 335.7578125, "rep": 2}
+{"mode": "first_batch", "parts": 1, "seconds": 0.4712426320184022, "total": 0.47650559595786035, "rss_mb": 96.99609375, "first_batch": 0.4712426320184022, "rep": 2}
+{"mode": "read_table", "parts": 4, "seconds": 1.089672064059414, "total": 1.089672064059414, "rss_mb": 763.85546875, "rows": 2964624, "rep": 2}
+{"mode": "read_stream", "parts": 4, "seconds": 0.6832988749956712, "total": 0.6832988749956712, "rss_mb": 228.7578125, "rows": 2964624, "rep": 2}
+{"mode": "duck_table", "parts": 4, "seconds": 1.441321331076324, "total": 1.441321331076324, "rss_mb": 816.1875, "rows": 2964624, "rep": 2}
+{"mode": "duck_stream", "parts": 4, "seconds": 1.1775169260799885, "total": 1.1775169260799885, "rss_mb": 611.01171875, "rows": 2964624, "rep": 2}
+{"mode": "delta_table", "parts": 4, "seconds": 2.301038698060438, "total": 2.301038698060438, "rss_mb": 930.71484375, "rep": 2}
+{"mode": "delta_stream", "parts": 4, "seconds": 0.9665791010484099, "total": 0.9665791010484099, "rss_mb": 452.7890625, "rep": 2}
+{"mode": "first_batch", "parts": 4, "seconds": 0.15625865303445607, "total": 0.1817073660204187, "rss_mb": 184.390625, "first_batch": 0.15625865303445607, "rep": 2}
+{"mode": "read_table", "parts": 8, "seconds": 1.540494708926417, "total": 1.540494708926417, "rss_mb": 758.859375, "rows": 2964624, "rep": 2}
+{"mode": "read_stream", "parts": 8, "seconds": 1.3428485121112317, "total": 1.3428485121112317, "rss_mb": 320.96875, "rows": 2964624, "rep": 2}
+{"mode": "duck_table", "parts": 8, "seconds": 0.7381879379972816, "total": 0.7381879379972816, "rss_mb": 820.453125, "rows": 2964624, "rep": 2}
+{"mode": "duck_stream", "parts": 8, "seconds": 1.0104856269899756, "total": 1.0104856269899756, "rss_mb": 657.92578125, "rows": 2964624, "rep": 2}
+{"mode": "delta_table", "parts": 8, "seconds": 1.4351532199652866, "total": 1.4351532199652866, "rss_mb": 962.16015625, "rep": 2}
+{"mode": "delta_stream", "parts": 8, "seconds": 1.057087683933787, "total": 1.057087683933787, "rss_mb": 682.14453125, "rep": 2}
+{"mode": "first_batch", "parts": 8, "seconds": 0.14048533199820668, "total": 0.15981323295272887, "rss_mb": 297.109375, "first_batch": 0.14048533199820668, "rep": 2}
+{"mode": "read_table", "parts": 1, "seconds": 3.7718976899050176, "total": 3.7718976899050176, "rss_mb": 760.19921875, "rows": 2964624, "rep": 3}
+{"mode": "read_stream", "parts": 1, "seconds": 3.171740849968046, "total": 3.171740849968046, "rss_mb": 131.83984375, "rows": 2964624, "rep": 3}
+{"mode": "duck_table", "parts": 1, "seconds": 4.268765212967992, "total": 4.268765212967992, "rss_mb": 796.3515625, "rows": 2964624, "rep": 3}
+{"mode": "duck_stream", "parts": 1, "seconds": 4.1156559500377625, "total": 4.1156559500377625, "rss_mb": 506.77734375, "rows": 2964624, "rep": 3}
+{"mode": "delta_table", "parts": 1, "seconds": 4.685929840081371, "total": 4.685929840081371, "rss_mb": 904.76953125, "rep": 3}
+{"mode": "delta_stream", "parts": 1, "seconds": 4.18736625101883, "total": 4.18736625101883, "rss_mb": 379.55078125, "rep": 3}
+{"mode": "first_batch", "parts": 1, "seconds": 0.14904470602050424, "total": 0.154277490102686, "rss_mb": 97.5078125, "first_batch": 0.14904470602050424, "rep": 3}
+{"mode": "read_table", "parts": 4, "seconds": 2.9416626120219007, "total": 2.9416626120219007, "rss_mb": 711.75390625, "rows": 2964624, "rep": 3}
+{"mode": "read_stream", "parts": 4, "seconds": 2.0299867449793965, "total": 2.0299867449793965, "rss_mb": 224.19921875, "rows": 2964624, "rep": 3}
+{"mode": "duck_table", "parts": 4, "seconds": 1.5449696449795738, "total": 1.5449696449795738, "rss_mb": 858.05859375, "rows": 2964624, "rep": 3}
+{"mode": "duck_stream", "parts": 4, "seconds": 1.5926352890674025, "total": 1.5926352890674025, "rss_mb": 553.98046875, "rows": 2964624, "rep": 3}
+{"mode": "delta_table", "parts": 4, "seconds": 1.9040208189981058, "total": 1.9040208189981058, "rss_mb": 950.75390625, "rep": 3}
+{"mode": "delta_stream", "parts": 4, "seconds": 1.8063797879731283, "total": 1.8063797879731283, "rss_mb": 432.25390625, "rep": 3}
+{"mode": "first_batch", "parts": 4, "seconds": 0.15945795399602503, "total": 0.18049395899288356, "rss_mb": 180.26953125, "first_batch": 0.15945795399602503, "rep": 3}
+{"mode": "read_table", "parts": 8, "seconds": 0.810688785975799, "total": 0.810688785975799, "rss_mb": 773.125, "rows": 2964624, "rep": 3}
+{"mode": "read_stream", "parts": 8, "seconds": 1.1110726189799607, "total": 1.1110726189799607, "rss_mb": 329.1015625, "rows": 2964624, "rep": 3}
+{"mode": "duck_table", "parts": 8, "seconds": 1.130656438996084, "total": 1.130656438996084, "rss_mb": 867.25, "rows": 2964624, "rep": 3}
+{"mode": "duck_stream", "parts": 8, "seconds": 0.90873427700717, "total": 0.90873427700717, "rss_mb": 702.78125, "rows": 2964624, "rep": 3}
+{"mode": "delta_table", "parts": 8, "seconds": 1.9287060140632093, "total": 1.9287060140632093, "rss_mb": 1000.23046875, "rep": 3}
+{"mode": "delta_stream", "parts": 8, "seconds": 1.132583903032355, "total": 1.132583903032355, "rss_mb": 736.37890625, "rep": 3}
+{"mode": "first_batch", "parts": 8, "seconds": 0.22794161399360746, "total": 0.2640434839995578, "rss_mb": 280.53125, "first_batch": 0.22794161399360746, "rep": 3}
+{"mode": "read_table", "parts": 1, "seconds": 2.252962065045722, "total": 2.252962065045722, "rss_mb": 784.59765625, "rows": 2964624, "rep": 4}
+{"mode": "read_stream", "parts": 1, "seconds": 3.6946898649912328, "total": 3.6946898649912328, "rss_mb": 131.69921875, "rows": 2964624, "rep": 4}
+{"mode": "duck_table", "parts": 1, "seconds": 3.3638451549923047, "total": 3.3638451549923047, "rss_mb": 840.65234375, "rows": 2964624, "rep": 4}
+{"mode": "duck_stream", "parts": 1, "seconds": 3.09065150807146, "total": 3.09065150807146, "rss_mb": 542.87109375, "rows": 2964624, "rep": 4}
+{"mode": "delta_table", "parts": 1, "seconds": 3.6970680269878358, "total": 3.6970680269878358, "rss_mb": 969.00390625, "rep": 4}
+{"mode": "delta_stream", "parts": 1, "seconds": 3.6994859899859875, "total": 3.6994859899859875, "rss_mb": 293.53515625, "rep": 4}
+{"mode": "first_batch", "parts": 1, "seconds": 0.16210865508764982, "total": 0.16732895898167044, "rss_mb": 97.96484375, "first_batch": 0.16210865508764982, "rep": 4}
+{"mode": "read_table", "parts": 4, "seconds": 1.5686675029573962, "total": 1.5686675029573962, "rss_mb": 828.69140625, "rows": 2964624, "rep": 4}
+{"mode": "read_stream", "parts": 4, "seconds": 1.5609910659259185, "total": 1.5609910659259185, "rss_mb": 230.453125, "rows": 2964624, "rep": 4}
+{"mode": "duck_table", "parts": 4, "seconds": 1.0097920580301434, "total": 1.0097920580301434, "rss_mb": 879.30078125, "rows": 2964624, "rep": 4}
+{"mode": "duck_stream", "parts": 4, "seconds": 1.752775861066766, "total": 1.752775861066766, "rss_mb": 627.3046875, "rows": 2964624, "rep": 4}
+{"mode": "delta_table", "parts": 4, "seconds": 2.070783290080726, "total": 2.070783290080726, "rss_mb": 1008.22265625, "rep": 4}
+{"mode": "delta_stream", "parts": 4, "seconds": 0.9617727650329471, "total": 0.9617727650329471, "rss_mb": 471.80078125, "rep": 4}
+{"mode": "first_batch", "parts": 4, "seconds": 0.2047058449825272, "total": 0.9306229499634355, "rss_mb": 196.25390625, "first_batch": 0.2047058449825272, "rep": 4}
+{"mode": "read_table", "parts": 8, "seconds": 0.7023795070126653, "total": 0.7023795070126653, "rss_mb": 838.2265625, "rows": 2964624, "rep": 4}
+{"mode": "read_stream", "parts": 8, "seconds": 0.45851664105430245, "total": 0.45851664105430245, "rss_mb": 323.05078125, "rows": 2964624, "rep": 4}
+{"mode": "duck_table", "parts": 8, "seconds": 0.44187480106484145, "total": 0.44187480106484145, "rss_mb": 899.6328125, "rows": 2964624, "rep": 4}
+{"mode": "duck_stream", "parts": 8, "seconds": 0.8078611840028316, "total": 0.8078611840028316, "rss_mb": 739.640625, "rows": 2964624, "rep": 4}
+{"mode": "delta_table", "parts": 8, "seconds": 1.7342174369841814, "total": 1.7342174369841814, "rss_mb": 1089.703125, "rep": 4}
+{"mode": "delta_stream", "parts": 8, "seconds": 0.9447040469385684, "total": 0.9447040469385684, "rss_mb": 830.34765625, "rep": 4}
+{"mode": "first_batch", "parts": 8, "seconds": 0.17807979707140476, "total": 0.20379411801695824, "rss_mb": 296.8671875, "first_batch": 0.17807979707140476, "rep": 4}
