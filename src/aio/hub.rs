@@ -20,7 +20,6 @@ use mssql_tds::query::metadata::ColumnMetadata;
 use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyList, PyTuple};
 use pyo3::intern;
 
@@ -265,29 +264,9 @@ fn shape_key(columns: &[ColumnMetadata]) -> u64 {
     hasher.finish()
 }
 
-static SQLSTATE_TO_EXCEPTION: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-static DATABASE_ERROR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-
 /// The same exception the sync driver raises for these diagnostics.
 pub fn to_exception(py: Python<'_>, records: &[DiagRecord]) -> PyErr {
     let record = records.first().cloned().unwrap_or_else(|| DiagRecord::driver("HY000", "Unknown error"));
-    let build = || -> PyResult<PyErr> {
-        let mapper = SQLSTATE_TO_EXCEPTION.import(py, "arrowsql.exceptions", "sqlstate_to_exception")?;
-        let native = (record.native_error != 0).then_some(record.native_error);
-        let exc = mapper.call1((record.sqlstate.as_str(), record.message.as_str(), native))?;
-        if !exc.is_none() {
-            return Ok(PyErr::from_value(exc));
-        }
-        let class = DATABASE_ERROR.import(py, "arrowsql.exceptions", "DatabaseError")?;
-        let kwargs = pyo3::types::PyDict::new(py);
-        kwargs.set_item(intern!(py, "sqlstate"), record.sqlstate.as_str())?;
-        kwargs.set_item(intern!(py, "native_error"), native)?;
-        let exc = class.call(
-            (format!("An error occurred with SQLSTATE code: {}", record.sqlstate), record.message.as_str()),
-            Some(&kwargs),
-        )?;
-        Ok(PyErr::from_value(exc))
-    };
-    build().unwrap_or_else(|err| err)
+    let native = (record.native_error != 0).then_some(record.native_error);
+    crate::errors::raise_statement(py, &record.sqlstate, &record.message, native)
 }
-

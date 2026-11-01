@@ -155,10 +155,7 @@ pub(crate) fn error_text(record: &DiagRecord) -> String {
 }
 
 fn runtime_error(records: &[DiagRecord]) -> PyErr {
-    match records.first() {
-        Some(record) => PyRuntimeError::new_err(error_text(record)),
-        None => PyRuntimeError::new_err("SQLSTATE:HY000:NATIVE:0:Unknown error"),
-    }
+    Python::attach(|py| crate::errors::raise_connection_records(py, records))
 }
 
 fn driver_error(sqlstate: &str, message: impl AsRef<str>) -> PyErr {

@@ -449,3 +449,15 @@ pub fn check_error(
     }
     Ok(info)
 }
+
+/// `check_error` in one call: raise the DB-API exception for a failed `retcode`.
+#[pyfunction]
+#[pyo3(name = "DDBCRaiseFor")]
+pub fn raise_for(py: Python<'_>, handle_type: i16, handle: &Bound<'_, PyAny>, retcode: i16) -> PyResult<()> {
+    if retcode >= 0 && retcode != SQL_INVALID_HANDLE {
+        return Ok(());
+    }
+    let info = check_error(py, handle_type, handle, retcode)?;
+    let native = (info.nativeError != 0).then_some(info.nativeError);
+    Err(crate::errors::raise_statement(py, &info.sqlState, &info.ddbcErrorMsg, native))
+}

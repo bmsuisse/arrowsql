@@ -191,12 +191,12 @@ def _native(conn_str, factory=None):
 )
 def test_native_core_never_logs_in_with_sql_auth_for_an_entra_mode(auth):
     """Direct use of the binding (aio, tests) gets the same guarantee."""
-    with pytest.raises(RuntimeError, match=auth):
+    with pytest.raises(Error, match=auth):
         _native(BOGUS + f"Authentication={auth};UID=client-id;PWD=secret")
 
 
 def test_native_core_rejects_an_unknown_authentication_value():
-    with pytest.raises(RuntimeError, match="Authentication"):
+    with pytest.raises(Error, match="Authentication"):
         _native(BOGUS + "Authentication=Bogus;UID=u;PWD=p")
 
 

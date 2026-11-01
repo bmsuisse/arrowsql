@@ -17,6 +17,7 @@ mod connstr;
 mod consts;
 mod decode;
 mod diag;
+mod errors;
 mod getinfo;
 mod logging;
 mod params;
@@ -163,6 +164,9 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(statement::get_all_diag_records, m)?)?;
     m.add_function(wrap_pyfunction!(statement::check_error, m)?)?;
     m.add_function(wrap_pyfunction!(diag::sqlstate_for_server_error_py, m)?)?;
+    m.add_function(wrap_pyfunction!(errors::sqlstate_to_exception, m)?)?;
+    m.add_function(wrap_pyfunction!(errors::raise_exception, m)?)?;
+    m.add_function(wrap_pyfunction!(statement::raise_for, m)?)?;
     arrow::register(m)?;
     agent::register(m)?;
     bulk::register(m)?;
