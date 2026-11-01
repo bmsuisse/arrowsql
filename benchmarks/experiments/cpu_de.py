@@ -116,5 +116,49 @@ def d3(reps):
         conn.close()
 
 
+def e(reps):
+    """Packet size sweep under TLS: read ~3M rows and bulk-write them; records the negotiated size."""
+    n = 3_000_000
+    sizes = [int(x) for x in os.environ.get("SIZES", "8000,16000,16383,16384").split(",")]
+    src = "dbo.de_src"
+    setup = arrowsql.connect(CS, autocommit=True)
+    sc = setup.cursor()
+    sc.execute(f"DROP TABLE IF EXISTS {src}")
+    sc.execute(f"CREATE TABLE {src} (a bigint, b int, c float, d varchar(40), e datetime2(6))")
+    t = pa.table(
+        {
+            "a": pa.array(np.arange(n, dtype=np.int64)),
+            "b": pa.array(np.arange(n, dtype=np.int32)),
+            "c": pa.array(np.arange(n, dtype=np.float64) / 7),
+            "d": pa.array([f"row-{i % 1000}-payload-text" for i in range(n)]),
+            "e": pa.array(np.arange(n).astype("timedelta64[us]") + np.datetime64("2024-01-01T00:00:00", "us"), pa.timestamp("us")),
+        }
+    )
+    sc.bulkcopy_arrow(src, t, table_lock=True)
+    res = {s: {"read": [], "write": []} for s in sizes}
+    neg = {}
+    try:
+        for _ in range(reps):
+            for s in sizes:
+                conn = arrowsql.connect(f"{CS};Packet Size={s}", autocommit=True)
+                cur = conn.cursor()
+                cur.execute("SELECT net_packet_size, encrypt_option FROM sys.dm_exec_connections WHERE session_id=@@SPID")
+                neg[s] = tuple(cur.fetchone())
+                res[s]["read"].append(timed(lambda: conn.cursor().execute(f"SELECT * FROM {src}").arrow(65536)))
+                cur.execute(f"DROP TABLE IF EXISTS {T}")
+                cur.execute(f"CREATE TABLE {T} (a bigint, b int, c float, d varchar(40), e datetime2(6))")
+                res[s]["write"].append(timed(lambda: conn.cursor().bulkcopy_arrow(T, t, table_lock=True)))
+                conn.close()
+        for s in sizes:
+            print(f"requested {s} negotiated/encrypt {neg[s]}")
+            report(f"  read  {s}", res[s]["read"])
+            report(f"  write {s}", res[s]["write"])
+    finally:
+        c = arrowsql.connect(CS, autocommit=True).cursor()
+        c.execute(f"DROP TABLE IF EXISTS {T}")
+        c.execute(f"DROP TABLE IF EXISTS {src}")
+        setup.close()
+
+
 if __name__ == "__main__":
     globals()[sys.argv[1]](int(sys.argv[2]) if len(sys.argv) > 2 else 5)
