@@ -11,6 +11,18 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyInt, PyList, PySlice, PyString, PyTuple, PyType};
 use std::ptr;
 
+unsafe extern "C" {
+    fn _PyObject_GenericGetAttrWithDict(
+        obj: *mut ffi::PyObject,
+        name: *mut ffi::PyObject,
+        dict: *mut ffi::PyObject,
+        suppress: std::os::raw::c_int,
+    ) -> *mut ffi::PyObject;
+}
+
+/// Types already verified not to override a field descriptor.
+static PLAIN_TYPES: std::sync::Mutex<Vec<Py<PyType>>> = std::sync::Mutex::new(Vec::new());
+
 static ROW_MAPPING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DECIMAL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -94,14 +106,26 @@ impl RowCore {
         )))
     }
 
-    fn __getattr__<'py>(&self, py: Python<'py>, name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        let values = self.values.bind(py);
-        if let Some(idx) = lookup(self.column_map.bind(py), name)? {
+    /// Normal attribute lookup first (methods, fields, user attributes), then the
+    /// column maps. The generic lookup is run in its non-raising mode so a column
+    /// access does not build and discard an AttributeError.
+    fn __getattribute__<'py>(slf: &Bound<'py, Self>, name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let found = unsafe { _PyObject_GenericGetAttrWithDict(slf.as_ptr(), name.as_ptr(), ptr::null_mut(), 1) };
+        if !found.is_null() {
+            return Ok(unsafe { Bound::from_owned_ptr(py, found) });
+        }
+        if !unsafe { ffi::PyErr_Occurred() }.is_null() {
+            return Err(PyErr::fetch(py));
+        }
+        let this = slf.borrow();
+        let values = this.values.bind(py);
+        if let Some(idx) = lookup(this.column_map.bind(py), name)? {
             return values.get_item(idx);
         }
-        if !self.column_map_lower.bind(py).is_none() {
+        if !this.column_map_lower.bind(py).is_none() {
             let lower = name.call_method0(pyo3::intern!(py, "lower"))?;
-            if let Some(idx) = lookup(self.column_map_lower.bind(py), &lower)? {
+            if let Some(idx) = lookup(this.column_map_lower.bind(py), &lower)? {
                 return values.get_item(idx);
             }
         }
@@ -109,7 +133,7 @@ impl RowCore {
         if let Ok(s) = name.cast::<PyString>() {
             match s.to_str()? {
                 "_values" => return Ok(values.clone()),
-                "_cursor" => return Ok(self.cursor.bind(py).clone()),
+                "_cursor" => return Ok(this.cursor.bind(py).clone()),
                 _ => {}
             }
         }
@@ -218,12 +242,16 @@ const FIELDS: [&str; 5] =
 /// False when `row_type` (a subclass) overrides any of the field descriptors;
 /// `new_row` then assigns through `setattr` so the override runs.
 pub(crate) fn plain_fields(py: Python<'_>, row_type: &Bound<'_, PyType>) -> PyResult<bool> {
+    if PLAIN_TYPES.lock().unwrap().iter().any(|t| t.is(row_type)) {
+        return Ok(true);
+    }
     let core = py.get_type::<RowCore>();
     for name in FIELDS {
         if !row_type.getattr(name)?.is(&core.getattr(name)?) {
             return Ok(false);
         }
     }
+    PLAIN_TYPES.lock().unwrap().push(row_type.clone().unbind());
     Ok(true)
 }
 
