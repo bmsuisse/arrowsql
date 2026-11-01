@@ -1,0 +1,7 @@
+item	metric	baseline_median	after_median	decision	note
+1 executemany fast_param_cell+direct iter	c_executemany 100k s	0.932	0.944(0.857-1.02, 5 runs; first 5 runs 0.84-0.90)	kept	~5-8% in quiet runs, noisy; matches params/mod.rs choice
+2 RowBatch.next direct + fetchone/__anext__ fast path	a_async_for / a_fetchone 100k s	0.040 / 0.032	0.0337 / 0.0304	kept	~15% / ~5%
+3 fetchall/fetchmany avoid copy	a_fetchall s	0.0306	0.0288-0.043 (noisy)	kept	no measurable change, removes one list copy, no regression in quiet run
+4 session columns Arc reuse + hub last_shape	b_pool_fetch 20k s	3.61	3.55	reverted	1.7% within noise; round-trip dominated
+5 param_types evict-one + ordinal NULL	n/a	n/a	n/a	reverted	not measurable on any benchmark
+6 async_fetch fast Row/ event check/ try-except/ debug guard	d_wrapper_fetchone 50k s	0.079	0.038	kept	2.1x

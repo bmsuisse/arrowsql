@@ -147,6 +147,13 @@ impl RowBatch {
         Self { state: Mutex::new((rows, 0)), ncols, shape, as_tuple }
     }
 
+    fn retire_if_drained(buf: &mut RowBuffer, pos: &mut usize) {
+        if *pos == buf.rows {
+            buf.clear_and_trim();
+            *pos = 0;
+        }
+    }
+
     /// The undelivered rows, leaving the batch empty.
     pub fn take_rest(&self) -> Option<(RowBuffer, usize)> {
         let mut state = self.state.lock();
@@ -172,17 +179,35 @@ impl RowBatch {
         let count = n.unwrap_or(usize::MAX).min(buf.rows - *pos);
         let list = rows_range(py, buf, self.ncols, *pos, count, Some(&self.shape), self.as_tuple)?;
         *pos += count;
-        if *pos == buf.rows {
-            buf.clear_and_trim();
-            *pos = 0;
-        }
+        Self::retire_if_drained(buf, pos);
         Ok(list)
     }
 
-    /// The next row, or None.
+    /// The next row, or None when the batch is exhausted.
     fn next<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        let list = self.take(py, Some(1))?;
-        if list.is_empty() { Ok(None) } else { Ok(Some(list.get_item(0)?)) }
+        let mut state = self.state.lock();
+        let (buf, pos) = &mut *state;
+        if *pos >= buf.rows {
+            return Ok(None);
+        }
+        let row = if self.ncols == 0 {
+            rows_range(py, buf, 0, *pos, 1, Some(&self.shape), self.as_tuple)?.get_item(0)?
+        } else {
+            let from = *pos * self.ncols;
+            let cells = &buf.cells[from..from + self.ncols];
+            let row_type = if self.as_tuple { None } else { Some(ROW_TYPE.import(py, "arrowsql.row", "Row")?) };
+            unsafe {
+                let values = row_values(py, buf, cells, self.as_tuple)?;
+                let item = match row_type {
+                    Some(t) => make_row(py, t, values, &self.shape)?,
+                    None => values,
+                };
+                Bound::from_owned_ptr(py, item)
+            }
+        };
+        *pos += 1;
+        Self::retire_if_drained(buf, pos);
+        Ok(Some(row))
     }
 
     fn remaining(&self) -> usize {
