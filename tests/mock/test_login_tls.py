@@ -136,6 +136,11 @@ def tls_server(start_mock, tls_material):
     return make
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="mock's Schannel acceptor never completes a TDS 7.4 wrapped-handshake login with the "
+    "Schannel client; strict TDS 8 covers Windows TLS here and a real SQL Server covers 7.4 in the windows-db job",
+)
 def test_tls_with_trust_server_certificate(tls_server):
     server = tls_server("optional")
     conn = mssql_python.connect(server.conn_str(Encrypt="yes", TrustServerCertificate="yes"))

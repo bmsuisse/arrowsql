@@ -67,7 +67,7 @@ class Mock:
     def __init__(self, binary, *args):
         self.proc = subprocess.Popen(
             [str(binary), *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, bufsize=1,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1,
         )
         self._lock = threading.Lock()
         hello = self.proc.stdout.readline()
