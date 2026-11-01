@@ -43,6 +43,8 @@ async-preview = ["mssql-python-rs==0.4.0"]
 arrow = ["pyarrow>=14"]
 # Azure AD credential helpers (auth= / token_provider= with azure-identity credentials).
 azure = ["azure-identity"]
+# Spark Python data source (arrowsql.spark): spark.read.format("arrowsql").
+spark = ["pyspark>=4.0", "pyarrow>=14"]
 
 [project.scripts]
 arrowsql-agent = "arrowsql.agent:main"
