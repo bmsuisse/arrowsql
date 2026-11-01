@@ -105,3 +105,11 @@ in ../../Cargo.toml once the fix is in the pinned upstream rev.
     left in `self.cancel_handle`. After a cancelled execution (e.g. an Arrow
     stream closed early) a commit or rollback then failed as cancelled. They now
     clear it first.
+
+12. Hidden columns from COLINFO (marked `RUST-PORT`): SQL Server marks browse-mode
+    key/timestamp columns (FOR BROWSE) and a server cursor's ROWSTAT column as hidden in the
+    COLINFO token (status bit 0x10) that follows COLMETADATA, not in COLMETADATA's own
+    fHidden flag. `ColInfoTokenParser` now reads that token, `TdsClient::absorb_browse_info`
+    sets fHidden on the named columns, and `peek_token_type` looks ahead with the same
+    timeout and cancel handling as a token read. The port hides those columns, as msodbcsql does.
+
