@@ -118,5 +118,12 @@ Local patches (search for `VENDOR PATCH`):
    stale cancel handle, so a COMMIT no longer inherits the residual budget of
    the query before it.
 
+14. Database mirroring partner (marked `RUST-PORT`): a principal database in a mirroring
+    session sends ENVCHANGE type 13 with its partner's name when a request switches to the
+    mirrored database. `capture_change_property` (`src/connection/execution_context.rs`)
+    failed that request with `UnimplementedFeature`; it now logs the partner and continues,
+    as msodbcsql does when no `Failover_Partner` is configured. Found against a production
+    SQL Server in a mirroring session (`tests/port/test_mirroring_partner.py`).
+
 To drop the vendored copy, delete this directory and the `[patch]` section
 in ../../Cargo.toml once the fix is in the pinned upstream rev.

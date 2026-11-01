@@ -166,11 +166,14 @@ impl ExecutionContext {
                     context: "capture_change_property".to_string(),
                 })
             }
+            // RUST-PORT: a principal in a mirroring session names its partner
+            // whenever a request switches to the mirrored database. Without a
+            // configured Failover_Partner msodbcsql only notes it.
             EnvChangeTokenSubType::DatabaseMirroringPartner => {
-                Err(crate::error::Error::UnimplementedFeature {
-                    feature: "DatabaseMirroringPartner environment change".to_string(),
-                    context: "capture_change_property".to_string(),
-                })
+                if let EnvChangeContainer::String(partner) = change_type {
+                    info!("Database mirroring partner: {}", partner.new_value());
+                }
+                Ok(())
             }
             EnvChangeTokenSubType::PromoteTransaction => {
                 Err(crate::error::Error::UnimplementedFeature {
