@@ -85,8 +85,6 @@ pub struct Hub {
     /// Pending futures and whether their rows are plain tuples.
     futures: Mutex<HashMap<u64, (Py<PyAny>, bool)>>,
     shapes: Mutex<HashMap<u64, Arc<Shape>>>,
-    /// The previous call's columns and shape: a repeated query hits by pointer.
-    last_shape: Mutex<Option<(Arc<Vec<ColumnMetadata>>, Arc<Shape>)>>,
 }
 
 impl Hub {
@@ -103,43 +101,27 @@ impl Hub {
     }
 
     /// The cached Python-side shape (description, column maps) of `columns`.
-    pub fn shape(&self, py: Python<'_>, columns: &Arc<Vec<ColumnMetadata>>) -> PyResult<Arc<Shape>> {
-        if let Some((last, shape)) = &*self.last_shape.lock()
-            && Arc::ptr_eq(last, columns)
-        {
+    pub fn shape(&self, py: Python<'_>, columns: &[ColumnMetadata]) -> PyResult<Arc<Shape>> {
+        let key = shape_key(columns);
+        if let Some(shape) = self.shapes.lock().get(&key) {
             return Ok(shape.clone());
         }
-        let described: Vec<_> = columns
-            .iter()
-            .map(|meta| {
-                (
-                    meta.column_name.as_str(),
-                    describe::odbc_sql_type(meta),
-                    describe::column_size(meta),
-                    describe::decimal_digits(meta),
-                    describe::nullable(meta),
-                )
-            })
-            .collect();
-        let key = shape_key(&described);
-        let cached = self.shapes.lock().get(&key).cloned();
-        let shape = match cached {
-            Some(shape) => shape,
-            None => {
-                let specs = PyList::empty(py);
-                for spec in &described {
-                    specs.append(*spec)?;
-                }
-                let shape = Arc::new(Shape::from_factory(py, self.shape_factory.bind(py).call1((specs,))?)?);
-                let mut shapes = self.shapes.lock();
-                if shapes.len() > 4096 {
-                    shapes.clear();
-                }
-                shapes.insert(key, shape.clone());
-                shape
-            }
-        };
-        *self.last_shape.lock() = Some((Arc::clone(columns), shape.clone()));
+        let specs = PyList::empty(py);
+        for meta in columns {
+            specs.append((
+                meta.column_name.as_str(),
+                describe::odbc_sql_type(meta),
+                describe::column_size(meta),
+                describe::decimal_digits(meta),
+                describe::nullable(meta),
+            ))?;
+        }
+        let shape = Arc::new(Shape::from_factory(py, self.shape_factory.bind(py).call1((specs,))?)?);
+        let mut shapes = self.shapes.lock();
+        if shapes.len() > 4096 {
+            shapes.clear();
+        }
+        shapes.insert(key, shape.clone());
         Ok(shape)
     }
 
@@ -228,7 +210,6 @@ impl Hub {
             shape_factory,
             futures: Mutex::new(HashMap::new()),
             shapes: Mutex::new(HashMap::new()),
-            last_shape: Mutex::new(None),
         })
     }
 
@@ -271,11 +252,15 @@ impl Hub {
     }
 }
 
-fn shape_key<T: std::hash::Hash>(described: &[T]) -> u64 {
-    use std::hash::Hasher;
+fn shape_key(columns: &[ColumnMetadata]) -> u64 {
+    use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for spec in described {
-        spec.hash(&mut hasher);
+    for meta in columns {
+        meta.column_name.hash(&mut hasher);
+        describe::odbc_sql_type(meta).hash(&mut hasher);
+        describe::column_size(meta).hash(&mut hasher);
+        describe::decimal_digits(meta).hash(&mut hasher);
+        describe::nullable(meta).hash(&mut hasher);
     }
     hasher.finish()
 }
