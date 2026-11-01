@@ -53,4 +53,12 @@ with arrowsql.connect(conn_str) as conn:
 big = arrowsql.read_arrow(conn_str, f"SELECT * FROM {TABLE}", partition_on="trip_id", partitions=4)
 print(f"read_arrow over 4 connections: {big.num_rows} rows")
 
+# 6. The same read as a stream: DuckDB aggregates batches while the four
+#    connections are still reading (bounded memory, unordered batches).
+#    Leaving the block cancels anything still running.
+with arrowsql.read_arrow_stream(
+    conn_str, f"SELECT * FROM {TABLE}", partition_on="trip_id", partitions=4
+) as streamed:
+    duckdb.sql("SELECT count(*) AS n, avg(fare) AS avg_fare FROM streamed").show()
+
 drop_demo_table(conn_str)

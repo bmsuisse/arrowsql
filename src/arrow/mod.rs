@@ -23,7 +23,7 @@ use crate::consts::*;
 use std::sync::Arc;
 
 use crate::statement::{self, BatchSink, StmtCancel};
-use export::{ArrowStream, ArrowTable};
+use export::{ArrowMergeStream, ArrowStream, ArrowTable};
 use plan::Plan;
 use sink::ArrowSink;
 
@@ -142,6 +142,7 @@ pub fn arrow_stream(
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ArrowTable>()?;
     m.add_class::<ArrowStream>()?;
+    m.add_class::<ArrowMergeStream>()?;
     m.add_function(wrap_pyfunction!(fetch_arrow_batch, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_arrow_table, m)?)?;
     m.add_function(wrap_pyfunction!(arrow_stream, m)?)?;

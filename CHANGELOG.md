@@ -42,6 +42,15 @@ Version numbers in this project are deliberately three different things:
   hint (SQL Server error number, then SQLSTATE). Rendering is Rust
   (`ddbc_bindings.AgentRender`) over the Arrow sink; `sql_variant` is now
   readable through it.
+- `read_arrow_stream()`: partitioned parallel read as a bounded, unordered Arrow
+  stream (`__arrow_c_stream__`; native `ArrowMergeStream` fed by one connection
+  per worker) so DuckDB / deltalake overlap with the read and memory stays
+  bounded. `close()` or an early-stopping consumer cancels the statements and
+  closes the worker connections; the first worker error reaches the consumer.
+  `read_arrow()` is now built on it. `partition_bounds=` (and
+  `partition_nullable=`) take typed boundaries (int, date/datetime, Decimal,
+  str) as disjoint half-open slices plus a NULL slice, bound as parameters,
+  with no MIN/MAX or size probe.
 - Native bulk copy (rows and Arrow), `write_arrow()` parallel loads.
 - Native asyncio (`arrowsql.aio`) with a built-in pool (Unix only).
 - `sqlstate` and `native_error` on every exception

@@ -523,8 +523,38 @@ def read_arrow(
     partition_on: Optional[str] = None,
     partitions: int = 1,
     batch_size: int = 65536,
+    partition_bounds: Optional[Sequence[Any]] = None,
+    partition_nullable: Optional[bool] = None,
     **connect_kwargs: Any,
 ) -> "ddbc_bindings.ArrowTable": ...
+
+class ParallelArrowStream:
+    @property
+    def column_names(self) -> List[str]: ...
+    @property
+    def num_columns(self) -> int: ...
+    @property
+    def closed(self) -> bool: ...
+    def __arrow_c_schema__(self) -> Any: ...
+    def __arrow_c_stream__(self, requested_schema: Optional[Any] = None) -> Any: ...
+    def read_all(self) -> "ddbc_bindings.ArrowTable": ...
+    def close(self) -> None: ...
+    def __enter__(self) -> "ParallelArrowStream": ...
+    def __exit__(self, *exc: Any) -> None: ...
+
+# Like read_arrow, but a bounded, unordered stream (__arrow_c_stream__) fed by
+# the partition workers while they read.
+def read_arrow_stream(
+    connection_str: str,
+    query: str,
+    partition_on: Optional[str] = None,
+    partitions: int = 1,
+    batch_size: int = 65536,
+    partition_bounds: Optional[Sequence[Any]] = None,
+    max_buffered_batches: Optional[int] = None,
+    partition_nullable: Optional[bool] = None,
+    **connect_kwargs: Any,
+) -> ParallelArrowStream: ...
 
 # Parallel Arrow bulk load. Returns rows_copied, batch_count, elapsed_time,
 # rows_per_second and workers.

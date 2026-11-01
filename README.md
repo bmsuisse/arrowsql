@@ -20,6 +20,10 @@ where possible, and the upstream test suite is the compatibility bar.
 - Partitioned parallel reads: `arrowsql.read_arrow(conn_str, query,
   partition_on=, partitions=)`. Slices are equal-width in the key (skewed
   keys are not rebalanced) and the partitions are not one snapshot.
+  `arrowsql.read_arrow_stream(...)` streams the same read (bounded buffer,
+  unordered batches) so DuckDB or `deltalake` work while rows still arrive, and
+  `partition_bounds=[...]` takes typed boundaries (int, date/datetime, Decimal,
+  str) instead of probing MIN/MAX.
 - Native bulk copy (rows and Arrow) and parallel loads with
   `arrowsql.write_arrow(conn_str, table, source, workers=N)` and
   `arrowsql.write_rows(conn_str, table, rows, workers=N)` (heap: TABLOCK;
@@ -53,6 +57,7 @@ with arrowsql.connect(conn_str) as conn:
 
 ```python
 import duckdb, arrowsql
+from datetime import datetime
 
 cur = arrowsql.connect(conn_str).cursor()
 
@@ -70,6 +75,18 @@ duckdb.sql("SELECT avg(total_amount) FROM stream").show()
 # Partitioned parallel read over N connections (integer partition column)
 big = arrowsql.read_arrow(conn_str, "SELECT * FROM dbo.yellow_trips",
                               partition_on="trip_id", partitions=8)
+
+# The same read as a stream: DuckDB (or deltalake, polars, pyarrow) consumes
+# batches while the 8 connections are still reading; memory stays bounded.
+# Closing it early cancels the running statements.
+with arrowsql.read_arrow_stream(conn_str, "SELECT * FROM dbo.yellow_trips",
+                                partition_on="trip_id", partitions=8) as s:
+    duckdb.sql("SELECT avg(total_amount) FROM s").show()
+
+# Caller-supplied boundaries (e.g. quantiles for a skewed key): no MIN/MAX probe.
+# k bounds give the slices < b1, [b1, b2), ..., >= bk, plus IS NULL if nullable.
+arrowsql.read_arrow(conn_str, "SELECT * FROM dbo.yellow_trips", partition_on="tpep_pickup_datetime",
+                    partitions=4, partition_bounds=[datetime(2024, 1, 10), datetime(2024, 1, 20)])
 
 # nvarchar/nchar/ntext columns travel as UTF-8 (about half the bytes for ASCII text) on
 # SQL Server 2019+/Azure SQL; the result is the same. Opt out with utf8_strings=False.
