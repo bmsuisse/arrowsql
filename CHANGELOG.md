@@ -16,6 +16,11 @@ Version numbers in this project are deliberately three different things:
 
 ### Fixed
 
+- `write_arrow(..., workers > 1)` accepts an iterable of record batches (list, generator, objects
+  with `__arrow_c_array__`) like `workers=1`, without pyarrow (r5 F9).
+- `write_arrow(..., workers > 1)` reads a native `cursor.arrow_stream()` on demand instead of
+  draining it into memory before the workers start; the drain remains for single-connection
+  `bulkcopy_arrow`, where it avoids a deadlock (r5 F15).
 - Async `executemany` with a leading NULL decimal no longer declares the whole
   batch `decimal(18,10)` (later values lost digits).
 - Async manual-commit `BEGIN` obeys cancellation.
