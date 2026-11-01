@@ -13,7 +13,7 @@ brings only the compiled `ddbc_bindings` extension and the vendored
 
 ## Wheels, sdist and versions
 
-`.github/workflows/wheels.yml` (also `workflow_call`ed by `release.yml`) builds wheels
+`.github/workflows/wheels.yml` (also `workflow_call`ed by `workflow.yml`) builds wheels
 and an sdist as workflow artifacts and import-tests every wheel. It never publishes.
 
 | target | runner / build | Pythons | smoke test |
@@ -42,11 +42,11 @@ targets use the in-tree Schannel TLS engine of mssql-tds (`tls-schannel-direct-o
 set in Cargo.toml); rustls could not complete the handshake with SQL Server's self-generated
 certificate (`tls handshake eof`). The `aio` tests skip on Windows (the native hub is Unix-only).
 
-Release flow (`release.yml`): a push to `main` runs CI, then reads the version from
+Release flow (`workflow.yml`): a push to `main` runs CI, then reads the version from
 `pyproject.toml`; if no `vX.Y.Z` tag exists it builds all wheels and the sdist. The
 publish job (PyPI trusted publishing, tag, GitHub Release from CHANGELOG.md) runs only
 if the repository variable `PUBLISH_PYPI` is `true`. To enable it: on PyPI add a trusted
-publisher for owner `bmsuisse`, repo `arrowsql`, workflow `release.yml`, environment
+publisher for owner `bmsuisse`, repo `arrowsql`, workflow `workflow.yml`, environment
 `pypi`; create the `pypi` environment in the repo; set `PUBLISH_PYPI=true`.
 
 The sdist needs `vendor/mssql-tds` (a `[patch]` path dependency, which maturin does

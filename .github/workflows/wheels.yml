@@ -1,7 +1,7 @@
 name: Wheels
 
 # Builds wheels and an sdist for every platform maturin/PyO3 can target and
-# uploads them as workflow artifacts. Nothing is published from here: release.yml
+# uploads them as workflow artifacts. Nothing is published from here: workflow.yml
 # calls this workflow (workflow_call) and owns the publish job.
 #
 # Every wheel gets an install-and-import smoke test: natively on the runner

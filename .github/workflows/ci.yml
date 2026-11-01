@@ -1,6 +1,6 @@
 name: CI
 
-# Pushes to main run this through release.yml's `test` job (workflow_call), which
+# Pushes to main run this through workflow.yml's `test` job (workflow_call), which
 # gates the auto-release on it, so there is no `push: main` trigger here.
 on:
   push:

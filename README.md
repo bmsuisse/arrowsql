@@ -199,7 +199,7 @@ against SQL Server 2022 on Linux x86_64 and against SQL Server Express on Window
 x64, and the server-free tests plus `cargo test --lib` on macOS (arm64, x86_64),
 Windows (x64, arm64) and Linux arm64. The wheel workflow
 (`.github/workflows/wheels.yml`) builds every wheel below and import-tests it;
-publishing to PyPI is gated by `.github/workflows/release.yml`.
+publishing to PyPI is gated by `.github/workflows/workflow.yml`.
 
 | platform | wheel | import tested in CI | DB tests in CI |
 |---|---|---|---|
