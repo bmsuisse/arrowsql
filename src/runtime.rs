@@ -50,8 +50,18 @@ static OWNER_PID: AtomicU32 = AtomicU32::new(0);
 /// Serializes building a runtime.
 static BUILD: Mutex<()> = Mutex::new(());
 
-pub fn runtime() -> &'static Runtime {
-    try_runtime().expect("failed to start the mssql-rs I/O runtime (thread limit reached?)")
+/// The diagnostic for a shared runtime that could not start.
+fn start_failure(e: &std::io::Error) -> crate::diag::DiagRecord {
+    crate::diag::DiagRecord::driver(
+        "HY001",
+        format!("failed to start the mssql-rs I/O runtime (thread limit reached?): {e}"),
+    )
+}
+
+/// [`try_runtime`] for entry points called from Python: a start failure is a
+/// DB-API error, not a panic.
+pub fn runtime_or_raise(py: Python<'_>) -> PyResult<&'static Runtime> {
+    try_runtime().map_err(|e| crate::errors::raise_connection_records(py, &[start_failure(&e)]))
 }
 
 /// The process-wide runtime, or the OS error that stopped it from starting
@@ -297,5 +307,18 @@ impl Deref for SyncClient {
 impl DerefMut for SyncClient {
     fn deref_mut(&mut self) -> &mut TdsClient {
         &mut self.client
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_start_failure_is_a_driver_diagnostic() {
+        let record = start_failure(&std::io::Error::other("Resource temporarily unavailable"));
+        assert_eq!(record.sqlstate, "HY001");
+        assert!(record.message.contains("failed to start the mssql-rs I/O runtime"));
+        assert!(record.message.contains("Resource temporarily unavailable"));
     }
 }

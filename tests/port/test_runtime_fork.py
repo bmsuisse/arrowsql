@@ -132,3 +132,41 @@ def test_fork_while_other_threads_use_the_runtime():
         for thread in threads:
             thread.join()
     assert hung == 0, f"{hung} forked children hung on an inherited runtime lock"
+
+
+def test_child_closing_inherited_connection_leaves_parent_session_alive():
+    conn_str = os.environ["DB_CONNECTION_STRING"]
+    # A forked child that closes (or drops) its inherited copy of a connection
+    # must only forget it: no rollback, no cursor cleanup on the parent's socket.
+    table = f"fork_close_{os.getpid()}"
+    parent = connect(conn_str, autocommit=False)
+    cur = parent.cursor()
+    cur.execute(f"CREATE TABLE {table} (id int)")
+    parent.commit()
+    try:
+        cur.execute(f"INSERT INTO {table} VALUES (1)")  # uncommitted
+        cur2 = parent.cursor()
+        cur2.execute("SELECT 1 UNION ALL SELECT 2")  # a batch still live on the wire
+
+        pid = os.fork()
+        if pid == 0:
+            code = 1
+            try:
+                cur2.close()
+                parent.close()
+                code = 0
+            except BaseException:
+                traceback.print_exc()
+            finally:
+                os._exit(code)
+        _, status = os.waitpid(pid, 0)
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+
+        parent.commit()
+        cur.execute(f"SELECT COUNT(*) FROM {table}")
+        assert cur.fetchone()[0] == 1
+    finally:
+        parent.rollback()
+        cur.execute(f"DROP TABLE {table}")
+        parent.commit()
+        parent.close()

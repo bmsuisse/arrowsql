@@ -504,7 +504,7 @@ fn step_result(stmt: &StmtShared, slot: &mut Slot, state: &mut StmtState) -> Sql
     if !state.on_wire {
         return SQL_NO_DATA;
     }
-    let Some(client) = slot.client.as_mut() else { return SQL_NO_DATA };
+    let Some(client) = slot.client.as_mut().filter(|c| !c.is_foreign()) else { return SQL_NO_DATA };
     let ret = advance_on_wire(client, state);
     if !state.on_wire && slot.owner.as_ref().is_some_and(|(id, _)| *id == stmt.id) {
         slot.owner = None;

@@ -141,6 +141,7 @@ pub fn spawn_op<'py, Fut>(
 where
     Fut: Future<Output = Outcome> + Send + 'static,
 {
+    let runtime = crate::runtime::runtime_or_raise(py)?;
     let hub = hub.get();
     let (id, future) = hub.register(py, as_tuple)?;
     let cancel = Arc::new(OpCancel::new());
@@ -149,7 +150,7 @@ where
     }
     let completion = Completion { hub: hub.inner.clone(), id, tracker: cancels.cloned(), finished: false };
     let fut = task(cancel);
-    crate::runtime::runtime().spawn(async move {
+    runtime.spawn(async move {
         let outcome = fut.await;
         completion.finish(outcome);
     });
@@ -400,7 +401,9 @@ impl AioConnection {
     fn close_cursor(&self, cursor: u64) {
         self.core.open_cursors.fetch_sub(1, Ordering::Relaxed);
         let core = self.core.clone();
-        crate::runtime::runtime().spawn(async move {
+        // Best effort: without a runtime the session keeps the cursor until it closes.
+        let Ok(runtime) = crate::runtime::try_runtime() else { return };
+        runtime.spawn(async move {
             if let Some(session) = core.session.lock().await.as_mut() {
                 session.close_cursor(cursor);
             }
