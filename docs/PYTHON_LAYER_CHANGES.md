@@ -320,3 +320,14 @@ UsePlatformDefault.
   for `validate_after` is pinged (`SELECT 1`) before it is handed out.
 - `aio.py`: on platforms without the native hub (Windows) `connect` and
   `create_pool` raise `NotSupportedError` instead of `AttributeError`.
+
+## Review r5 F2: parse errors name only fixed keywords
+
+`connection_string_parser.py` (`_display_key`, marked `RUST-PORT`): error text names a
+keyword only if it is an exact allowlisted keyword or a documented unsupported SQL Server
+keyword (`Application Name`, `Data Source`, ...). Any other name or fragment is reported
+as `at position N`, because it can be a piece of a PWD value that held an unescaped `;`.
+Upstream tests that pin an echoed unknown keyword (`Unknown keyword 'unknown1'`, a
+string with no PWD) keep passing: an identifier-like unknown name (and, for an
+incomplete entry, text starting with a known keyword) is still echoed when the
+string has no `PWD`/`Password` key, since then there is no password it could come from.

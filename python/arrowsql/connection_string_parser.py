@@ -25,18 +25,52 @@ from arrowsql.logging import logger
 _SENSITIVE_KEYS = frozenset({"pwd", "password"})
 
 
-_PLAIN_KEYWORD = re.compile(r"[A-Za-z][A-Za-z0-9_ ]{0,39}")
+_PLAIN_KEYWORD = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,39}")
+
+# Documented SQL Server / ADO keyword names this driver does not accept. They
+# are fixed vocabulary, never password text, so they may be named in errors.
+_KNOWN_UNSUPPORTED_KEYWORDS = frozenset(
+    {
+        "application name",
+        "applicationname",
+        "attachdbfilename",
+        "connect timeout",
+        "connection timeout",
+        "current language",
+        "data source",
+        "failover partner",
+        "initial catalog",
+        "integrated security",
+        "language",
+        "network library",
+        "packet size",
+        "persist security info",
+        "user id",
+        "workstation id",
+        "wsid",
+    }
+)
 
 
-def _display_key(key: str, position: int) -> str:
+def _display_key(text: str, position: int, echo_loose: bool = False, prefix_ok: bool = False) -> str:
     """Keyword text for an error message.
 
     A "keyword" can be a fragment of a value that held an unescaped ';' (for
-    example a password), so only identifier-like names are echoed; anything
-    else is reported by position.
+    example a password). RUST-PORT: only an exact, complete, allowlisted (or
+    documented-unsupported) keyword is echoed; anything else is reported by
+    position. ``echo_loose`` is set by the parser only when the string has no
+    PWD/Password value the text could come from; then an identifier-like unknown
+    name (and, with ``prefix_ok``, text starting with a known keyword) is echoed.
     """
-    if _PLAIN_KEYWORD.fullmatch(key):
-        return f"'{key}'"
+    text = text.strip()
+    lowered = text.lower()
+    if _ConnectionStringParser.normalize_key(lowered) is not None or lowered in _KNOWN_UNSUPPORTED_KEYWORDS:
+        return f"'{text}'"
+    if echo_loose and (
+        _PLAIN_KEYWORD.fullmatch(text)
+        or (prefix_ok and _ConnectionStringParser.normalize_key(lowered.split()[0]) is not None)
+    ):
+        return f"'{text}'"
     return f"at position {position}"
 
 
@@ -179,7 +213,8 @@ class _ConnectionStringParser:
             return {}
 
         # Collect all errors for batch reporting
-        errors = []
+        errors: list = []
+        saw_pwd = False
 
         # Dictionary to store parsed key=value pairs
         params = {}
@@ -211,20 +246,14 @@ class _ConnectionStringParser:
                 incomplete_text = connection_str[key_start:current_pos].strip()
                 if incomplete_text:
                     # Without '=' this may be a piece of a value that contained an
-                    # unescaped ';' (a password), so only echo text that starts with a known keyword.
-                    shown = (
-                        f"'{incomplete_text}'"
-                        if _ConnectionStringParser.normalize_key(incomplete_text.split()[0].lower())
-                        else f"at position {key_start}"
-                    )
+                    # unescaped ';' (a password); resolved when rendering.
                     errors.append(
-                        f"Incomplete specification: keyword {shown} has no value (missing '=')"
+                        ("Incomplete specification: keyword {} has no value (missing '=')", incomplete_text, key_start, True)
                     )
                 continue
 
             # Extract and normalize the key
             key = connection_str[key_start:current_pos].strip().lower()
-            key_shown = _display_key(key, key_start)
 
             # ERROR: Empty key
             if not key:
@@ -234,6 +263,8 @@ class _ConnectionStringParser:
                 while current_pos < str_len and connection_str[current_pos] != ";":
                     current_pos += 1
                 continue
+
+            saw_pwd = saw_pwd or key in _SENSITIVE_KEYS
 
             # Move past the '='
             current_pos += 1
@@ -245,18 +276,22 @@ class _ConnectionStringParser:
                 # ERROR: Empty value
                 if not value:
                     errors.append(
-                        f"Empty value for keyword {key_shown} (all connection string parameters must have non-empty values)"
+                        (
+                            "Empty value for keyword {} (all connection string parameters must have non-empty values)",
+                            key,
+                            key_start,
+                        )
                     )
 
                 # Check for duplicates
                 if key in params:
-                    errors.append(f"Duplicate keyword {key_shown} found")
+                    errors.append(("Duplicate keyword {} found", key, key_start))
                 else:
                     params[key] = value
                     key_positions[key] = key_start
 
             except ValueError as e:
-                errors.append(f"Error parsing value for keyword {key_shown}: {e}")
+                errors.append(("Error parsing value for keyword {}: " + str(e).replace("{", "{{").replace("}", "}}"), key, key_start))
                 # Skip to next semicolon
                 while current_pos < str_len and connection_str[current_pos] != ";":
                     current_pos += 1
@@ -286,12 +321,22 @@ class _ConnectionStringParser:
             if unknown_keys:
                 for key in unknown_keys:
                     errors.append(
-                        f"Unknown keyword {_display_key(key, key_positions.get(key, -1))} is not recognized"
+                        ("Unknown keyword {} is not recognized", key, key_positions.get(key, -1))
                     )
 
         # If we collected any errors, raise them all together
         if errors:
-            raise ConnectionStringParseError(errors)
+            # Loose names are echoed only when no PWD/Password value exists
+            # that a keyword-shaped fragment could have been cut from.
+            echo_loose = not saw_pwd
+            raise ConnectionStringParseError(
+                [
+                    e
+                    if isinstance(e, str)
+                    else e[0].format(_display_key(e[1], e[2], echo_loose, prefix_ok=len(e) > 3))
+                    for e in errors
+                ]
+            )
 
         return params
 
