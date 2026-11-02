@@ -150,7 +150,7 @@ pub(super) fn bulk_copy_arrow_parallel(
         fire_triggers,
         use_internal_transaction: false,
     };
-    let reader = arrow_source::open(source)?;
+    let reader = arrow_source::open(source, false)?;
     let schema = reader.schema();
     let shared = Arc::new(Shared {
         cursor: Mutex::new(SourceCursor { reader, current: None }),

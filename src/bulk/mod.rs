@@ -254,7 +254,7 @@ fn bulk_copy_arrow(
         fire_triggers,
         use_internal_transaction,
     };
-    let stream = arrow_source::open(source)?;
+    let stream = arrow_source::open(source, true)?;
     let outcome = py.detach(|| arrow_encode::load(&stmt, &settings, stream))?;
     outcome.into_dict(py)
 }
