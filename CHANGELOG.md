@@ -29,6 +29,8 @@ Version numbers in this project are deliberately three different things:
   pyarrow in another shared library read them zero-copy;
   `ParallelReader::into_ffi_stream` / `StatementReader::into_ffi_stream`
   export the merged and single-statement readers the same way.
+- `crates/arrowsql-rowcount`: a pure-Rust example and integration test of the
+  core API (single, merged parallel and per-partition Arrow C stream reads).
 
 ### Changed
 

@@ -21,6 +21,7 @@ anyone else can just set `DB_CONNECTION_STRING`.
 python -m pytest -q --timeout 120 tests/common_issues tests/port
 python scripts/check_upstream_baseline.py     # vendored upstream suite vs tests/upstream_passing_baseline.txt
 cargo test --workspace --exclude mssql-tds --lib
+cargo test -p arrowsql-core --test live && cargo test -p arrowsql-rowcount   # Rust API, needs DB_CONNECTION_STRING
 ```
 
 Scope and rules for the three suites: [docs/TEST_SCOPE.md](docs/TEST_SCOPE.md). A new

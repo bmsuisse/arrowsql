@@ -95,6 +95,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrowsql-rowcount"
+version = "0.2.0"
+dependencies = [
+ "arrow-array",
+ "arrowsql-core",
+]
+
+[[package]]
 name = "asn1-rs"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

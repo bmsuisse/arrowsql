@@ -27,7 +27,7 @@ decode/buffer.rs RowBuffer (GIL-free) ──► decode/python.rs (GIL held) ─�
 
 ## Crates
 
-The workspace has two crates:
+The workspace has three crates (plus `vendor/mssql-tds`, a path dependency):
 
 * `crates/arrowsql-core` (rlib, **no pyo3**): connect, execute, fetch, Arrow
   decoding, pooling and the partitioned parallel read. Its public facade
@@ -41,7 +41,12 @@ The workspace has two crates:
   re-export the core modules they extend (`pub use arrowsql_core::statement::*`)
   and add the pyclasses and `DDBCSQL*` functions, so the binding code keeps its
   `crate::statement::...` paths. It installs the hooks at import and owns the
-  mimalloc global allocator.
+  mimalloc global allocator (default feature `mimalloc`).
+* `crates/arrowsql-rowcount` (example binary): the core used as a downstream
+  crate would use it (path dependency, own allocator); counts a query's rows
+  over one connection, the merged parallel read and per-partition Arrow C
+  streams. `cargo test -p arrowsql-rowcount` runs it against
+  `DB_CONNECTION_STRING`.
 
 ## Modules (one owner per file)
 

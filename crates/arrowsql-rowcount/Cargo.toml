@@ -1,0 +1,13 @@
+[package]
+name = "arrowsql-rowcount"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+description = "Example: arrowsql-core used from plain Rust (counts the rows of a query)"
+publish = false
+
+# Built like a downstream crate would: a path (or git) dependency on the core,
+# no pyo3, no [patch] and its own global allocator.
+[dependencies]
+arrowsql-core = { path = "../arrowsql-core" }
+arrow-array = { version = "60", default-features = false, features = ["ffi"] }
