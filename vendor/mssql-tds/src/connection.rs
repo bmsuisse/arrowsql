@@ -20,6 +20,9 @@ pub(crate) mod connection_actions;
 pub mod cursor_ops;
 pub(crate) mod datasource_parser;
 pub(crate) mod dns_cache;
+// RUST-PORT: process-wide TTL DNS cache (VENDOR.md patch 15); std + tokio only
+// so the main crate's tests can compile it too.
+pub mod dns_ttl_cache;
 pub(crate) mod execution_context;
 pub(crate) mod instance_cache;
 pub(crate) mod metadata_retriever;
@@ -29,6 +32,40 @@ pub(crate) mod session_recovery;
 pub mod tds_client;
 /// Transport layer (TCP, Named Pipes, Shared Memory).
 pub mod transport;
+
+/// RUST-PORT: how many times the operating system's resolver was asked to
+/// resolve a host for a connection (cache bypasses included), and the
+/// process-wide DNS cache's counters. For tests and diagnostics.
+pub fn dns_cache_stats() -> (u64, dns_cache::TtlCacheStats) {
+    dns_cache::stats()
+}
+
+/// RUST-PORT: empties the process-wide DNS cache (counters are kept). For tests.
+pub fn dns_cache_clear() {
+    dns_cache::clear_ttl_cache();
+}
+
+/// RUST-PORT test hook: the next `failures` OS lookups fail with a temporary
+/// resolver error and every lookup first sleeps `delay_ms`; `(0, 0)` resets.
+pub fn dns_cache_test_fault(failures: u32, delay_ms: u64) {
+    dns_cache::set_test_fault(failures, delay_ms);
+}
+
+/// RUST-PORT test hook: caches `addresses` for `host:port` in the DNS cache as
+/// if resolved `age_secs` seconds ago.
+pub fn dns_cache_test_seed(
+    host: &str,
+    port: u16,
+    addresses: Vec<std::net::SocketAddr>,
+    age_secs: u64,
+) {
+    dns_cache::seed_ttl_cache(
+        host,
+        port,
+        addresses,
+        std::time::Duration::from_secs(age_secs),
+    );
+}
 
 /// This computer's name, as the client compares a data source's host with it
 /// to decide whether the data source is local.

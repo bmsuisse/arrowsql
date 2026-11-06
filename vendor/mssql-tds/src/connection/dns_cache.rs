@@ -16,6 +16,11 @@
 //! Unlike SNI, resolutions are never shared before an accepted login allows
 //! them, and a malformed FEATUREEXTACK cannot retain a partial DNS allow.
 //!
+//! RUST-PORT: in front of both sits a process-wide positive cache with a TTL
+//! and serve-stale (`dns_ttl_cache`, VENDOR.md patch 15), because msodbcsql's
+//! fallback only helps once a server has allowed caching and still resolves on
+//! every connect, so a flaky resolver cost every connection a full timeout.
+//!
 //! Each connection carries its own [`Resolution`] to its login, as SqlClient
 //! does with `pendingSQLDNSObject`, so the cache only ever holds allowed hosts
 //! and concurrent logins cannot lose each other's addresses.
@@ -24,9 +29,109 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use tracing::{debug, warn};
+
+pub use super::dns_ttl_cache::Stats as TtlCacheStats;
+use super::dns_ttl_cache::{Origin, Policy, TtlDnsCache, effective_ttl};
+
+/// Environment variable with the default positive TTL in seconds (0 disables).
+const TTL_ENV: &str = "ARROWSQL_DNS_CACHE_TTL";
+/// Environment variable bounding one resolver call, in seconds (default 10).
+const RESOLVE_TIMEOUT_ENV: &str = "ARROWSQL_DNS_RESOLVE_TIMEOUT";
+
+static TTL_CACHE: OnceLock<Arc<TtlDnsCache>> = OnceLock::new();
+static RESOLVER_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Test hooks ([`set_test_fault`]): fail this many next OS lookups, and delay each.
+static FAULT_FAILURES: AtomicU32 = AtomicU32::new(0);
+static FAULT_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+
+tokio::task_local! {
+    /// The `DnsCacheTTL` of the connection being made, if it set one.
+    static CONNECTION_TTL: Option<u64>;
+}
+
+/// Runs `future` (a connect) with the connection's `DnsCacheTTL`.
+pub(crate) async fn with_connection_ttl<F: Future>(ttl_secs: Option<u64>, future: F) -> F::Output {
+    CONNECTION_TTL.scope(ttl_secs, future).await
+}
+
+fn ttl_cache() -> &'static Arc<TtlDnsCache> {
+    TTL_CACHE.get_or_init(Arc::default)
+}
+
+fn current_policy() -> Policy {
+    static ENV: OnceLock<(Option<String>, Option<Duration>)> = OnceLock::new();
+    let (ttl_env, timeout) = ENV.get_or_init(|| {
+        let timeout = std::env::var(RESOLVE_TIMEOUT_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|secs| secs.is_finite() && *secs > 0.0)
+            .map(Duration::from_secs_f64);
+        (std::env::var(TTL_ENV).ok(), timeout)
+    });
+    let connection = CONNECTION_TTL.try_with(|ttl| *ttl).unwrap_or(None);
+    let mut policy = Policy::with_ttl(effective_ttl(connection, ttl_env.as_deref()));
+    if let Some(timeout) = timeout {
+        policy.attempt_timeout = *timeout;
+    }
+    policy
+}
+
+/// OS resolver calls made for connections so far (cache bypasses included),
+/// and the TTL cache's counters.
+pub(crate) fn stats() -> (u64, TtlCacheStats) {
+    (RESOLVER_CALLS.load(Ordering::Relaxed), ttl_cache().stats())
+}
+
+pub(crate) fn clear_ttl_cache() {
+    ttl_cache().clear();
+}
+
+/// Test hook: the next `failures` OS lookups fail with a temporary resolver
+/// error, and every lookup first sleeps `delay_ms`. `(0, 0)` restores normal
+/// resolution.
+pub(crate) fn set_test_fault(failures: u32, delay_ms: u64) {
+    FAULT_FAILURES.store(failures, Ordering::Relaxed);
+    FAULT_DELAY_MS.store(delay_ms, Ordering::Relaxed);
+}
+
+/// Test hook: caches `addresses` for `host:port` as resolved `age` ago.
+pub(crate) fn seed_ttl_cache(host: &str, port: u16, addresses: Vec<SocketAddr>, age: Duration) {
+    ttl_cache().seed(host, port, addresses, Instant::now(), age);
+}
+
+/// Drops the TTL cache entry for `host:port`, after connecting to its addresses
+/// failed.
+pub(crate) fn invalidate(host: &str, port: u16) {
+    debug!(
+        host,
+        port, "Connecting to cached addresses failed; dropping the DNS cache entry"
+    );
+    ttl_cache().invalidate(host, port);
+}
+
+async fn ttl_resolve(host: &str, port: u16) -> io::Result<(Vec<SocketAddr>, Origin)> {
+    let owned: Arc<str> = Arc::from(host);
+    ttl_cache()
+        .resolve(host, port, current_policy(), Instant::now(), move || {
+            let host = Arc::clone(&owned);
+            async move { system_lookup(&host, port).await }
+        })
+        .await
+}
+
+/// Resolves `host` through the TTL cache only (no server-allowed fallback).
+pub(crate) async fn cached_lookup(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+    let (addresses, origin) = ttl_resolve(host, port).await?;
+    if let Origin::Stale(Some(error)) = origin {
+        debug!(host, %error, "DNS resolution failed; using stale cached addresses");
+    }
+    Ok(addresses)
+}
 
 /// The addresses one connection resolved its host to, or fell back to. Only
 /// that connection's login verdict can publish them.
@@ -35,6 +140,10 @@ pub(crate) struct Resolution {
     /// Lowercased, because DNS names are case-insensitive.
     host: String,
     addresses: Vec<SocketAddr>,
+    /// A DNS cache entry (fresh, or stale while it refreshes) answered
+    /// without waiting for the resolver; connecting to these addresses
+    /// failing means the server may have moved.
+    from_ttl_cache: bool,
 }
 
 impl Resolution {
@@ -42,7 +151,13 @@ impl Resolution {
         Self {
             host: host.to_ascii_lowercase(),
             addresses,
+            from_ttl_cache: false,
         }
+    }
+
+    /// Whether a DNS cache entry supplied the addresses without resolving.
+    pub(crate) fn served_cached(&self) -> bool {
+        self.from_ttl_cache
     }
 
     pub(crate) fn addresses(&self) -> &[SocketAddr] {
@@ -141,7 +256,9 @@ impl DnsCache {
     /// Applies a server's DNS caching verdict to the host `resolution` came
     /// from: allowing publishes its addresses, anything else removes the host.
     pub(crate) fn apply_verdict(&self, resolution: &Resolution, allowed: bool) {
-        let Resolution { host, addresses } = resolution;
+        let Resolution {
+            host, addresses, ..
+        } = resolution;
         let mut entries = self.allowed();
         if !allowed {
             entries.remove(host);
@@ -164,12 +281,53 @@ pub(crate) async fn lookup_host(
     port: u16,
     fell_back: impl FnOnce(&io::Error),
 ) -> io::Result<Resolution> {
-    DnsCache::global()
-        .resolve_reporting(host, port, || system_lookup(host, port), fell_back)
-        .await
+    let fell_back = Mutex::new(Some(fell_back));
+    let report = |error: &io::Error| {
+        let callback = fell_back
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(callback) = callback {
+            callback(error);
+        }
+    };
+    let cached = AtomicBool::new(false);
+    let mut resolution = DnsCache::global()
+        .resolve_reporting(
+            host,
+            port,
+            || async {
+                let (addresses, origin) = ttl_resolve(host, port).await?;
+                match origin {
+                    Origin::Fresh | Origin::Stale(None) => cached.store(true, Ordering::Relaxed),
+                    Origin::Stale(Some(error)) => {
+                        debug!(host, %error, "DNS resolution failed; using stale cached addresses");
+                        report(&error);
+                    }
+                    Origin::Bypass | Origin::Resolved => {}
+                }
+                Ok(addresses)
+            },
+            report,
+        )
+        .await?;
+    resolution.from_ttl_cache = cached.load(Ordering::Relaxed);
+    Ok(resolution)
 }
 
 async fn system_lookup(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+    RESOLVER_CALLS.fetch_add(1, Ordering::Relaxed);
+    let delay = FAULT_DELAY_MS.load(Ordering::Relaxed);
+    if delay > 0 {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+    let failing =
+        FAULT_FAILURES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+    if failing.is_ok() {
+        return Err(io::Error::other(
+            "Temporary failure in name resolution (test fault)",
+        ));
+    }
     // Names under `.invalid` never resolve (RFC 6761). Tests use them to
     // reach the fallback through a real connect without depending on the
     // machine's resolver.

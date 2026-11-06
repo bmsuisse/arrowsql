@@ -123,7 +123,7 @@ pub async fn parallel_connect(
     port: u16,
     config: &ParallelConnectConfig,
 ) -> TdsResult<ParallelConnectResult> {
-    parallel_connect_resolving(host, port, config, |_| {}, || {})
+    parallel_connect_resolving(host, port, config, |_| {}, |_| {})
         .await
         .map(|(result, _)| result)
 }
@@ -131,7 +131,8 @@ pub async fn parallel_connect(
 /// [`parallel_connect`], also returning what `host` resolved to, which the
 /// connection's login DNS caching verdict applies to. It hands
 /// `dns_fell_back` the resolver's error when the DNS cache supplied the
-/// addresses instead, and calls `resolved` once the host has resolved, before
+/// addresses instead, and calls `resolved` (told whether a DNS cache
+/// entry answered) once the host has resolved, before
 /// the race, so a caller can record where the addresses came from even when
 /// no address then accepts.
 pub(crate) async fn parallel_connect_resolving(
@@ -139,7 +140,7 @@ pub(crate) async fn parallel_connect_resolving(
     port: u16,
     config: &ParallelConnectConfig,
     dns_fell_back: impl FnOnce(&std::io::Error),
-    resolved: impl FnOnce(),
+    resolved: impl FnOnce(bool),
 ) -> TdsResult<(ParallelConnectResult, Resolution)> {
     info!(
         "Starting parallel connection to {}:{} with timeout {}ms",
@@ -150,13 +151,60 @@ pub(crate) async fn parallel_connect_resolving(
     // must cover DNS resolution too, not just the connection race below.
     let deadline = Instant::now() + Duration::from_millis(config.timeout_ms);
 
+    // RUST-PORT (VENDOR.md patch 15): when no address of a DNS cache entry
+    // accepts, the server may have moved: drop the entry and resolve once more
+    // within what is left of the budget.
+    let mut dns_fell_back = Some(dns_fell_back);
+    let mut resolved = Some(resolved);
+    let mut served_cached = false;
+    let first = parallel_attempt(
+        host,
+        port,
+        config,
+        deadline,
+        &mut dns_fell_back,
+        &mut resolved,
+        &mut served_cached,
+    )
+    .await;
+    if first.is_err() && served_cached && Instant::now() < deadline {
+        dns_cache::invalidate(host, port);
+        return parallel_attempt(
+            host,
+            port,
+            config,
+            deadline,
+            &mut dns_fell_back,
+            &mut resolved,
+            &mut false,
+        )
+        .await;
+    }
+    first
+}
+
+/// One resolve-and-race pass of [`parallel_connect_resolving`]; `served_cached`
+/// says whether a DNS cache entry supplied the addresses.
+async fn parallel_attempt(
+    host: &str,
+    port: u16,
+    config: &ParallelConnectConfig,
+    deadline: Instant,
+    dns_fell_back: &mut Option<impl FnOnce(&std::io::Error)>,
+    resolved: &mut Option<impl FnOnce(bool)>,
+    served_cached: &mut bool,
+) -> TdsResult<(ParallelConnectResult, Resolution)> {
     // Resolve DNS to get all IP addresses. `lookup_host` awaits the resolution
     // instead of blocking the calling thread (unlike `std::net::ToSocketAddrs`),
     // so a slow or stuck resolver stays subject to `deadline` instead of
     // silently escaping it. A failed resolution falls back to the DNS cache.
     let resolution = match timeout(
         deadline.saturating_duration_since(Instant::now()),
-        dns_cache::lookup_host(host, port, dns_fell_back),
+        dns_cache::lookup_host(host, port, |error| {
+            if let Some(callback) = dns_fell_back.take() {
+                callback(error);
+            }
+        }),
     )
     .await
     {
@@ -172,7 +220,10 @@ pub(crate) async fn parallel_connect_resolving(
             )));
         }
     };
-    resolved();
+    *served_cached = resolution.served_cached();
+    if let Some(callback) = resolved.take() {
+        callback(*served_cached);
+    }
     validate_address_count(resolution.addresses().len())?;
     let addresses = resolution.addresses();
 

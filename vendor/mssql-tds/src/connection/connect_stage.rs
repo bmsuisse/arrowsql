@@ -143,6 +143,9 @@ pub const SOURCE_RESOLVER: &str = "resolver";
 /// [`SOURCE`] of addresses the DNS cache supplied because the resolver failed:
 /// ones an earlier login's server allowed caching for this host.
 pub const SOURCE_FALLBACK_CACHE: &str = "fallbackCache";
+/// [`SOURCE`] of addresses a fresh entry of the process-wide DNS cache supplied
+/// without asking the resolver (VENDOR.md patch 15).
+pub const SOURCE_DNS_CACHE: &str = "dnsCache";
 
 /// An address as the stages record it: the IP, with its IPv6 scope when it
 /// has one (`fe80::1%12`), without the port.
