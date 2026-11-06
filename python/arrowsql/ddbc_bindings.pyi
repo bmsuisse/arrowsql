@@ -70,6 +70,22 @@ class ArrowMergeStream:
     def __arrow_c_schema__(self) -> Any: ...
     def __arrow_c_stream__(self, requested_schema: Optional[Any] = None) -> Any: ...
 
+class ParallelArrowStream:
+    """Batches of a partitioned read (read_arrow_stream), unordered and bounded."""
+
+    @property
+    def num_columns(self) -> int: ...
+    @property
+    def column_names(self) -> List[str]: ...
+    @property
+    def closed(self) -> bool: ...
+    def __arrow_c_schema__(self) -> Any: ...
+    def __arrow_c_stream__(self, requested_schema: Optional[Any] = None) -> Any: ...
+    def read_all(self) -> ArrowTable: ...
+    def close(self) -> None: ...
+    def __enter__(self) -> "ParallelArrowStream": ...
+    def __exit__(self, *args: Any) -> None: ...
+
 class AgentRender:
     """Collects the bounded text output of one statement (see arrowsql.agent)."""
 
@@ -294,3 +310,43 @@ def utf8_wrap_query(
 def utf8_collations_supported(
     product_major_version: Optional[int], engine_edition: Optional[int]
 ) -> bool: ...
+def utf8_query(conn: Any, query: str) -> str: ...
+def read_arrow(
+    connect: Any,
+    query: str,
+    partition_on: Optional[str] = None,
+    partitions: int = 1,
+    batch_size: int = 65536,
+    utf8_strings: bool = True,
+    partition_bounds: Optional[List[Any]] = None,
+    partition_nullable: Optional[bool] = None,
+) -> ArrowTable: ...
+def read_arrow_stream(
+    connect: Any,
+    query: str,
+    partition_on: Optional[str] = None,
+    partitions: int = 1,
+    batch_size: int = 65536,
+    partition_bounds: Optional[List[Any]] = None,
+    max_buffered_batches: Optional[int] = None,
+    partition_nullable: Optional[bool] = None,
+    utf8_strings: bool = True,
+) -> ParallelArrowStream: ...
+def _plan_read(
+    connect: Any,
+    query: str,
+    partition_on: Optional[str] = None,
+    partitions: int = 1,
+    partition_bounds: Optional[List[Any]] = None,
+    partition_nullable: Optional[bool] = None,
+    utf8_strings: bool = True,
+) -> List[Tuple[str, Tuple[Any, ...]]]: ...
+def _range_plan(
+    conn: Any, query: str, column: str, name: str, partitions: int, plain: Optional[str] = None
+) -> List[Tuple[str, Tuple[Any, ...]]]: ...
+def _bounds_plan(
+    conn: Any, query: str, column: str, bounds: List[Any], nullable: Optional[bool]
+) -> List[Tuple[str, Tuple[Any, ...]]]: ...
+def _probe_meta(
+    conn: Any, query: str, column: str, plain: Optional[str] = None, with_rows: bool = True
+) -> Tuple[Optional[int], bool]: ...

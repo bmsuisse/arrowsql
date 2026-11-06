@@ -110,8 +110,7 @@ fn server_error_is_a_database_error() {
     let (conn, _) = connect_or_skip!();
     let err = conn
         .execute("SELECT * FROM dbo.no_such_table_core_live", &[])
-        .err()
-        .expect("an error");
+        .expect_err("an error");
     assert_eq!(err.kind, ErrorKind::Database);
     assert_eq!(err.sqlstate, "42S02");
     assert_eq!(err.native, 208);
@@ -175,8 +174,7 @@ fn cancel_a_running_statement() {
     });
     let err = conn
         .execute("WAITFOR DELAY '00:00:20'; SELECT 1", &[])
-        .err()
-        .expect("cancelled");
+        .expect_err("cancelled");
     canceller.join().unwrap();
     assert_eq!(err.sqlstate, "HY008");
     assert!(started.elapsed() < Duration::from_secs(10));

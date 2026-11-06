@@ -41,11 +41,11 @@ pub fn batch_capsules(py: Python<'_>, batch: RecordBatch, capsules: &Bound<'_, P
     Ok(())
 }
 
-fn stream_capsule(py: Python<'_>, reader: Box<dyn RecordBatchReader + Send>) -> PyResult<Bound<'_, PyCapsule>> {
+pub(crate) fn stream_capsule(py: Python<'_>, reader: Box<dyn RecordBatchReader + Send>) -> PyResult<Bound<'_, PyCapsule>> {
     PyCapsule::new_with_value(py, FFI_ArrowArrayStream::new(reader), c"arrow_array_stream")
 }
 
-fn schema_capsule<'py>(py: Python<'py>, schema: &SchemaRef) -> PyResult<Bound<'py, PyCapsule>> {
+pub(crate) fn schema_capsule<'py>(py: Python<'py>, schema: &SchemaRef) -> PyResult<Bound<'py, PyCapsule>> {
     let ffi = FFI_ArrowSchema::try_from(schema.as_ref()).map_err(arrow_err)?;
     PyCapsule::new_with_value(py, ffi, c"arrow_schema")
 }
@@ -150,13 +150,13 @@ impl ArrowTable {
 
 /// Drop `value` with the GIL released: the last handle of a stream stops its
 /// producer thread, which may wait on the server.
-fn drop_detached<T: Send>(value: T) {
+pub(crate) fn drop_detached<T: Send>(value: T) {
     Python::attach(|py| py.detach(move || drop(value)));
 }
 
 /// A reader handed to an Arrow C stream consumer. The consumer may release
 /// it with the GIL held; dropping it shuts the stream down without the GIL.
-struct Detached<R: Send>(Option<R>);
+pub(crate) struct Detached<R: Send>(pub(crate) Option<R>);
 
 impl<R: Iterator<Item = Result<RecordBatch, ArrowError>> + Send> Iterator for Detached<R> {
     type Item = Result<RecordBatch, ArrowError>;
@@ -180,7 +180,7 @@ impl<R: Send> Drop for Detached<R> {
     }
 }
 
-fn reader_error(what: &str, err: ReaderError) -> PyErr {
+pub(crate) fn reader_error(what: &str, err: ReaderError) -> PyErr {
     PyValueError::new_err(match err {
         ReaderError::Closed => format!("{what} is closed"),
         ReaderError::Consumed => format!("{what} was already consumed"),

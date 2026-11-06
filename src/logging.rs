@@ -25,6 +25,54 @@ static LOGGER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 #[pyfunction]
 pub fn update_log_level(level: i32) {
     LEVEL.store(level, Ordering::Relaxed);
+    log::set_max_level(level_filter(level));
+}
+
+/// Forwards `log` records of `arrowsql_core` to the Python logger, as the
+/// binding's own messages are. Other crates' records (mssql-tds' `tracing`
+/// falls back to `log`) are not forwarded.
+struct CoreLog;
+
+const CORE_TARGET: &str = "arrowsql_core";
+
+fn py_level(level: log::Level) -> i32 {
+    match level {
+        log::Level::Error => 40,
+        log::Level::Warn => WARNING,
+        log::Level::Info => 20,
+        log::Level::Debug | log::Level::Trace => DEBUG,
+    }
+}
+
+fn level_filter(level: i32) -> log::LevelFilter {
+    if level <= DEBUG {
+        log::LevelFilter::Debug
+    } else if level <= 20 {
+        log::LevelFilter::Info
+    } else {
+        log::LevelFilter::Warn
+    }
+}
+
+impl log::Log for CoreLog {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.target().starts_with(CORE_TARGET) && enabled(py_level(metadata.level()))
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            Python::attach(|py| log(py, py_level(record.level()), &record.args().to_string()));
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Install the forwarder (module init).
+pub fn install() {
+    if log::set_logger(&CoreLog).is_ok() {
+        log::set_max_level(level_filter(cached_level()));
+    }
 }
 
 fn cached_level() -> i32 {

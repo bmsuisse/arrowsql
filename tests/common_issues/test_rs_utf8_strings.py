@@ -133,12 +133,12 @@ def test_unrewritable_queries_fall_back(conn, query):
     assert utf8_query(conn, query) == query
 
 
-def test_opt_out_runs_original(conn_str, monkeypatch):
-    def boom(*a, **k):
-        raise AssertionError("describe ran")
+def test_opt_out_runs_original(conn_str):
+    from mssql_python import arrow_parallel
 
-    monkeypatch.setattr("mssql_python.arrow_parallel.utf8_query", boom)
-    table = mssql_python.read_arrow(conn_str, "SELECT N'aä' AS x", utf8_strings=False)
+    query = "SELECT N'aä' AS x"
+    assert arrow_parallel._plan_read(conn_str, query, utf8_strings=False) == [(query, ())]
+    table = mssql_python.read_arrow(conn_str, query, utf8_strings=False)
     assert pa.table(table).to_pydict() == {"x": ["aä"]}
 
 

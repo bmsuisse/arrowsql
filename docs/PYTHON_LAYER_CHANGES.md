@@ -81,7 +81,10 @@ Both `except` clauses keep working.
   reads equal-width integer-range slices (about 2 x `partitions`, at most one
   per key value) of a query over pooled worker connections and returns one
   `ArrowTable` (`ArrowTable.concat`). Skewed keys are not rebalanced and the
-  slices are not one snapshot.
+  slices are not one snapshot. The planning, probes, worker threads and merge
+  run in Rust (`arrowsql_core::read`); the module checks the arguments and
+  passes `ddbc_bindings.read_arrow` / `read_arrow_stream` a `connect()`
+  closure. `_utf8_strings.utf8_query` is a wrapper of `ddbc_bindings.utf8_query`.
 - `bulk_parallel.py` (new) + `__init__.py` export: `mssql_python.write_arrow(connection_str, table, source, workers=4, batch_size=0, table_lock=True)` cuts an Arrow source into slices and bulk-loads them over `workers` connections, each with `cursor.bulkcopy_arrow(table_lock=True)` for a heap. A clustered columnstore loads in parallel without TABLOCK and with batches of at least 102,400 rows; other indexed targets fall back to one worker with a `RuntimeWarning`. `write_rows(connection_str, table, rows, workers=4, ...)` does the same for row tuples.
 
 ## Per-query overhead: cached result layout (`cursor.py`, RUST-PORT)

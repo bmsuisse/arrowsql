@@ -100,3 +100,18 @@ pub fn detach_interruptible<R: Send>(
         None => Ok(out),
     }
 }
+
+/// [`detach_interruptible`] for core calls that run statements of their own
+/// (the parallel read's probes, the UTF-8 describe): every execution `f`
+/// starts on this thread is watched.
+pub fn detach_watched<R: Send>(py: Python<'_>, f: impl FnOnce() -> R + Send) -> PyResult<R> {
+    let out = if on_main_thread(py) {
+        py.detach(|| watch_executions(f))
+    } else {
+        py.detach(f)
+    };
+    match RAISED.with(|r| r.borrow_mut().take()) {
+        Some(err) => Err(err),
+        None => Ok(out),
+    }
+}

@@ -177,6 +177,14 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// The session, for the core's Rust API (`arrowsql_core::Connection`).
+    pub fn shared(&self) -> PyResult<Arc<ConnShared>> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(connection_closed());
+        }
+        Ok(self.shared.clone())
+    }
+
     fn client_op<T>(
         &self,
         py: Python<'_>,

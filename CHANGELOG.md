@@ -24,6 +24,16 @@ Version numbers in this project are deliberately three different things:
   partitioned parallel read. The Python extension is a pyo3 layer over it; no
   behaviour change for Python.
 
+### Changed
+
+- `read_arrow` / `read_arrow_stream`: slice planning, the MIN/MAX and catalog
+  probes, the worker threads and the merge run in Rust (`arrowsql-core`);
+  `arrow_parallel.py` only checks arguments. Same plans, rows and exception
+  classes as before (parity tests against the previous implementation in
+  `tests/common_issues/test_rs_read_arrow_parity.py`); invalid
+  `partition_bounds` now fail before the first connection is opened. The
+  UTF-8 transfer rewrite (`utf8_strings`) moved to Rust as well.
+
 ### Fixed
 
 - `write_arrow(..., workers > 1)` accepts an iterable of record batches (list, generator, objects

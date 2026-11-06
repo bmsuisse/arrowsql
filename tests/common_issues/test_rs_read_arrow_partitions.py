@@ -158,33 +158,19 @@ def test_bigint_key_range_wider_than_int32(conn_str, cursor, table_name):
     assert _check(conn_str, table_name, 4).num_rows == ROWS
 
 
-class _DescribeFails:
-    """Connection proxy whose cursors fail the sys.dm_exec_describe_first_result_set call."""
-
-    def __init__(self, conn):
-        self._conn = conn
-
-    def cursor(self):
-        real = self._conn.cursor()
-
-        class _Cursor:
-            def execute(self, sql, *args):
-                if "dm_exec_describe_first_result_set" in sql:
-                    raise RuntimeError("describe not permitted")
-                return real.execute(sql, *args)
-
-            def __getattr__(self, name):
-                return getattr(real, name)
-
-        return _Cursor()
-
-
 def test_describe_failure_counts_as_nullable(conn_str, cursor, table_name):
+    """The nullability probe's describe cannot resolve the column: count it as nullable.
+
+    (The planner runs in Rust, so a failure is provoked on the server, not by
+    wrapping the Python cursor.)
+    """
     _fill(cursor, table_name, nullable=False, extra_nulls=0)
     query = f"SELECT id, v FROM dbo.{table_name}"
     with connect(conn_str, autocommit=True) as conn:
-        work = arrow_parallel._plan(_DescribeFails(conn), query, "[id]", "id", 4)
-    assert work[0][0].endswith("[id] IS NULL")
+        rows, nullable = arrow_parallel._probe_meta(conn, query, "[id]")
+        assert rows and nullable is False
+        assert arrow_parallel._probe_meta(conn, query, "[no_such_column]")[1] is True
+        assert arrow_parallel._probe_meta(conn, query, "[no_such_column]", with_rows=False) == (None, True)
 
 
 def test_extra_worker_connect_failure_aborts(conn_str, cursor, table_name, monkeypatch):

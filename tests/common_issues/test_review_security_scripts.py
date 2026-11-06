@@ -50,18 +50,32 @@ def test_logging_module_has_no_bare_except():
     assert bare == []
 
 
-def test_parallel_probe_failure_is_logged(tmp_path):
+def test_parallel_probe_failure_is_logged(conn_str):
+    """A catalog probe the login may not run falls back and logs why (debug)."""
+    import logging
+    import uuid
     from unittest import mock
 
-    from arrowsql import arrow_parallel
+    from arrowsql import arrow_parallel, connect, ddbc_bindings
+    from arrowsql.logging import logger
 
-    class _Cur:
-        def execute(self, *a, **k):
-            raise RuntimeError("boom")
-
-    with mock.patch.object(arrow_parallel.logger, "debug") as dbg:
-        assert arrow_parallel._probe_meta(_Cur(), "SELECT a FROM t", "a") == (None, True)
-    assert dbg.called
+    user = f"probe_{uuid.uuid4().hex[:8]}"
+    conn = connect(conn_str, autocommit=True)
+    cur = conn.cursor()
+    cur.execute(f"CREATE USER [{user}] WITHOUT LOGIN")
+    try:
+        # sys.dm_db_partition_stats needs VIEW DATABASE STATE, which this user lacks.
+        cur.execute(f"EXECUTE AS USER = N'{user}'")
+        ddbc_bindings.update_log_level(logging.DEBUG)
+        with mock.patch.object(logger, "py_core_log") as core_log:
+            assert arrow_parallel._probe_meta(conn, "SELECT a FROM t", "a") == (None, True)
+        messages = [str(call.args[1]) for call in core_log.call_args_list]
+        assert any("catalog probe failed" in m for m in messages), messages
+    finally:
+        ddbc_bindings.update_log_level(logger.level or logging.WARNING)
+        cur.execute("REVERT")
+        cur.execute(f"DROP USER [{user}]")
+        conn.close()
 
 
 def test_workflows_pin_actions_and_restrict_publish():

@@ -24,6 +24,7 @@ mod getinfo;
 mod logging;
 mod params;
 mod pooling;
+mod read;
 mod rowfactory;
 mod runtime;
 mod statement;
@@ -125,6 +126,7 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("module", m)?;
     register_fork_hook(m)?;
     runtime::install_interrupt_check();
+    logging::install();
 
     m.add_class::<types::ParamInfo>()?;
     m.add_class::<types::NumericData>()?;
@@ -174,6 +176,7 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(statement::raise_for, m)?)?;
     arrow::register(m)?;
     agent::register(m)?;
+    read::register(m)?;
     bulk::register(m)?;
     #[cfg(unix)]
     aio::register(m)?;

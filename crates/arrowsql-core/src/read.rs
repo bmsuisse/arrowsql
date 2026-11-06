@@ -843,20 +843,34 @@ pub fn read_arrow(
     }
 }
 
+/// The SQLSTATE and message of a stream's error text: the first
+/// `[XXXXX] ` (five word characters) and everything after it, the way the
+/// Python layer always parsed it (`\[(\w{5})\] (.*)`).
+pub fn parse_stream_error(text: &str) -> Option<(&str, &str)> {
+    text.match_indices('[').find_map(|(i, _)| {
+        let rest = &text[i + 1..];
+        let mut chars = rest.char_indices();
+        for _ in 0..5 {
+            let (_, c) = chars.next()?;
+            if !(c.is_alphanumeric() || c == '_') {
+                return None;
+            }
+        }
+        let (end, _) = chars.next().filter(|(_, c)| *c == ']')?;
+        let message = rest[end + 1..].strip_prefix(' ')?;
+        Some((&rest[..end], message))
+    })
+}
+
 /// The error of a failed stream, from its text (`[SQLSTATE] message; ...`).
 fn stream_error(text: &str) -> Error {
-    let text = text.strip_prefix("External error: ").unwrap_or(text);
-    match text.find('[').map(|i| &text[i..]) {
-        Some(rest)
-            if rest.len() > 8 && rest.as_bytes()[6] == b']' && rest.as_bytes()[7] == b' ' =>
-        {
-            Error::from_records(vec![crate::diag::DiagRecord::new(
-                &rest[1..6],
-                0,
-                rest[8..].to_string(),
-            )])
-        }
-        _ => Error::driver("HY000", text),
+    match parse_stream_error(text) {
+        Some((sqlstate, message)) => Error::from_records(vec![crate::diag::DiagRecord::new(
+            sqlstate,
+            0,
+            message.to_string(),
+        )]),
+        None => Error::driver("HY000", text),
     }
 }
 
