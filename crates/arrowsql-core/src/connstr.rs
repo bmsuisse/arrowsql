@@ -250,6 +250,12 @@ pub fn build_context_with(
     if let Some(n) = positive_u32(&map, "keepaliveinterval", "KeepAliveInterval")? {
         ctx.keep_alive_interval_in_ms = to_ms(n, "KeepAliveInterval")?;
     }
+    // RUST-PORT: seconds the process-wide DNS cache keeps a resolved host (0 disables it).
+    if let Some(raw) = map.get("dnscachettl") {
+        ctx.dns_cache_ttl_secs = Some(raw.trim().parse::<u64>().map_err(|_| {
+            format!("Invalid value specified for connection string attribute 'DnsCacheTTL': {raw}")
+        })?);
+    }
     if let Some(pref) = first(&map, &["ipaddresspreference"]) {
         ctx.ipaddress_preference = match pref.to_ascii_lowercase().as_str() {
             "ipv4first" => IPAddressPreference::IPv4First,
@@ -366,6 +372,19 @@ mod tests {
         assert!(build_context("Server=h;KeepAlive=4294967295", None).is_err(), "overflow is rejected");
         assert!(ctx.ipaddress_preference == IPAddressPreference::IPv6First);
         for bad in ["KeepAlive=0", "KeepAlive=x", "KeepAliveInterval=-1", "IpAddressPreference=none"] {
+            assert!(build_context(&format!("Server=h;{bad}"), None).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn dns_cache_ttl_is_seconds_and_zero_disables_it() {
+        let (ctx, _) = build_context("Server=h;", None).unwrap();
+        assert_eq!(ctx.dns_cache_ttl_secs, None);
+        let (ctx, _) = build_context("Server=h;DnsCacheTTL=45", None).unwrap();
+        assert_eq!(ctx.dns_cache_ttl_secs, Some(45));
+        let (ctx, _) = build_context("Server=h;dnscachettl=0", None).unwrap();
+        assert_eq!(ctx.dns_cache_ttl_secs, Some(0));
+        for bad in ["DnsCacheTTL=x", "DnsCacheTTL=-1", "DnsCacheTTL="] {
             assert!(build_context(&format!("Server=h;{bad}"), None).is_err(), "{bad}");
         }
     }

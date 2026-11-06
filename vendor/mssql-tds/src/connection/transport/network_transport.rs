@@ -524,6 +524,50 @@ async fn create_base_stream_sequential(
     connect_timeout_ms: u64,
     diagnosis: Option<&Diagnosis>,
 ) -> TdsResult<(Box<dyn Stream>, Resolution)> {
+    // RUST-PORT (VENDOR.md patch 15): when no address of a DNS cache entry
+    // accepts, the server may have moved: drop the entry and resolve once more.
+    let mut served_cached = false;
+    let first = sequential_attempt(
+        ipaddress_preference,
+        host,
+        port,
+        keep_alive_in_ms,
+        keep_alive_interval_in_ms,
+        connect_timeout_ms,
+        diagnosis,
+        &mut served_cached,
+    )
+    .await;
+    if first.is_err() && served_cached && diagnosis.is_none() {
+        dns_cache::invalidate(host, port);
+        return sequential_attempt(
+            ipaddress_preference,
+            host,
+            port,
+            keep_alive_in_ms,
+            keep_alive_interval_in_ms,
+            connect_timeout_ms,
+            diagnosis,
+            &mut false,
+        )
+        .await;
+    }
+    first
+}
+
+/// One resolve-and-connect pass of [`create_base_stream_sequential`];
+/// `served_cached` says whether a DNS cache entry supplied the addresses.
+#[allow(clippy::too_many_arguments)]
+async fn sequential_attempt(
+    ipaddress_preference: IPAddressPreference,
+    host: &str,
+    port: u16,
+    keep_alive_in_ms: u32,
+    keep_alive_interval_in_ms: u32,
+    connect_timeout_ms: u64,
+    diagnosis: Option<&Diagnosis>,
+    served_cached: &mut bool,
+) -> TdsResult<(Box<dyn Stream>, Resolution)> {
     info!(
         "Connecting to TCP transport (sequential): {}:{}",
         host, port
@@ -555,8 +599,14 @@ async fn create_base_stream_sequential(
     })
     .await
     .inspect_err(|e| connect_stage::record_io_error(&dns_stage, e))?;
+    *served_cached = resolution.served_cached();
     if !fell_back {
-        dns_stage.record(connect_stage::SOURCE, connect_stage::SOURCE_RESOLVER);
+        let source = if *served_cached {
+            connect_stage::SOURCE_DNS_CACHE
+        } else {
+            connect_stage::SOURCE_RESOLVER
+        };
+        dns_stage.record(connect_stage::SOURCE, source);
     }
     // Sorted as a copy, so the cache keeps the resolver's order.
     let mut socket_addresses = resolution.addresses().to_vec();
@@ -746,9 +796,14 @@ async fn create_base_stream_parallel(
             fell_back.store(true, std::sync::atomic::Ordering::Relaxed);
             connect_stage::record_resolver_fallback(&tcp_stage, e);
         },
-        || {
+        |served_cached| {
             if !fell_back.load(std::sync::atomic::Ordering::Relaxed) {
-                tcp_stage.record(connect_stage::SOURCE, connect_stage::SOURCE_RESOLVER);
+                let source = if served_cached {
+                    connect_stage::SOURCE_DNS_CACHE
+                } else {
+                    connect_stage::SOURCE_RESOLVER
+                };
+                tcp_stage.record(connect_stage::SOURCE, source);
             }
         },
     )

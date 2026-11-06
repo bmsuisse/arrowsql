@@ -14,6 +14,7 @@ use crate::connection::connect_stage;
 use crate::connection::connection_actions::{
     ActionOutcome, ConnectionAction, ConnectionActionChain, ExecutionContext,
 };
+use crate::connection::dns_cache;
 use crate::connection::instance_cache::InstanceCache;
 use crate::connection::session_recovery::SessionRecoveryData;
 use crate::connection::tds_client::TdsClient;
@@ -219,7 +220,11 @@ impl TdsConnectionProvider {
         // ODBC polls this on the application's stack. Keep the connection
         // state out of its block_on frames, leaving room for native TLS and
         // client construction on musl's 128 KiB threads.
-        Box::pin(self.execute_action_chain(&context, action_chain, cancel_handle, None)).await
+        // RUST-PORT (VENDOR.md patch 15): the connection's `DnsCacheTTL` for the
+        // SQL Browser and TCP lookups.
+        let ttl = context.dns_cache_ttl_secs;
+        let connect = self.execute_action_chain(&context, action_chain, cancel_handle, None);
+        Box::pin(dns_cache::with_connection_ttl(ttl, connect)).await
     }
 
     /// [`create_client`](Self::create_client) for connection diagnostics: the
@@ -265,9 +270,10 @@ impl TdsConnectionProvider {
         }
         let diagnosis = Diagnosis::new(stop_after);
         let bound_ms = u64::from(context.connect_timeout) * 1000;
-        let result =
-            Box::pin(self.execute_action_chain(&context, action_chain, None, Some(&diagnosis)))
-                .await;
+        // RUST-PORT (VENDOR.md patch 15): a diagnosis reports what the resolver
+        // answers, so it bypasses the TTL DNS cache.
+        let connect = self.execute_action_chain(&context, action_chain, None, Some(&diagnosis));
+        let result = Box::pin(dns_cache::with_connection_ttl(Some(0), connect)).await;
         diagnosis.finish_extra_connects(bound_ms).await;
         if diagnosis.stopped() {
             return Ok(None);
@@ -816,7 +822,14 @@ impl TdsConnectionProvider {
         // Create network transport directly
         // Convert connect_timeout from seconds to milliseconds
         let connect_timeout_ms = (context.connect_timeout as u64) * 1000;
-        let (mut transport, dns_resolution) = network_transport::create_transport(
+        // RUST-PORT (VENDOR.md patch 15): also reached by reconnects, outside
+        // `create_client`; a diagnosis bypasses the TTL DNS cache.
+        let dns_cache_ttl = if diagnosis.is_some() {
+            Some(0)
+        } else {
+            context.dns_cache_ttl_secs
+        };
+        let connect = network_transport::create_transport(
             context.ipaddress_preference,
             context.tds_version(),
             transport_context,
@@ -833,8 +846,9 @@ impl TdsConnectionProvider {
                 .enabled,
             connect_timeout_ms,
             diagnosis,
-        )
-        .await?;
+        );
+        let (mut transport, dns_resolution) =
+            dns_cache::with_connection_ttl(dns_cache_ttl, connect).await?;
 
         if diagnosis.is_some_and(|diagnosis| diagnosis.stops_at(DiagnosticStop::Transport)) {
             // Dropping the transport closes it at once; nothing was sent on it.

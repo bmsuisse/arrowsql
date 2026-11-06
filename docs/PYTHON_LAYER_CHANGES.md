@@ -302,6 +302,10 @@ applied by `src/connstr.rs`. KeepAlive and KeepAliveInterval are seconds, as
 ODBC defines them (defaults 30 and 1), and must be positive integers. `IpAddressPreference` accepts IPv4First, IPv6First and
 UsePlatformDefault.
 
+`DnsCacheTTL` (RUST-PORT) is allowed in `constants.py` and applied by
+`src/connstr.rs`: seconds the process-wide DNS cache keeps a resolved host,
+0 disables it (see the DNS cache section of `docs/PLATFORMS_AND_CONNECTION.md`).
+
 ## Cancel, Ctrl-C and aio pool semantics (A3/A4, RUST-PORT)
 
 - `cursor.py` `Cursor.cancel()` (new, pyodbc-compatible): cancels the statement

@@ -108,7 +108,12 @@ pub(crate) async fn query_instance(
     bound_resolution: bool,
     on_resolved: impl FnOnce(&[SocketAddr]),
 ) -> Result<Vec<SsrpInstanceInfo>, SsrpLookupError> {
-    let resolve = tokio::net::lookup_host((server, ssrp_port));
+    // RUST-PORT: through the process-wide DNS cache (VENDOR.md patch 15).
+    let resolve = async {
+        crate::connection::dns_cache::cached_lookup(server, ssrp_port)
+            .await
+            .map(|addresses| addresses.into_iter())
+    };
     let deadline =
         bound_resolution.then(|| tokio::time::Instant::now() + Duration::from_millis(timeout_ms));
     query_browser(server, instance, resolve, timeout_ms, deadline, on_resolved)

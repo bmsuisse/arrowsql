@@ -79,6 +79,10 @@ Connection errors raise `RuntimeError("SQLSTATE:XXXXX:NATIVE:<n>:<message>")`.
 | `DDBCSQLStatistics` | `(StatementHandle, catalog, schema, table, unique, reserved)` | partial | catalog.rs |
 | `DDBCSQLGetTypeInfo` | `(StatementHandle, DataType)` | partial (`sp_datatype_info_100`) | catalog.rs |
 | `DDBCSetDecimalSeparator` | `(separator)` | impl (stored; not needed by native decode) | lib.rs |
+| `dns_cache_stats` (port-only) | `()` -> dict of the process-wide DNS cache's counters (`os_resolver_calls`, `entries`, `in_flight`, `hits`, `stale_served`, `misses`, `coalesced`, `refreshes`, `resolver_calls`, `resolver_failures`) | impl | lib.rs |
+| `dns_cache_clear` (port-only) | `()`: drops every DNS cache entry (counters are kept) | impl | lib.rs |
+| `dns_cache_test_fault` (port-only, tests) | `(failures=0, delay_ms=0)`: the next `failures` OS lookups fail with a temporary resolver error, each lookup first sleeps `delay_ms` | impl | lib.rs |
+| `dns_cache_test_seed` (port-only, tests) | `(host, port, addresses, age_secs=0)`: caches `"ip:port"` addresses for `host:port` as if resolved `age_secs` ago | impl | lib.rs |
 | `construct_rows` | `(rows_data, row_class, column_map, cursor, column_map_lower=None, column_names=None)` | impl | rowfactory.rs |
 | `enable_pooling` | `(max_size=100, idle_timeout=600)` | impl | pooling.rs |
 | `close_pooling` | `()` | impl | pooling.rs |

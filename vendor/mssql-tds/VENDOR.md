@@ -125,6 +125,27 @@ Local patches (search for `VENDOR PATCH`):
     as msodbcsql does when no `Failover_Partner` is configured. Found against a production
     SQL Server in a mirroring session (`tests/port/test_mirroring_partner.py`).
 
+15. Process-wide DNS cache (marked `RUST-PORT`): `src/connection/dns_ttl_cache.rs` (std and
+    tokio only) keeps resolved addresses per (lowercased host, port) for `DnsCacheTTL`
+    seconds (default 300, `ARROWSQL_DNS_CACHE_TTL`, 0 disables;
+    `ClientContext::dns_cache_ttl_secs`), at most 256 entries. A fresh entry is used without
+    resolving; a stale one (up to 1 h past its TTL) is served at once while a background
+    thread refreshes it, an older one is refreshed in line and served if that fails.
+    Concurrent lookups of a key share one resolver call (single-flight); each call is
+    bounded (`ARROWSQL_DNS_RESOLVE_TIMEOUT`, default 10 s) and a transient failure is
+    retried once. Failures are never cached; IP literals, TTL 0 and diagnostic connects
+    bypass it. `src/connection/dns_cache.rs` `lookup_host` (TCP connect, sequential and
+    MultiSubnetFailover paths) and `src/ssrp.rs` (SQL Browser) go through it, in front of
+    the msodbcsql-style server-allowed fallback; `tds_connection_provider.rs` scopes the
+    connection's TTL around `create_client`, `diagnose_client` and the transport connect
+    (reconnects). When connecting to cached addresses fails, `network_transport.rs` /
+    `parallel_connect.rs` drop the entry and resolve once more. `connection.rs` exports
+    stats/clear/test-fault/test-seed hooks. The JDBC driver caches successful lookups for
+    the process lifetime; resolving on every connection hit a slow, flaky Databricks
+    resolver for each Spark task. Unit tests live in the main crate
+    (`src/dns_ttl_cache_tests.rs`, which compiles the file), since the vendored crate's own
+    tests do not build; `tests/port/test_dns_cache.py` covers it end to end.
+
 `ddbc_bindings` and `crates/arrowsql-core` depend on this directory by path
 (no `[patch]`), so a crate that depends on arrowsql-core by git builds the
 patched copy too. To drop the vendored copy once the fixes are upstream,

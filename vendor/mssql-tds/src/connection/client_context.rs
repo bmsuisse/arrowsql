@@ -295,6 +295,9 @@ pub struct ClientContext {
     /// TCP keep-alive interval in milliseconds between subsequent probes.
     /// Default: 1000 (1 second) per SQL Server client defaults.
     pub keep_alive_interval_in_ms: u32,
+    /// RUST-PORT: positive DNS cache TTL in seconds for this connection (`DnsCacheTTL`);
+    /// `None` uses `ARROWSQL_DNS_CACHE_TTL`, then 300. 0 disables the cache.
+    pub dns_cache_ttl_secs: Option<u64>,
     /// Named instance name. Default: `"MSSQLServer"`.
     pub database_instance: String,
     /// Whether to auto-enlist in the caller's distributed transaction.
@@ -564,6 +567,7 @@ impl ClientContext {
             data_source: data_source.to_string(),
             keep_alive_in_ms: 30_000, // 30 seconds (SQL Server default)
             keep_alive_interval_in_ms: 1_000, // 1 second (SQL Server default)
+            dns_cache_ttl_secs: None,
             database_instance: "MSSQLServer".to_string(),
             enlist: false,
             encryption_options: EncryptionOptions::new(),
@@ -631,6 +635,7 @@ impl ClientContext {
             data_source: "".to_string(),
             keep_alive_in_ms: 30_000, // 30 seconds (SQL Server default)
             keep_alive_interval_in_ms: 1_000, // 1 second (SQL Server default)
+            dns_cache_ttl_secs: None,
             database_instance: "MSSQLServer".to_string(),
             enlist: false,
             encryption_options: EncryptionOptions::new(),
@@ -966,6 +971,7 @@ impl Clone for ClientContext {
             data_source: self.data_source.clone(),
             keep_alive_in_ms: self.keep_alive_in_ms,
             keep_alive_interval_in_ms: self.keep_alive_interval_in_ms,
+            dns_cache_ttl_secs: self.dns_cache_ttl_secs,
             database_instance: self.database_instance.clone(),
             enlist: self.enlist,
             encryption_options: self.encryption_options.clone(),
