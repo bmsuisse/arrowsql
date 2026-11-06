@@ -8,7 +8,7 @@
 //! a huge result never decodes or formats more than it shows. The Python side
 //! (`mssql_python.agent`) drives execute/nextset and turns errors into JSON.
 
-pub mod fmt;
+pub use arrowsql_core::fmt;
 mod render;
 mod sqltype;
 

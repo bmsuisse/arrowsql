@@ -61,8 +61,8 @@ module-name = "arrowsql.ddbc_bindings"
 python-packages = ["mssql_python"]
 features = ["pyo3/extension-module"]
 strip = true
-# The sdist must carry the patched mssql-tds (the Cargo.toml patch section);
-# maturin does not pick up patched path dependencies by itself. Dev-only trees stay out.
+# The sdist must carry the patched mssql-tds (a path dependency of both crates);
+# maturin does not pick it up by itself. Dev-only trees stay out.
 include = [{ path = "vendor/**/*", format = "sdist" }]
 exclude = [
   { path = ".claude/**", format = "sdist" },

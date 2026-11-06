@@ -4,8 +4,8 @@
 //! sink implements). `RowBuffer` stores each value as a compact `Cell`; text
 //! and binary payloads go into one shared byte arena, so a fetch of N rows
 //! performs O(1) allocations instead of one per string. The buffer is filled
-//! with the GIL released and the connection lock held, then turned into
-//! Python objects by `decode::python` with the GIL held and no lock held.
+//! with the connection lock held; the Python bindings turn it into Python
+//! objects afterwards, with no lock held.
 //!
 //! A different sink (e.g. the Arrow builder sink, see `arrow.rs`) implements
 //! the same `RowWriter` trait and plugs into `statement::read_rows_into`.
@@ -19,7 +19,7 @@ use mssql_tds::datatypes::column_values::{
 use mssql_tds::datatypes::decoder::DecimalParts;
 use mssql_tds::datatypes::row_writer::RowWriter;
 use mssql_tds::datatypes::sql_json::SqlJson;
-use super::python::narrow_ascii_utf16;
+use super::ascii::narrow_ascii_utf16;
 use mssql_tds::datatypes::sql_string::{EncodingType, SqlString};
 use mssql_tds::datatypes::sql_vector::SqlVector;
 use uuid::Uuid;

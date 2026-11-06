@@ -1,11 +1,9 @@
-//! Statement handles (`SqlHandle`) on top of one shared `SyncClient`.
+//! Statement handles (`SqlHandle`) for Python. The statement machinery
+//! (wire ownership, cursors, execution) is `arrowsql_core::statement`; this
+//! module adds the pyclass and the `DDBCSQL*` functions:
 //!
-//! * `wire`: which statement owns the connection's TDS stream and how it is
-//!   handed over (MARS emulation).
-//! * `cursor`: a statement's current and queued results; fetch and
-//!   next-result.
-//! * `exec`: running SQL (`execute`, `executemany`).
-//! * `odbc`: the `DDBCSQL*` Python functions, thin wrappers over the above.
+//! * `odbc`: the `DDBCSQL*` Python functions, thin wrappers over the core.
+//! * `batch_rpc`: executemany from Python rows.
 //!
 //! Concurrency model (see docs/ARCHITECTURE.md): lock order is always
 //! `ConnShared::slot` -> `StmtShared::state`, and both are only taken with the
@@ -13,33 +11,19 @@
 //! `RowBuffer` after the locks are dropped.
 
 pub(crate) mod batch_rpc;
-mod cancel;
-mod cursor;
-mod exec;
 mod odbc;
-mod wire;
 
 use crate::runtime::Lockable;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use mssql_tds::message::parameters::rpc_parameters::RpcParameter;
 use mssql_tds::query::metadata::ColumnMetadata;
-use parking_lot::Mutex;
 use pyo3::prelude::*;
 
-use crate::connection::ConnShared;
 use crate::consts::*;
 use crate::diag::DiagRecord;
-pub(crate) use cancel::StmtCancel;
-pub(crate) use wire::DRAIN_BUDGET_BYTES;
-use cursor::StmtState;
-use exec::{Command, execute_command};
-pub(crate) use exec::with_exclusive_wire;
+pub use arrowsql_core::statement::*;
 
-#[allow(unused_imports)] // the decode seam for new row sinks
-pub use cursor::read_rows_into;
-pub use cursor::{BatchSink, diag_records, fetch_into, result_columns};
 pub use odbc::{
     check_error, raise_for, describe_col, exec_direct, execute, execute_many, fetch_all, fetch_many,
     fetch_one, fetch_scroll, free_handle, get_all_diag_records, more_results, num_result_cols,
@@ -47,83 +31,6 @@ pub use odbc::{
 };
 pub use odbc::append_messages;
 pub use batch_rpc::execute_many_rows;
-pub use wire::{Slot, abandon_result, discard_all, free_for_connection};
-
-static NEXT_STMT_ID: AtomicU64 = AtomicU64::new(1);
-
-pub struct StmtShared {
-    pub id: u64,
-    pub conn: Arc<ConnShared>,
-    pub(crate) state: Mutex<StmtState>,
-    /// `SQL_ATTR_QUERY_TIMEOUT` in seconds; atomic so setting it never waits
-    /// behind a running fetch.
-    query_timeout: AtomicU32,
-    /// Separate lock so `_cancel` from another thread never waits on a fetch.
-    cancel: Mutex<Option<Arc<StmtCancel>>>,
-    /// An execution is between publishing its cancel handle and finishing;
-    /// `_cancel` must reach it even while it still waits for the wire.
-    executing: AtomicBool,
-    /// A `fetchall` is running. Between its batches the statement lock is
-    /// free while the rows are converted to Python objects; a `_cancel` in
-    /// that gap must still arm the cancellation, or the next batch would
-    /// never notice it.
-    fetching_all: AtomicBool,
-}
-
-impl StmtShared {
-    pub fn new(conn: Arc<ConnShared>) -> Arc<Self> {
-        Arc::new(Self {
-            id: NEXT_STMT_ID.fetch_add(1, Ordering::Relaxed),
-            conn,
-            state: Mutex::new(StmtState::new()),
-            query_timeout: AtomicU32::new(0),
-            cancel: Mutex::new(None),
-            executing: AtomicBool::new(false),
-            fetching_all: AtomicBool::new(false),
-        })
-    }
-
-    pub fn query_timeout(&self) -> u32 {
-        self.query_timeout.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn set_query_timeout(&self, seconds: u32) {
-        self.query_timeout.store(seconds, Ordering::Relaxed);
-    }
-
-    pub(crate) fn cancel_execution(&self) {
-        // Like SQLCancel, only an operation in flight is cancelled: an
-        // execution (flagged from before it waits for the wire) or a fetch
-        // (which holds the state lock). Arming the handle of an idle
-        // statement would instead fail a later, unrelated read on its batch.
-        if !self.executing.load(Ordering::Acquire)
-            && !self.fetching_all.load(Ordering::Acquire)
-            && let Some(idle) = self.state.try_lock()
-        {
-            drop(idle);
-            return;
-        }
-        if let Some(cancel) = self.cancel.lock().as_ref() {
-            cancel.cancel();
-        }
-    }
-}
-
-/// Marks `stmt` as running a `fetchall` until dropped.
-pub(crate) struct FetchingAll<'a>(&'a StmtShared);
-
-impl<'a> FetchingAll<'a> {
-    pub(crate) fn enter(stmt: &'a StmtShared) -> Self {
-        stmt.fetching_all.store(true, Ordering::Release);
-        Self(stmt)
-    }
-}
-
-impl Drop for FetchingAll<'_> {
-    fn drop(&mut self) {
-        self.0.fetching_all.store(false, Ordering::Release);
-    }
-}
 
 pub fn stmt_of(handle: &Bound<'_, PyAny>) -> PyResult<Arc<StmtShared>> {
     Ok(handle.cast::<SqlHandle>()?.get().inner.clone())
@@ -143,20 +50,7 @@ pub struct SqlHandle {
 /// Close the statement's cursor; with `free` also retire the handle. Returns
 /// whether the handle had already been freed.
 fn close_cursor(py: Python<'_>, stmt: &Arc<StmtShared>, free: bool) -> bool {
-    // Closing from another thread while an execution runs cancels it first;
-    // otherwise the slot lock below would wait for the statement to finish.
-    stmt.cancel_execution();
-    py.detach(|| {
-        let mut slot = stmt.conn.slot.lock_checked();
-        wire::discard_if_owner(&mut slot, stmt.id);
-        let mut state = stmt.state.lock_checked();
-        let was_freed = state.is_freed();
-        state.reset_results();
-        if free {
-            state.mark_freed();
-        }
-        was_freed
-    })
+    py.detach(|| close(stmt, free))
 }
 
 #[pymethods]

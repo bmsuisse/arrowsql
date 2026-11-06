@@ -14,6 +14,39 @@ Version numbers in this project are deliberately three different things:
 
 ## [Unreleased]
 
+### Added
+
+- `crates/arrowsql-core`: the driver core as a Rust crate without pyo3
+  (connect, execute, fetch, Arrow decoding, pooling), with a public API for
+  other Rust crates: `Connection::connect` / `execute`, `Statement::next_batch`
+  / `into_reader`, and `read_arrow_stream(options, query, Partitioning,
+  ReadOptions)`, a cancellable, `Send` Arrow `RecordBatchReader` over a
+  partitioned parallel read. The Python extension is a pyo3 layer over it; no
+  behaviour change for Python.
+- `arrowsql-core`: the partitions of a read as separate readers or Arrow C
+  streams. `plan_partitions` returns the planned `Slice`s, each opens on its
+  own connection (`Slice::open`, `Slice::open_ffi_stream`), so Spark tasks or
+  pyarrow in another shared library read them zero-copy;
+  `ParallelReader::into_ffi_stream` / `StatementReader::into_ffi_stream`
+  export the merged and single-statement readers the same way.
+- `crates/arrowsql-rowcount`: a pure-Rust example and integration test of the
+  core API (single, merged parallel and per-partition Arrow C stream reads).
+
+### Changed
+
+- `read_arrow` / `read_arrow_stream`: slice planning, the MIN/MAX and catalog
+  probes, the worker threads and the merge run in Rust (`arrowsql-core`);
+  `arrow_parallel.py` only checks arguments. Same plans, rows and exception
+  classes as before (parity tests against the previous implementation in
+  `tests/common_issues/test_rs_read_arrow_parity.py`); invalid
+  `partition_bounds` now fail before the first connection is opened. The
+  UTF-8 transfer rewrite (`utf8_strings`) moved to Rust as well.
+- Rust dependents of `arrowsql-core`: the core declares no global allocator
+  (mimalloc is the `ddbc_bindings` default feature `mimalloc`), and both
+  crates depend on `vendor/mssql-tds` by path instead of a `[patch]`, so a git
+  dependency on the core builds the patched TDS crate without a patch section
+  of its own. Workspace-wide `cargo test` / `clippy` take `--exclude mssql-tds`.
+
 ### Fixed
 
 - `write_arrow(..., workers > 1)` accepts an iterable of record batches (list, generator, objects

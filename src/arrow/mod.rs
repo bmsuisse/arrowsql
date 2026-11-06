@@ -5,15 +5,16 @@
 //!   buffers; plugged into `statement::fetch_into` like `RowBuffer` is into
 //!   the row fetch. Batches are decoded with the GIL released.
 //! * `export`: PyCapsule export (Arrow C Data / C Stream interfaces) and the
-//!   zero-dependency `ArrowTable` / `ArrowStream` classes.
+//!   zero-dependency `ArrowTable` / `ArrowStream` classes over
+//!   `arrowsql_core::arrow::stream`.
 //!
 //! Entry points: `DDBCSQLFetchArrowBatch` (upstream's `cursor.arrow*()`
 //! contract), `DDBCArrowFetchTable` (`cursor.fetchall_arrow()` /
 //! `fetchmany_arrow()`), `DDBCArrowStream` (`cursor.arrow_stream()`).
 
 pub mod export;
-pub mod plan;
-pub mod sink;
+
+pub use arrowsql_core::arrow::{DEFAULT_BATCH_ROWS, plan, sink};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -22,23 +23,16 @@ use pyo3::types::PyList;
 use crate::consts::*;
 use std::sync::Arc;
 
-use crate::statement::{self, BatchSink, StmtCancel};
+use crate::statement::{self, StmtCancel};
 use export::{ArrowMergeStream, ArrowStream, ArrowTable};
 use plan::Plan;
 use sink::ArrowSink;
-
-/// Rows per batch when the caller doesn't care (native API default).
-pub const DEFAULT_BATCH_ROWS: usize = 65_536;
 
 /// The statement lock is waited for with the GIL released: a thread running a
 /// query on this statement holds it, and that thread may need the GIL (to look
 /// at signals) before it can let go.
 fn current_plan(py: Python<'_>, stmt: &statement::StmtShared) -> PyResult<(Plan, u64, Option<Arc<StmtCancel>>)> {
-    let Some((columns, generation, execution)) = py.detach(|| statement::result_columns(stmt)) else {
-        return Err(PyRuntimeError::new_err("No active result set. Cannot fetch Arrow batch."));
-    };
-    let plan = Plan::new(&columns).map_err(PyRuntimeError::new_err)?;
-    Ok((plan, generation, execution))
+    py.detach(|| arrowsql_core::arrow::current_plan(stmt)).map_err(PyRuntimeError::new_err)
 }
 
 /// Upstream contract: fetch up to `arrowBatchSize` rows as one record batch,
@@ -85,40 +79,11 @@ pub fn fetch_arrow_table(
 ) -> PyResult<(i16, ArrowTable)> {
     let stmt = statement::stmt_of(StatementHandle)?;
     let (plan, _, _) = current_plan(py, &stmt)?;
-    let batch_size = batch_size.max(1);
-    let mut remaining = if max_rows < 0 { usize::MAX } else { max_rows as usize };
-    let (ret, info, batches) = py.detach(|| {
-        let mut batches = Vec::new();
-        let mut info = Vec::new();
-        let mut ret = SQL_SUCCESS;
-        while remaining > 0 {
-            let want = remaining.min(batch_size);
-            let mut sink = ArrowSink::new(&plan, want);
-            let fetched = statement::fetch_into(&stmt, &mut sink, want, None);
-            info.extend(fetched.info);
-            match fetched.ret {
-                SQL_SUCCESS => {}
-                SQL_SUCCESS_WITH_INFO => ret = SQL_SUCCESS_WITH_INFO,
-                SQL_NO_DATA => break,
-                other => {
-                    ret = other;
-                    break;
-                }
-            }
-            let got = sink.rows();
-            match sink.finish() {
-                Ok(batch) => batches.push(batch),
-                Err(err) => return (Err(err), info, batches),
-            }
-            remaining -= got;
-            // A short batch is not the end: an error that cut it short is
-            // reported by the next fetch, which is what ends the loop.
-        }
-        (Ok(ret), info, batches)
-    });
-    statement::append_messages(py, messages, &info)?;
-    let ret = ret.map_err(PyRuntimeError::new_err)?;
-    Ok((ret, ArrowTable::new(plan.schema, batches)))
+    let max_rows = if max_rows < 0 { usize::MAX } else { max_rows as usize };
+    let fetched = py.detach(|| arrowsql_core::arrow::fetch_table(&stmt, &plan, max_rows, batch_size));
+    statement::append_messages(py, messages, &fetched.info)?;
+    let ret = fetched.ret.map_err(PyRuntimeError::new_err)?;
+    Ok((ret, ArrowTable::new(plan.schema, fetched.batches)))
 }
 
 /// Stream the rest of the current result as Arrow batches decoded ahead on a

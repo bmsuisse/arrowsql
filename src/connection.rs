@@ -5,9 +5,8 @@
 //! `RuntimeError("SQLSTATE:XXXXX:NATIVE:<n>:<message>")`.
 
 use crate::runtime::Lockable;
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::runtime::SyncClient;
 use mssql_tds::connection::tds_client::StatementResult;
@@ -19,145 +18,13 @@ use pyo3::types::{PyByteArray, PyBytes, PyDict, PyTuple};
 use crate::consts::*;
 use crate::diag::{self, DiagRecord};
 use crate::pooling::{self, Acquired, IdleClient, Lease};
-use crate::params::udt::DescribedParam;
-use crate::statement::{SqlHandle, StmtShared};
+use crate::statement::{Slot, SqlHandle, StmtShared};
+pub use arrowsql_core::connection::*;
 
-pub use crate::statement::Slot;
 
-const PARAM_TYPE_CACHE_SIZE: usize = 512;
 /// A pooled session whose token expires within this many seconds is
 /// re-validated against the token factory on checkout.
 const TOKEN_REFRESH_THRESHOLD_SECS: i64 = 300;
-const READ_COMMITTED_SQL: &str = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED";
-
-/// Session settings requested before the connection could apply them. They
-/// are sent ahead of the next statement and cleared only once that succeeded.
-#[derive(Default, Clone, PartialEq)]
-pub struct PendingSession {
-    isolation: Option<&'static str>,
-    catalog: Option<String>,
-}
-
-impl PendingSession {
-    pub fn sql(&self) -> Vec<String> {
-        let mut statements: Vec<String> = self.isolation.map(str::to_string).into_iter().collect();
-        statements.extend(self.catalog.as_deref().map(|db| format!("USE {}", quote_ident(db))));
-        statements
-    }
-}
-
-pub struct ConnShared {
-    pub slot: Mutex<Slot>,
-    autocommit: AtomicBool,
-    /// The last statement failed; if it also took the transaction with it the
-    /// next statement may have to be rejected (see `exec::rejects_after_abort`).
-    /// The open transaction was begun by the driver and ran nothing yet.
-    txn_untouched: AtomicBool,
-    last_failed: AtomicBool,
-    /// XACT_ABORT rolled the caller's transaction back and no statement told them yet.
-    txn_aborted: AtomicBool,
-    connection_timeout: AtomicU32,
-    pending_session: Mutex<PendingSession>,
-    /// sp_describe_undeclared_parameters results per SQL text.
-    param_types: Mutex<HashMap<String, Arc<[DescribedParam]>>>,
-}
-
-impl ConnShared {
-    fn new(client: SyncClient, attrs: &ConnAttrs) -> Arc<Self> {
-        Arc::new(Self {
-            slot: Mutex::new(Slot { client: Some(client), owner: None }),
-            autocommit: AtomicBool::new(attrs.autocommit),
-            txn_untouched: AtomicBool::new(false),
-            last_failed: AtomicBool::new(false),
-            txn_aborted: AtomicBool::new(false),
-            connection_timeout: AtomicU32::new(attrs.connection_timeout),
-            pending_session: Mutex::new(attrs.pending.clone()),
-            param_types: Mutex::new(HashMap::new()),
-        })
-    }
-
-    pub fn autocommit(&self) -> bool {
-        self.autocommit.load(Ordering::Acquire)
-    }
-
-    pub fn mark_failed(&self) {
-        self.last_failed.store(true, Ordering::Release);
-    }
-
-    pub fn set_txn_untouched(&self, untouched: bool) {
-        self.txn_untouched.store(untouched, Ordering::Release);
-    }
-
-    /// Whether the open transaction is still the driver's empty one; the
-    /// caller is about to use it.
-    pub fn take_txn_untouched(&self) -> bool {
-        self.txn_untouched.swap(false, Ordering::AcqRel)
-    }
-
-    pub fn mark_txn_aborted(&self) {
-        self.txn_aborted.store(true, Ordering::Release);
-    }
-
-    pub fn txn_aborted(&self) -> bool {
-        self.txn_aborted.load(Ordering::Acquire)
-    }
-
-    /// Ends the aborted state (commit or rollback).
-    pub fn clear_txn_aborted(&self) {
-        self.txn_aborted.store(false, Ordering::Release);
-    }
-
-    pub fn take_failed(&self) -> bool {
-        self.last_failed.swap(false, Ordering::AcqRel)
-    }
-
-    pub fn cached_param_types(&self, sql: &str) -> Option<Arc<[DescribedParam]>> {
-        self.param_types.lock().get(sql).cloned()
-    }
-
-    pub fn cache_param_types(&self, sql: &str, types: Arc<[DescribedParam]>) {
-        let mut cache = self.param_types.lock();
-        // Drop one entry rather than all of them, so the hot statements stay cached.
-        if cache.len() >= PARAM_TYPE_CACHE_SIZE && !cache.contains_key(sql) {
-            if let Some(key) = cache.keys().next().cloned() {
-                cache.remove(&key);
-            }
-        }
-        cache.insert(sql.to_string(), types);
-    }
-
-    /// Settings still waiting to be sent. The caller clears them with
-    /// [`clear_applied_session`](Self::clear_applied_session) once they ran.
-    pub fn pending_session(&self) -> PendingSession {
-        self.pending_session.lock().clone()
-    }
-
-    /// Forget the settings in `applied`, unless a newer value replaced them.
-    pub fn clear_applied_session(&self, applied: &PendingSession) {
-        let mut pending = self.pending_session.lock();
-        if pending.isolation == applied.isolation {
-            pending.isolation = None;
-        }
-        if pending.catalog == applied.catalog {
-            pending.catalog = None;
-        }
-    }
-
-    /// An explicit `set_attr` supersedes a queued value of the same kind.
-    fn supersede_isolation(&self) {
-        self.pending_session.lock().isolation = None;
-    }
-
-    fn supersede_catalog(&self) {
-        self.pending_session.lock().catalog = None;
-    }
-}
-
-/// `SQLSTATE:<state>:NATIVE:<number>:<message>`, the RuntimeError text the Python
-/// layer maps to a DB-API exception class.
-pub(crate) fn error_text(record: &DiagRecord) -> String {
-    format!("SQLSTATE:{}:NATIVE:{}:{}", record.sqlstate, record.native_error, record.message)
-}
 
 fn runtime_error(records: &[DiagRecord]) -> PyErr {
     Python::attach(|py| crate::errors::raise_connection_records(py, records))
@@ -173,21 +40,6 @@ fn tds_error(err: &mssql_tds::error::Error, default_state: &str) -> PyErr {
 
 fn connection_closed() -> PyErr {
     driver_error("08003", "Connection is closed")
-}
-
-fn isolation_sql(level: i64) -> Option<&'static str> {
-    Some(match level {
-        SQL_TXN_READ_UNCOMMITTED => "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED",
-        SQL_TXN_READ_COMMITTED => READ_COMMITTED_SQL,
-        SQL_TXN_REPEATABLE_READ => "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
-        SQL_TXN_SERIALIZABLE => "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
-        SQL_TXN_SS_SNAPSHOT => "SET TRANSACTION ISOLATION LEVEL SNAPSHOT",
-        _ => return None,
-    })
-}
-
-fn quote_ident(name: &str) -> String {
-    format!("[{}]", name.replace(']', "]]"))
 }
 
 /// Connection attributes handed to the constructor (`attrs_before`).
@@ -276,39 +128,18 @@ fn call_token_factory(py: Python<'_>, factory: &Py<PyAny>) -> PyResult<FactoryTo
     Ok(FactoryToken { token, expiry })
 }
 
-/// Bridges a Python `(spn, sts_url, auth_method) -> UTF-16LE JWT bytes`
-/// callable to mssql-tds' federated-auth hook. The server names the tenant
-/// (STS URL) mid-login, which is why the token cannot be fetched up front for
-/// `ActiveDirectoryServicePrincipal` / `ActiveDirectoryPassword`.
-#[derive(Clone)]
-struct PyTokenFactory(Arc<Py<PyAny>>);
+/// A Python `(spn, sts_url, auth_method) -> UTF-16LE JWT bytes` callable as
+/// the core's federated-auth hook. The server names the tenant (STS URL)
+/// mid-login, which is why the token cannot be fetched up front for
+/// `ActiveDirectoryServicePrincipal` / `ActiveDirectoryPassword`. The core
+/// calls it on a blocking thread, off the reactor (it does network I/O under
+/// the GIL).
+struct PyTokenFactory(Py<PyAny>);
 
-#[async_trait::async_trait]
-impl mssql_tds::connection::client_context::EntraIdTokenFactory for PyTokenFactory {
-    async fn create_token(
-        &self,
-        spn: String,
-        sts_url: String,
-        auth_method: mssql_tds::connection::client_context::TdsAuthenticationMethod,
-    ) -> mssql_tds::core::TdsResult<Vec<u8>> {
-        let factory = self.0.clone();
-        // The callable does network I/O under the GIL: keep it off the reactor.
-        // On the shared runtime, not the connection's own: when the login times
-        // out that runtime is dropped, and dropping waits for blocking tasks.
-        let runtime = crate::runtime::try_runtime().map_err(|e| {
-            mssql_tds::error::Error::ConnectionError(format!("failed to start the mssql-rs I/O runtime: {e}"))
-        })?;
-        let outcome = runtime.spawn_blocking(move || {
-            Python::attach(|py| -> PyResult<Vec<u8>> {
-                factory.bind(py).call1((spn, sts_url, format!("{auth_method:?}")))?.extract()
-            })
-        })
-        .await;
-        match outcome {
-            Ok(Ok(token)) => Ok(token),
-            Ok(Err(e)) => Err(mssql_tds::error::Error::ConnectionError(format!("Entra ID token acquisition failed: {e}"))),
-            Err(e) => Err(mssql_tds::error::Error::ConnectionError(format!("Entra ID token acquisition aborted: {e}"))),
-        }
+impl arrowsql_core::FedAuthProvider for PyTokenFactory {
+    fn token(&self, spn: &str, sts_url: &str, auth_method: &str) -> Result<Vec<u8>, arrowsql_core::Error> {
+        Python::attach(|py| -> PyResult<Vec<u8>> { self.0.bind(py).call1((spn, sts_url, auth_method))?.extract() })
+            .map_err(|e| arrowsql_core::Error::external(Box::new(e)))
     }
 }
 
@@ -346,6 +177,14 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// The session, for the core's Rust API (`arrowsql_core::Connection`).
+    pub fn shared(&self) -> PyResult<Arc<ConnShared>> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(connection_closed());
+        }
+        Ok(self.shared.clone())
+    }
+
     fn client_op<T>(
         &self,
         py: Python<'_>,
@@ -603,21 +442,13 @@ fn connect(
     token: Option<String>,
     expiry: i64,
 ) -> PyResult<Session> {
-    let federated = federated.map(|f| {
-        Box::new(PyTokenFactory(Arc::new(f.clone_ref(py))))
-            as Box<dyn mssql_tds::connection::client_context::CloneableEntraIdTokenFactory>
-    });
-    let (mut context, opts) = crate::connstr::build_context_with(conn_str, token.clone(), federated).map_err(|msg| {
-        let state = if msg == crate::connstr::MISSING_SERVER { "08001" } else { "HY000" };
-        driver_error(state, msg)
-    })?;
-    if let Some(timeout) = attrs.login_timeout.or(opts.login_timeout) {
-        context.connect_timeout = timeout;
-    }
-    let datasource = context.data_source.clone();
+    let federated = federated
+        .map(|f| Arc::new(PyTokenFactory(f.clone_ref(py))) as Arc<dyn arrowsql_core::FedAuthProvider>);
+    let login_timeout = attrs.login_timeout;
+    let login_token = token.clone();
     let client = py
-        .detach(|| SyncClient::connect(context, &datasource))
-        .map_err(|e| runtime_error(&diag::login_records_for_error(&e)))?;
+        .detach(|| crate::connection::open_client(conn_str, login_token, federated, login_timeout))
+        .map_err(|records| runtime_error(&records))?;
     Ok(Session { client, token, token_expiry: expiry, connection_timeout: 0, reused: false })
 }
 
@@ -670,7 +501,7 @@ impl Connection {
             token_expiry: session.token_expiry,
         });
         Ok(Self {
-            shared: ConnShared::new(session.client, &attrs),
+            shared: ConnShared::new(session.client, attrs.autocommit, attrs.connection_timeout, attrs.pending.clone()),
             closed: AtomicBool::new(false),
             pool: Mutex::new(pool),
         })

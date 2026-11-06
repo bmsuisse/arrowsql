@@ -31,7 +31,6 @@ use super::UNICODE_ENCODE_PREFIX;
 const MAX_NUMERIC_PRECISION: u32 = 38;
 
 /// WKT prefixes that bind as NVARCHAR regardless of the text's encoding.
-const GEOMETRY_WKT_PREFIXES: [&str; 3] = ["POINT", "LINESTRING", "POLYGON"];
 
 const NON_FINITE_DECIMAL_MESSAGE: &str =
     "Cannot bind non-finite Decimal (NaN/Infinity) as SQL NUMERIC";
@@ -293,12 +292,7 @@ pub(crate) fn py_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
                 "{DATA_VALUE_ERROR_PREFIX}integer {digits} is out of range for SQL BIGINT [-2^63, 2^63-1]"
             )));
         };
-        return Ok(match value {
-            0..=255 => SqlType::TinyInt(Some(value as u8)),
-            -32_768..=32_767 => SqlType::SmallInt(Some(value as i16)),
-            -2_147_483_648..=2_147_483_647 => SqlType::Int(Some(value as i32)),
-            _ => SqlType::BigInt(Some(value)),
-        });
+        return Ok(arrowsql_core::params::int_sql_type(value));
     }
 
     if py_obj.is_instance_of::<PyFloat>() {
@@ -309,32 +303,7 @@ pub(crate) fn py_to_sql_type(py_obj: &Bound<'_, PyAny>) -> TdsResult<SqlType> {
     }
 
     if py_obj.is_instance_of::<PyString>() {
-        let value = str_text(py_obj)?;
-        // Geometry WKT binds as NVARCHAR even when it is ASCII, as upstream does.
-        let is_geometry = GEOMETRY_WKT_PREFIXES
-            .iter()
-            .any(|prefix| value.starts_with(prefix));
-        let narrow = value.is_ascii() && !is_geometry;
-        let length = if narrow {
-            value.len()
-        } else {
-            value.encode_utf16().count()
-        }
-        .max(1);
-        let value = SqlString::from_utf8_string(value);
-        // Inferred strings use the 4000-unit boundary for both types, so
-        // anything longer is declared MAX rather than an 8000-byte varchar.
-        return Ok(if narrow {
-            match u16::try_from(length) {
-                Ok(length) if length <= 4_000 => SqlType::Varchar(Some(value), length),
-                _ => SqlType::VarcharMax(Some(value)),
-            }
-        } else {
-            match u16::try_from(length) {
-                Ok(length) if length <= 4_000 => SqlType::NVarchar(Some(value), length),
-                _ => SqlType::NVarcharMax(Some(value)),
-            }
-        });
+        return Ok(arrowsql_core::params::str_sql_type(str_text(py_obj)?));
     }
 
     if py_obj.is_instance_of::<PyDateTime>() {

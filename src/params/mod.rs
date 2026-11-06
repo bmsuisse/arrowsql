@@ -8,15 +8,13 @@
 //! (`sp_describe_undeclared_parameters`, see `null_types`), as upstream did
 //! with SQLDescribeParam.
 
-pub mod batch;
-pub mod null_types;
-pub mod placeholders;
+pub use arrowsql_core::params::*;
+
 pub mod py_types;
 pub mod pyformat;
 pub mod udt;
 
 use mssql_tds::datatypes::sqltypes::SqlType;
-use mssql_tds::message::parameters::rpc_parameters::{RpcParameter, StatusFlags};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyUnicodeEncodeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -67,56 +65,6 @@ fn saturating_size(value: &Bound<'_, PyAny>) -> PyResult<u64> {
         ));
     }
     Ok(u64::MAX)
-}
-
-/// Converted parameters, before naming. `untyped_nulls` lists positions of
-/// `None` values with no type hint: their SQL type is resolved against the
-/// server (`resolve_null_types`) because no single NULL type converts
-/// implicitly to every column type (e.g. nvarchar -> varbinary fails).
-pub struct ParamSet {
-    pub types: Vec<SqlType>,
-    pub untyped_nulls: Vec<usize>,
-}
-
-/// `@Pn` without going through the `format!` machinery: it runs once per
-/// parameter per row in `executemany`.
-pub(crate) fn param_name(n: usize) -> String {
-    let mut digits = [0u8; 20];
-    let mut at = digits.len();
-    let mut rest = n;
-    loop {
-        at -= 1;
-        digits[at] = b'0' + (rest % 10) as u8;
-        rest /= 10;
-        if rest == 0 {
-            break;
-        }
-    }
-    let mut name = String::with_capacity(2 + digits.len() - at);
-    name.push_str("@P");
-    for &d in &digits[at..] {
-        name.push(d as char);
-    }
-    name
-}
-
-impl ParamSet {
-    pub fn into_rpc(self) -> Vec<RpcParameter> {
-        self.types
-            .into_iter()
-            .enumerate()
-            .map(|(i, t)| RpcParameter::new(Some(param_name(i + 1)), StatusFlags::NONE, t))
-            .collect()
-    }
-
-    /// The parameters without names, for `execute_sp_executesql_positional`,
-    /// which names parameter `n` `@Pn` itself.
-    pub fn into_unnamed_rpc(self) -> Vec<RpcParameter> {
-        self.types
-            .into_iter()
-            .map(|t| RpcParameter::new(None, StatusFlags::NONE, t))
-            .collect()
-    }
 }
 
 /// Statements with more parameters than this are bulk inserts or long IN lists.
@@ -180,22 +128,6 @@ pub fn build_rpc_params(
     Ok(ParamSet { types, untyped_nulls })
 }
 
-/// Prefix of a conversion message for a value SQL Server would reject with a
-/// data exception (SQLSTATE 22xxx). Raised as PEP 249 `DataError`.
-pub(crate) const DATA_ERROR_PREFIX: &str = "data exception: ";
-
-/// Prefix of a conversion message that is both a `DataError` and, for backward
-/// compatibility with earlier releases, a `ValueError`.
-pub(crate) const DATA_VALUE_ERROR_PREFIX: &str = "data value exception: ";
-
-/// Prefix of a conversion message that upstream raises as a bare `RuntimeError`
-/// (a tz offset outside SQL Server's range).
-pub(crate) const RUNTIME_ERROR_PREFIX: &str = "runtime error: ";
-
-/// Prefix of a conversion message raised as `IndexError`: an `executemany` row
-/// narrower or wider than the first (upstream indexes `row[col]` and fails there).
-pub(crate) const INDEX_ERROR_PREFIX: &str = "index error: ";
-
 /// Maps a conversion failure to the Python exception upstream raises for it.
 ///
 /// `TypeConversionError` marks a value the target type cannot represent
@@ -231,10 +163,6 @@ pub fn conversion_error(err: &mssql_tds::error::Error) -> PyErr {
         other => PyTypeError::new_err(other.to_string()),
     }
 }
-
-/// Marks a `UsageError` for a str that cannot be encoded (a lone surrogate); the
-/// rest of the message is the encoder's reason. Raised as `UnicodeEncodeError`.
-pub(crate) const UNICODE_ENCODE_PREFIX: &str = "unicode encode error: ";
 
 static DATA_VALUE_ERROR_CLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 

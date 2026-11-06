@@ -1,7 +1,7 @@
 # Vendored mssql-tds
 
 Source: https://github.com/microsoft/mssql-rs, crate `mssql-tds`, commit
-6b6b48ecbbbdad297039d1641e2be4775eed998b (the rev pinned in ../../Cargo.toml).
+6b6b48ecbbbdad297039d1641e2be4775eed998b (the upstream commit this copy is taken from).
 MIT, see LICENSE. Only `src/`, `README.md` and a trimmed `Cargo.toml` (no
 benches, dev-dependencies or workspace lints) are kept.
 
@@ -125,5 +125,7 @@ Local patches (search for `VENDOR PATCH`):
     as msodbcsql does when no `Failover_Partner` is configured. Found against a production
     SQL Server in a mirroring session (`tests/port/test_mirroring_partner.py`).
 
-To drop the vendored copy, delete this directory and the `[patch]` section
-in ../../Cargo.toml once the fix is in the pinned upstream rev.
+`ddbc_bindings` and `crates/arrowsql-core` depend on this directory by path
+(no `[patch]`), so a crate that depends on arrowsql-core by git builds the
+patched copy too. To drop the vendored copy once the fixes are upstream,
+point both manifests back at the upstream git rev.

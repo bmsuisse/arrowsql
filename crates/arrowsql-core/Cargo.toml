@@ -1,0 +1,31 @@
+[package]
+name = "arrowsql-core"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+description = "SQL Server over TDS into Arrow record batches: the Python-free core of arrowsql"
+publish = false
+
+[features]
+# Legacy TLS: native-tls (OpenSSL) + OpenSSL Always Encrypted crypto instead of rustls.
+native-tls = ["mssql-tds/native-tls-backend"]
+
+[dependencies]
+# Microsoft's native TDS implementation (MIT), vendored with local patches
+# (vendor/mssql-tds/VENDOR.md): a path dependency, so a git dependent of this
+# crate builds the patched copy without a [patch] section.
+mssql-tds = { path = "../../vendor/mssql-tds", default-features = false, features = ["gssapi", "rustls-tls"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros"] }
+parking_lot = "0.12"
+uuid = "1"
+arrow-array = { version = "60", default-features = false, features = ["ffi"] }
+arrow-buffer = "60"
+arrow-schema = { version = "60", features = ["ffi"] }
+encoding_rs = "0.8"
+async-trait = "0.1"
+log = "0.4"
+
+# Windows: in-tree Schannel TLS (msodbcsql's stack) instead of rustls, which fails the
+# handshake with SQL Server's self-generated certificate on Windows.
+[target.'cfg(windows)'.dependencies]
+mssql-tds = { path = "../../vendor/mssql-tds", default-features = false, features = ["gssapi", "rustls-tls", "tls-schannel-direct-on-windows"] }

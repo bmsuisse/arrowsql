@@ -6,23 +6,39 @@ license = "MIT"
 description = "Rust (PyO3 + mssql-tds) replacement for mssql-python's ODBC-based ddbc_bindings"
 publish = false
 
+[workspace]
+members = [".", "crates/*"]
+# vendor/mssql-tds is a member too (a path dependency under the root), but its
+# tests need dev-dependencies the vendored copy leaves out: workspace-wide
+# cargo test / clippy runs pass `--exclude mssql-tds`.
+resolver = "3"
+
 [lib]
 name = "ddbc_bindings"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+default = ["mimalloc"]
+# mimalloc as the process allocator of the extension module (the core
+# declares none, so a Rust dependent keeps its own).
+mimalloc = ["dep:mimalloc"]
 # Legacy TLS: native-tls (OpenSSL) + OpenSSL Always Encrypted crypto instead of rustls.
 # Adds ~8 MB (libssl, libcrypto, libzstd) to the wheel. Build: maturin build --features native-tls
-native-tls = ["mssql-tds/native-tls-backend"]
+native-tls = ["mssql-tds/native-tls-backend", "arrowsql-core/native-tls"]
 
 [dependencies]
 pyo3 = { version = "0.29.0", features = ["extension-module"] }
-# Microsoft's native TDS implementation (MIT). Pinned: the API is pre-1.0.
-mssql-tds = { git = "https://github.com/microsoft/mssql-rs", rev = "6b6b48ecbbbdad297039d1641e2be4775eed998b", default-features = false, features = ["gssapi", "rustls-tls"] }
+# Connect/execute/fetch, Arrow decoding and the parallel read, without pyo3.
+arrowsql-core = { path = "crates/arrowsql-core" }
+log = "0.4"
+# Microsoft's native TDS implementation (MIT), vendored with local patches
+# (vendor/mssql-tds/VENDOR.md). A path dependency, so crates that depend on
+# arrowsql-core by git get the patched copy without a [patch] of their own.
+mssql-tds = { path = "vendor/mssql-tds", default-features = false, features = ["gssapi", "rustls-tls"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros"] }
 parking_lot = "0.12"
 uuid = "1"
-mimalloc = { version = "0.1", default-features = false }
+mimalloc = { version = "0.1", default-features = false, optional = true }
 # Arrow arrays + the C Data / C Stream interfaces (src/arrow/). Columns are
 # built with our own buffers and only wrapped as arrow-rs arrays for export.
 arrow-array = { version = "60", default-features = false, features = ["ffi"] }
@@ -36,13 +52,13 @@ async-trait = "0.1"
 # Windows: in-tree Schannel TLS (msodbcsql's stack) instead of rustls, which fails the
 # handshake with SQL Server's self-generated certificate on Windows.
 [target.'cfg(windows)'.dependencies]
-mssql-tds = { git = "https://github.com/microsoft/mssql-rs", rev = "6b6b48ecbbbdad297039d1641e2be4775eed998b", default-features = false, features = ["gssapi", "rustls-tls", "tls-schannel-direct-on-windows"] }
+mssql-tds = { path = "vendor/mssql-tds", default-features = false, features = ["gssapi", "rustls-tls", "tls-schannel-direct-on-windows"] }
 
 # musl cannot load a shared library that uses initial-exec TLS through dlopen
 # ("initial-exec TLS resolves to dynamic definition"): mimalloc's thread-local
 # heap pointer has to use the local-dynamic model there.
 [target.'cfg(target_env = "musl")'.dependencies]
-mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"], optional = true }
 
 [build-dependencies]
 pyo3-build-config = "0.29.0"
@@ -63,11 +79,6 @@ codegen-units = 1
 panic = "unwind"
 # Stripped symbols: smaller .so, no effect on speed (no runtime symbolication needed).
 strip = true
-
-# Microsoft's mssql-tds at the pinned rev, with one local patch (see
-# vendor/mssql-tds/VENDOR.md). Remove when the fix is upstream.
-[patch."https://github.com/microsoft/mssql-rs"]
-mssql-tds = { path = "vendor/mssql-tds" }
 
 # Hot crates at opt-level 3: the bindings with the inlined mssql-tds, pyo3 and
 # tokio, plus allocator, text decoding, buffers and record-layer crypto.
@@ -92,6 +103,8 @@ opt-level = 3
 [profile.release.package.arrow-data]
 opt-level = 3
 [profile.release.package.ddbc_bindings]
+opt-level = 3
+[profile.release.package.arrowsql-core]
 opt-level = 3
 [profile.release.package.mssql-tds]
 opt-level = 3
