@@ -1,9 +1,9 @@
 //! The result cursor of one statement: rows already decoded, results queued
 //! behind the current one, and the fetch / next-result operations on them.
 //!
-//! Rows are pulled from the wire into `StmtState::pending` with the GIL
-//! released; the caller converts them to Python objects after dropping the
-//! locks.
+//! Rows are pulled from the wire into `StmtState::pending` under the
+//! statement's locks; a host converts them (e.g. to Python objects) after
+//! dropping the locks.
 
 use crate::runtime::Lockable;
 use std::collections::VecDeque;
@@ -50,20 +50,20 @@ impl BufferedResult {
 #[derive(Default)]
 pub struct StmtState {
     pub diag: Vec<DiagRecord>,
-    pub(super) columns: Option<Arc<Vec<ColumnMetadata>>>,
-    pub(super) rowcount: i64,
+    pub columns: Option<Arc<Vec<ColumnMetadata>>>,
+    pub rowcount: i64,
     /// This statement owns the live batch on the connection.
-    pub(super) on_wire: bool,
+    pub on_wire: bool,
     /// The current result has no more rows to read from the wire.
-    pub(super) result_done: bool,
+    pub result_done: bool,
     /// Rows already decoded but not yet handed to Python.
-    pub(super) pending: RowBuffer,
+    pub pending: RowBuffer,
     pending_pos: usize,
     /// Error met while reading ahead; reported once `pending` is drained.
-    pub(super) pending_error: Option<Vec<DiagRecord>>,
+    pub pending_error: Option<Vec<DiagRecord>>,
     /// Results after the current one, drained from the wire (MARS emulation).
-    pub(super) queued: VecDeque<BufferedResult>,
-    pub(super) freed: bool,
+    pub queued: VecDeque<BufferedResult>,
+    pub freed: bool,
     /// Bumped whenever the current results are discarded (execute, close,
     /// next result). Background Arrow producers stop when it no longer
     /// matches theirs.
@@ -71,9 +71,10 @@ pub struct StmtState {
     /// Cancellation of the execution that produced the current results; its
     /// reads of the wire stop with it. Kept so that closing an old Arrow
     /// stream cancels that execution only, never a newer one.
-    pub(super) execution: Option<Arc<StmtCancel>>,
-    /// What `DDBCSQLDescribeCol` last returned.
-    pub(super) describe_cache: Option<describe::DescribeCache>,
+    pub execution: Option<Arc<StmtCancel>>,
+    /// What the host last built to describe the columns (the Python
+    /// bindings keep their description list here, see `DDBCSQLDescribeCol`).
+    pub describe_cache: Option<Box<dyn std::any::Any + Send>>,
     /// The columns last taken from the client and the metadata they came from.
     last_columns: Option<(MetadataHandle, Arc<Vec<ColumnMetadata>>)>,
     /// Fixed text widths and LOB flag of `columns`, valid while the Arc is the same.
@@ -119,7 +120,7 @@ impl StmtState {
     /// one when the server sent the same metadata (a repeated query), so
     /// neither the copy nor the per-column comparison in `DDBCSQLDescribeCol`
     /// is repeated.
-    pub(super) fn columns_of_current(&mut self, client: &SyncClient) -> Arc<Vec<ColumnMetadata>> {
+    pub fn columns_of_current(&mut self, client: &SyncClient) -> Arc<Vec<ColumnMetadata>> {
         let Some(handle) = client.metadata_handle() else {
             return Arc::new(hidden::visible_columns(client.get_metadata()));
         };
@@ -135,7 +136,7 @@ impl StmtState {
 
     /// Nothing of this statement is on the wire or queued behind the current
     /// result, so closing it needs no connection access.
-    pub(super) fn is_off_wire(&self) -> bool {
+    pub fn is_off_wire(&self) -> bool {
         !self.freed && !self.on_wire && self.queued.is_empty()
     }
 
@@ -143,12 +144,12 @@ impl StmtState {
         self.freed
     }
 
-    pub(super) fn mark_freed(&mut self) {
+    pub fn mark_freed(&mut self) {
         self.freed = true;
     }
 
     /// Replace the current result's column metadata (catalog column renames).
-    pub(super) fn map_columns(
+    pub fn map_columns(
         &mut self,
         f: impl FnOnce(&Arc<Vec<ColumnMetadata>>) -> Arc<Vec<ColumnMetadata>>,
     ) {
@@ -172,7 +173,7 @@ impl StmtState {
     }
 
     /// Forget every result of this statement, including queued ones.
-    pub(super) fn reset_results(&mut self) {
+    pub fn reset_results(&mut self) {
         self.generation += 1;
         self.clear_current();
         self.on_wire = false;
@@ -199,7 +200,7 @@ impl StmtState {
         out
     }
 
-    pub(super) fn install_buffered(&mut self, result: BufferedResult) {
+    pub fn install_buffered(&mut self, result: BufferedResult) {
         self.columns = result.columns;
         self.rowcount = result.rowcount;
         self.pending = result.rows;
@@ -266,7 +267,7 @@ fn read_loop<W: RowWriter + Send>(
         Ok(false)
     })
 }/// Read rows of the current result into a Python-bound buffer.
-pub(super) fn read_rows(
+pub fn read_rows(
     client: &mut SyncClient,
     sink: &mut RowBuffer,
     max_rows: usize,
@@ -278,7 +279,7 @@ pub(super) fn read_rows(
 }
 
 /// A server error as a diagnostic record, in msodbcsql's message shape.
-pub(super) fn server_error_record(e: &mssql_tds::error::SqlErrorInfo) -> DiagRecord {
+pub fn server_error_record(e: &mssql_tds::error::SqlErrorInfo) -> DiagRecord {
     DiagRecord::new(
         diag::sqlstate_for_server_error(e.number, e.class),
         i32::try_from(e.number).unwrap_or(i32::MAX),
@@ -289,7 +290,7 @@ pub(super) fn server_error_record(e: &mssql_tds::error::SqlErrorInfo) -> DiagRec
 /// Errors the server reported for individual parameter sets of a prepared
 /// batch (executemany). They are only visible once the set's results were
 /// read, so they are collected whenever a batch ends.
-pub(super) fn prepared_batch_errors(client: &mut SyncClient) -> Vec<DiagRecord> {
+pub fn prepared_batch_errors(client: &mut SyncClient) -> Vec<DiagRecord> {
     client
         .take_prepared_batch_results()
         .map(|batch| {
@@ -304,7 +305,7 @@ pub(super) fn prepared_batch_errors(client: &mut SyncClient) -> Vec<DiagRecord> 
 }
 
 /// Pull up to `want` more rows of the current wire result into `state.pending`.
-pub(super) fn fill_pending(
+pub fn fill_pending(
     client: &mut SyncClient,
     state: &mut StmtState,
     want: usize,
@@ -333,7 +334,7 @@ pub(super) fn fill_pending(
 /// Like msodbcsql, read up to the first row of a freshly positioned result so
 /// errors raised before any row is produced (lock timeout, divide by zero,
 /// ...) fail the call that moved onto the result (`execute`, `nextset`).
-pub(super) fn surface_first_row_error(client: &mut SyncClient, state: &mut StmtState) -> SqlReturn {
+pub fn surface_first_row_error(client: &mut SyncClient, state: &mut StmtState) -> SqlReturn {
     fill_pending(client, state, 1, FETCH_BATCH_BYTES);
     if state.pending.rows == 0
         && let Some(err) = state.pending_error.take()

@@ -6,6 +6,10 @@ license = "MIT"
 description = "Rust (PyO3 + mssql-tds) replacement for mssql-python's ODBC-based ddbc_bindings"
 publish = false
 
+[workspace]
+members = [".", "crates/*"]
+resolver = "3"
+
 [lib]
 name = "ddbc_bindings"
 crate-type = ["cdylib", "rlib"]
@@ -13,10 +17,13 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # Legacy TLS: native-tls (OpenSSL) + OpenSSL Always Encrypted crypto instead of rustls.
 # Adds ~8 MB (libssl, libcrypto, libzstd) to the wheel. Build: maturin build --features native-tls
-native-tls = ["mssql-tds/native-tls-backend"]
+native-tls = ["mssql-tds/native-tls-backend", "arrowsql-core/native-tls"]
 
 [dependencies]
 pyo3 = { version = "0.29.0", features = ["extension-module"] }
+# Connect/execute/fetch, Arrow decoding and the parallel read, without pyo3.
+arrowsql-core = { path = "crates/arrowsql-core" }
+log = "0.4"
 # Microsoft's native TDS implementation (MIT). Pinned: the API is pre-1.0.
 mssql-tds = { git = "https://github.com/microsoft/mssql-rs", rev = "6b6b48ecbbbdad297039d1641e2be4775eed998b", default-features = false, features = ["gssapi", "rustls-tls"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros"] }
@@ -92,6 +99,8 @@ opt-level = 3
 [profile.release.package.arrow-data]
 opt-level = 3
 [profile.release.package.ddbc_bindings]
+opt-level = 3
+[profile.release.package.arrowsql-core]
 opt-level = 3
 [profile.release.package.mssql-tds]
 opt-level = 3

@@ -79,6 +79,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrowsql-core"
+version = "0.2.0"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-schema",
+ "async-trait",
+ "encoding_rs",
+ "log",
+ "mssql-tds",
+ "parking_lot",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "asn1-rs"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -279,8 +295,10 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-schema",
+ "arrowsql-core",
  "async-trait",
  "encoding_rs",
+ "log",
  "mimalloc",
  "mssql-tds",
  "parking_lot",

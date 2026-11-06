@@ -25,50 +25,90 @@ mssql-tds TdsClient (one per Connection, behind ConnShared::slot)
 decode/buffer.rs RowBuffer (GIL-free) ──► decode/python.rs (GIL held) ──► lists of values
 ```
 
+## Crates
+
+The workspace has two crates:
+
+* `crates/arrowsql-core` (rlib, **no pyo3**): connect, execute, fetch, Arrow
+  decoding, pooling and the partitioned parallel read. Its public facade
+  (`Connection`, `Statement`, `read_arrow_stream`, see `crates/arrowsql-core/src/lib.rs`)
+  is what other Rust crates use; the modules behind it are the driver internals,
+  public only for the bindings (`#[doc(hidden)]`, no stability promise). It
+  declares no global allocator and reaches its host only through hooks: an
+  `InterruptCheck` (Python signals), the `log` facade, and the `TokenProvider` /
+  `FedAuthProvider` traits for Entra ID tokens.
+* the root crate `ddbc_bindings` (pyo3 cdylib): the Python module. Its modules
+  re-export the core modules they extend (`pub use arrowsql_core::statement::*`)
+  and add the pyclasses and `DDBCSQL*` functions, so the binding code keeps its
+  `crate::statement::...` paths. It installs the hooks at import and owns the
+  mimalloc global allocator.
+
 ## Modules (one owner per file)
+
+`arrowsql-core` (`crates/arrowsql-core/src/`):
 
 | File | Responsibility |
 |---|---|
-| `lib.rs` | module registration, misc compat functions |
-| `runtime.rs` | single process-wide tokio runtime, `block_on` |
+| `lib.rs`, `api.rs`, `error.rs` | the public Rust API: `ConnectOptions`, `Connection`, `Statement`, `StatementReader`, `Param`, `Error` |
+| `read.rs` | partitioned parallel read: slice planning (MIN/MAX, catalog row estimate, nullability probes, caller bounds), worker threads, `ParallelReader` |
+| `utf8.rs`, `utf8_wrap.rs` | UTF-8 transfer of national columns: the describe round trip and the rewrite |
+| `runtime.rs` | per-connection current-thread runtimes (`SyncClient`), the shared runtime, the `InterruptCheck` hook |
 | `consts.rs` | ODBC constants shared with `constants.py` |
 | `connstr.rs` | ODBC connection string -> `ClientContext` |
-| `connection.rs` | `Connection` pyclass, `ConnShared` (TDS client slot, autocommit, session state) |
-| `statement/mod.rs` | `StmtShared`, `SqlHandle` pyclass, the internal API used by `catalog.rs` |
+| `connection.rs` | `ConnShared` (TDS client slot, autocommit, session state), login (`open_client`), close |
+| `statement/mod.rs` | `StmtShared`, cancel/close of a statement |
 | `statement/wire.rs` | wire ownership: `Slot`, which statement owns the TDS stream, buffering (bounded) or discarding its batch |
 | `statement/cursor.rs` | a statement's current and queued results; fetch, next-result, the `read_rows_into` decode seam |
 | `statement/exec.rs` | `execute` / `executemany`, deferred session SQL, NULL parameter typing |
 | `statement/cancel.rs` | cancellation + timeout of one execution, forwarded to a batch being drained |
-| `statement/odbc.rs` | the `DDBCSQL*` Python functions (thin wrappers) |
 | `diag.rs` | diagnostic records, SQL Server error -> SQLSTATE table |
-| `params/mod.rs` | parameter list -> `ParamSet` (+ `conversion_error`) |
-| `params/py_types.rs` | per-value Python -> `SqlType` (vendored from mssql-py-core) |
+| `params/mod.rs` | `ParamSet`, the int/str typing shared with the Python conversion |
 | `params/placeholders.rs` | `?` -> `@Pn`, `{call ...}` escapes |
 | `params/null_types.rs` | typing of `None` params via `sp_describe_undeclared_parameters` |
 | `params/batch.rs` | column-uniform types for executemany |
-| `decode/buffer.rs` | `RowBuffer`: the GIL-free `RowWriter` sink |
-| `decode/python.rs` | `RowBuffer` -> Python lists |
-| `decode/{numeric,text,temporal,binary}.rs` | one file per SQL type family |
+| `params/udt.rs` | CLR UDT names from the describe |
+| `decode/buffer.rs` | `RowBuffer`: the `RowWriter` sink of row fetches |
 | `decode/describe.rs` | ODBC column metadata (SQLDescribeCol) |
-| `catalog.rs` | SQLTables/Columns/... via `sp_*` catalog procedures |
-| `getinfo.rs` | SQLGetInfo values (partial) |
+| `decode/hidden.rs`, `decode/ascii.rs` | hidden (browse-mode) columns; ASCII UTF-16 narrowing |
 | `pooling.rs` | connection pool: per-key capacity leases, idle sessions, generations, token expiry |
-| `rowfactory.rs` | `construct_rows` (Row objects without `__init__`) |
-| `types.rs` | `ParamInfo`, `NumericData`, `ErrorInfo` |
 | `arrow/plan.rs` | SQL column -> Arrow type (mirrors upstream's C++ mapping) |
 | `arrow/sink.rs` | `ArrowSink`: `RowWriter` decoding TDS rows into Arrow buffers |
-| `arrow/export.rs` | PyCapsule export, `ArrowTable`, pipelined `ArrowStream` |
+| `arrow/stream.rs` | `StreamCore` (batches decoded ahead on a producer thread), `MergeCore` (several streams as one) |
+| `arrow/mod.rs` | the current result's Arrow plan, `fetch_table` |
+| `fmt.rs` | date / time / decimal / hex text (agent output, `sql_variant` in Arrow) |
+
+`ddbc_bindings` (`src/`):
+
+| File | Responsibility |
+|---|---|
+| `lib.rs` | module registration, hooks, misc compat functions, global allocator |
+| `runtime.rs` | Ctrl-C: `detach_interruptible`, the Python `InterruptCheck` |
+| `connection.rs` | `Connection` pyclass (attributes, pooling, token factories) |
+| `statement/mod.rs` | `SqlHandle` pyclass, the internal API used by `catalog.rs` |
+| `statement/odbc.rs` | the `DDBCSQL*` Python functions (thin wrappers) |
+| `statement/batch_rpc.rs` | executemany from Python rows |
+| `params/mod.rs` | parameter list -> `ParamSet` (+ `conversion_error`) |
+| `params/py_types.rs` | per-value Python -> `SqlType` (vendored from mssql-py-core) |
+| `decode/python.rs` | `RowBuffer` -> Python lists |
+| `decode/{numeric,text,temporal,binary}.rs` | one file per SQL type family |
+| `decode/describe.rs` | the cached description list handed to Python |
+| `catalog.rs` | SQLTables/Columns/... via `sp_*` catalog procedures |
+| `getinfo.rs` | SQLGetInfo values (partial) |
+| `pooling.rs`, `utf8_wrap.rs` | Python entry points of the core modules of the same name |
+| `rowfactory.rs` | `construct_rows` (Row objects without `__init__`) |
+| `types.rs` | `ParamInfo`, `NumericData`, `ErrorInfo` |
+| `arrow/export.rs` | PyCapsule export, `ArrowTable`, `ArrowStream` / `ArrowMergeStream` over the core streams |
 | `arrow/mod.rs` | `DDBCSQLFetchArrowBatch`, `DDBCArrowFetchTable`, `DDBCArrowStream` |
 | `agent/mod.rs` | `AgentRender` pyclass: one statement's bounded text output (result sets, rows affected, messages) under one byte ceiling; chunked Arrow fetch with the GIL released |
 | `agent/render.rs` | `Table`: typed TSV / Markdown header, escaping, cell clipping, head/tail sample, footer |
-| `agent/sqltype.rs`, `agent/fmt.rs` | SQL type names for the header; date / time / decimal / hex text (also used by `arrow/sink.rs` for `sql_variant`) |
+| `agent/sqltype.rs` | SQL type names for the header |
 | `bulk/mod.rs` | `DDBCBulkCopyArrow` / `DDBCBulkCopyRows`: bulk load on the cursor's own connection (`with_exclusive_wire`), `BulkUnsupported`, result dict |
 | `bulk/settings.rs` | bulk options, `column_mappings` parsing, source -> destination column mapping |
 | `bulk/arrow_source.rs` | Arrow PyCapsule (`__arrow_c_stream__` / `__arrow_c_array__`) -> record batch stream |
 | `bulk/arrow_encode.rs` | (Arrow type, SQL type) column plans, `ColumnValues` fallback cells, windows of rows |
 | `bulk/arrow_wire.rs`, `bulk/wire.rs` | direct TDS encoding of cells into a per-row byte buffer (byte-for-byte what `TdsValueSerializer` writes) |
 | `bulk/rows.rs` | Python tuples -> TDS rows, read a window at a time under the GIL |
-| `logging.rs` | log-level bridge (stub) |
+| `logging.rs` | log-level bridge |
 
 ## Return codes and diagnostics
 
@@ -342,5 +382,5 @@ token are closed and a new connection is opened with the fresh token.
 scripts/build.sh                      # flock-serialized maturin develop
 source scripts/env.sh <agent-id>      # per-agent database on the podman SQL Server
 cd tests/upstream && ../../.venv/bin/python -m pytest -q test_004_cursor.py
-cargo test --lib                      # pure-Rust unit tests (no DB)
+cargo test --workspace --lib          # pure-Rust unit tests (no DB)
 ```

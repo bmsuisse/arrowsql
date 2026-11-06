@@ -37,7 +37,7 @@ use mssql_tds::datatypes::sql_vector::SqlVector;
 use uuid::Uuid;
 
 use super::plan::{Kind, Plan};
-use crate::agent::fmt;
+use crate::fmt;
 use crate::decode::RowBuffer;
 use crate::decode::buffer::Cell;
 use crate::statement::BatchSink;

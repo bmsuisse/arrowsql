@@ -314,3 +314,11 @@ pub fn sqlstate_to_exception<'py>(
 pub fn raise_exception(py: Python<'_>, sqlstate: &str, ddbc_error: &str, native_error: Option<i32>) -> PyResult<()> {
     Err(raise_statement(py, sqlstate, ddbc_error, native_error))
 }
+
+/// Python-visible `sqlstate_for_server_error(number, severity=None)`; no
+/// severity means the most severe tier (HY000) for unmapped numbers.
+#[pyfunction]
+#[pyo3(name = "sqlstate_for_server_error", signature = (number, severity=None))]
+pub fn sqlstate_for_server_error_py(number: u32, severity: Option<i32>) -> &'static str {
+    crate::diag::sqlstate_for_server_error(number, severity.unwrap_or(i32::MAX))
+}

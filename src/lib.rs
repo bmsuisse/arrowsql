@@ -3,30 +3,30 @@
 //! Drop-in for the C++/pybind11 ODBC binding: same symbol names, argument
 //! names, defaults and return codes. See docs/ARCHITECTURE.md for the design
 //! and docs/CONTRACT.md for the symbol table and ownership.
+//!
+//! The driver itself (connect, execute, fetch, Arrow decoding) is the
+//! Python-free `arrowsql-core` crate; the modules here are its pyo3 shell.
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+
+use arrowsql_core::{connstr, consts, diag, numeric, txn_abort};
 
 mod agent;
 mod arrow;
 mod bulk;
 mod catalog;
 mod connection;
-mod connstr;
-mod consts;
 mod decode;
-mod diag;
 mod errors;
 mod getinfo;
 mod logging;
-mod numeric;
 mod params;
 mod pooling;
 mod rowfactory;
 mod runtime;
 mod statement;
-mod txn_abort;
 mod types;
 mod utf8_wrap;
 #[cfg(unix)]
@@ -39,8 +39,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// sockets the parent still owns; the runtime rebuilds itself lazily by pid.
 #[pyfunction]
 fn reset_after_fork() {
-    pooling::forget_after_fork();
-    runtime::forget_after_fork();
+    arrowsql_core::reset_after_fork();
+    runtime::forget_main_thread();
 }
 
 #[pyfunction]
@@ -124,6 +124,7 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Upstream's loader exposed the loaded extension as `ddbc_bindings.module`.
     m.add("module", m)?;
     register_fork_hook(m)?;
+    runtime::install_interrupt_check();
 
     m.add_class::<types::ParamInfo>()?;
     m.add_class::<types::NumericData>()?;
@@ -141,9 +142,9 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(params::pyformat::scan_pyformat, m)?)?;
     m.add_function(wrap_pyfunction!(params::pyformat::has_unquoted_qmark, m)?)?;
 
-    m.add_function(wrap_pyfunction!(pooling::enable_pooling, m)?)?;
-    m.add_function(wrap_pyfunction!(pooling::close_pooling, m)?)?;
-    m.add_function(wrap_pyfunction!(pooling::disable_pooling, m)?)?;
+    m.add_function(wrap_pyfunction!(pooling::enable_pooling_py, m)?)?;
+    m.add_function(wrap_pyfunction!(pooling::close_pooling_py, m)?)?;
+    m.add_function(wrap_pyfunction!(pooling::disable_pooling_py, m)?)?;
     m.add_function(wrap_pyfunction!(logging::update_log_level, m)?)?;
     utf8_wrap::register(m)?;
     m.add_function(wrap_pyfunction!(rowfactory::construct_rows, m)?)?;
@@ -167,7 +168,7 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(statement::set_stmt_attr, m)?)?;
     m.add_function(wrap_pyfunction!(statement::get_all_diag_records, m)?)?;
     m.add_function(wrap_pyfunction!(statement::check_error, m)?)?;
-    m.add_function(wrap_pyfunction!(diag::sqlstate_for_server_error_py, m)?)?;
+    m.add_function(wrap_pyfunction!(errors::sqlstate_for_server_error_py, m)?)?;
     m.add_function(wrap_pyfunction!(errors::sqlstate_to_exception, m)?)?;
     m.add_function(wrap_pyfunction!(errors::raise_exception, m)?)?;
     m.add_function(wrap_pyfunction!(statement::raise_for, m)?)?;

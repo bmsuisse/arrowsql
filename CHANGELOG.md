@@ -14,6 +14,16 @@ Version numbers in this project are deliberately three different things:
 
 ## [Unreleased]
 
+### Added
+
+- `crates/arrowsql-core`: the driver core as a Rust crate without pyo3
+  (connect, execute, fetch, Arrow decoding, pooling), with a public API for
+  other Rust crates: `Connection::connect` / `execute`, `Statement::next_batch`
+  / `into_reader`, and `read_arrow_stream(options, query, Partitioning,
+  ReadOptions)`, a cancellable, `Send` Arrow `RecordBatchReader` over a
+  partitioned parallel read. The Python extension is a pyo3 layer over it; no
+  behaviour change for Python.
+
 ### Fixed
 
 - `write_arrow(..., workers > 1)` accepts an iterable of record batches (list, generator, objects

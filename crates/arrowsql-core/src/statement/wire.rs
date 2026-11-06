@@ -215,7 +215,7 @@ fn buffer_owner(
 
 /// Read the rest of the current result and every later result of the batch
 /// into `state`, until `budget` bytes are buffered.
-pub(super) fn buffer_all(client: &mut SyncClient, state: &mut StmtState, budget: usize) {
+pub fn buffer_all(client: &mut SyncClient, state: &mut StmtState, budget: usize) {
     fill_pending(client, state, usize::MAX, budget);
     let over_budget = !state.result_done && state.pending_error.is_none();
     if over_budget {
