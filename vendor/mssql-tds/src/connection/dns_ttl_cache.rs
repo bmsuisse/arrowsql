@@ -239,21 +239,20 @@ impl TtlDnsCache {
             (stale, flight, joined)
         };
         let lookup = Arc::new(lookup);
-        if let Some((addresses, true)) = &stale {
-            if joined
+        if let Some((addresses, true)) = &stale
+            && (joined
                 || self.spawn_refresh(
                     key.clone(),
                     Arc::clone(&flight),
                     policy,
                     now,
                     Arc::clone(&lookup),
-                )
-            {
-                bump(&self.counters.stale_served);
-                return Ok((addresses.clone(), Origin::Stale(None)));
-            }
-            // No thread for the refresh: refresh in line, as for a very old entry.
+                ))
+        {
+            bump(&self.counters.stale_served);
+            return Ok((addresses.clone(), Origin::Stale(None)));
         }
+        // No entry, a very old one, or no thread for a background refresh: resolve in line.
         bump(if joined {
             &self.counters.coalesced
         } else {
@@ -327,10 +326,10 @@ impl TtlDnsCache {
             .get_or_init(|| async {
                 let answer = self.lookup_with_retry(policy, lookup).await;
                 let mut state = self.lock();
-                if let Ok(addresses) = &answer {
-                    if !addresses.is_empty() {
-                        self.store(&mut state, key.clone(), addresses.clone(), now);
-                    }
+                if let Ok(addresses) = &answer
+                    && !addresses.is_empty()
+                {
+                    self.store(&mut state, key.clone(), addresses.clone(), now);
                 }
                 Self::remove_flight(&mut state, key, flight);
                 answer.map_err(|error| (error.kind(), error.to_string()))

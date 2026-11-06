@@ -32,12 +32,15 @@ fn policy(ttl: Duration) -> Policy {
     }
 }
 
+/// One scripted resolver answer.
+type Answer = Result<Vec<SocketAddr>, String>;
+
 /// A scripted resolver: answers from a queue (the last answer repeats) and
 /// counts its calls.
 #[derive(Clone, Default)]
 struct Fake {
     calls: Arc<AtomicU32>,
-    answers: Arc<Mutex<Vec<Result<Vec<SocketAddr>, String>>>>,
+    answers: Arc<Mutex<Vec<Answer>>>,
     delay: Duration,
 }
 

@@ -321,9 +321,19 @@ async fn system_lookup(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     if delay > 0 {
         tokio::time::sleep(Duration::from_millis(delay)).await;
     }
-    let failing =
-        FAULT_FAILURES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
-    if failing.is_ok() {
+    let mut left = FAULT_FAILURES.load(Ordering::Relaxed);
+    while left > 0 {
+        match FAULT_FAILURES.compare_exchange_weak(
+            left,
+            left - 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(current) => left = current,
+        }
+    }
+    if left > 0 {
         return Err(io::Error::other(
             "Temporary failure in name resolution (test fault)",
         ));
