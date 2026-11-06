@@ -11,8 +11,10 @@ publish = false
 native-tls = ["mssql-tds/native-tls-backend"]
 
 [dependencies]
-# Microsoft's native TDS implementation (MIT). Pinned: the API is pre-1.0.
-mssql-tds = { git = "https://github.com/microsoft/mssql-rs", rev = "6b6b48ecbbbdad297039d1641e2be4775eed998b", default-features = false, features = ["gssapi", "rustls-tls"] }
+# Microsoft's native TDS implementation (MIT), vendored with local patches
+# (vendor/mssql-tds/VENDOR.md): a path dependency, so a git dependent of this
+# crate builds the patched copy without a [patch] section.
+mssql-tds = { path = "../../vendor/mssql-tds", default-features = false, features = ["gssapi", "rustls-tls"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros"] }
 parking_lot = "0.12"
 uuid = "1"
@@ -26,4 +28,4 @@ log = "0.4"
 # Windows: in-tree Schannel TLS (msodbcsql's stack) instead of rustls, which fails the
 # handshake with SQL Server's self-generated certificate on Windows.
 [target.'cfg(windows)'.dependencies]
-mssql-tds = { git = "https://github.com/microsoft/mssql-rs", rev = "6b6b48ecbbbdad297039d1641e2be4775eed998b", default-features = false, features = ["gssapi", "rustls-tls", "tls-schannel-direct-on-windows"] }
+mssql-tds = { path = "../../vendor/mssql-tds", default-features = false, features = ["gssapi", "rustls-tls", "tls-schannel-direct-on-windows"] }

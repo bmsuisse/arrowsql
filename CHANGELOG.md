@@ -33,6 +33,11 @@ Version numbers in this project are deliberately three different things:
   `tests/common_issues/test_rs_read_arrow_parity.py`); invalid
   `partition_bounds` now fail before the first connection is opened. The
   UTF-8 transfer rewrite (`utf8_strings`) moved to Rust as well.
+- Rust dependents of `arrowsql-core`: the core declares no global allocator
+  (mimalloc is the `ddbc_bindings` default feature `mimalloc`), and both
+  crates depend on `vendor/mssql-tds` by path instead of a `[patch]`, so a git
+  dependency on the core builds the patched TDS crate without a patch section
+  of its own. Workspace-wide `cargo test` / `clippy` take `--exclude mssql-tds`.
 
 ### Fixed
 

@@ -20,7 +20,7 @@ anyone else can just set `DB_CONNECTION_STRING`.
 ```bash
 python -m pytest -q --timeout 120 tests/common_issues tests/port
 python scripts/check_upstream_baseline.py     # vendored upstream suite vs tests/upstream_passing_baseline.txt
-cargo test --workspace --lib
+cargo test --workspace --exclude mssql-tds --lib
 ```
 
 Scope and rules for the three suites: [docs/TEST_SCOPE.md](docs/TEST_SCOPE.md). A new
@@ -29,7 +29,7 @@ add it to `tests/upstream_excluded.txt` with a one-line reason.
 
 ## Code
 
-- `cargo clippy --workspace --all-targets` should not add warnings; run `cargo fmt` on files you touch.
+- `cargo clippy --workspace --exclude mssql-tds --all-targets` should not add warnings; run `cargo fmt` on files you touch.
 - Edits to the vendored Python layer (`python/arrowsql`) and to `vendor/mssql-tds`
   are marked `RUST-PORT` and listed in `docs/PYTHON_LAYER_CHANGES.md` /
   `vendor/mssql-tds/VENDOR.md`. Keep upstream's lines unchanged where you can.

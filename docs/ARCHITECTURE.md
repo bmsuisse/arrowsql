@@ -4,8 +4,8 @@
 unchanged (edits: `docs/PYTHON_LAYER_CHANGES.md`). Upstream's C++/pybind11
 module `ddbc_bindings` called the Microsoft ODBC driver. This crate replaces
 it with a PyO3 module of the same name and surface, speaking TDS directly via
-Microsoft's `mssql-tds` crate (microsoft/mssql-rs, MIT, pinned in
-`Cargo.toml`). No ODBC driver or driver manager is involved.
+Microsoft's `mssql-tds` crate (microsoft/mssql-rs, MIT, vendored with local
+patches in `vendor/mssql-tds`). No ODBC driver or driver manager is involved.
 
 The import name is `arrowsql`. `python/mssql_python/` is a compatibility alias
 (a meta-path finder): `mssql_python` and every `mssql_python.X` resolve to the
@@ -382,5 +382,5 @@ token are closed and a new connection is opened with the fresh token.
 scripts/build.sh                      # flock-serialized maturin develop
 source scripts/env.sh <agent-id>      # per-agent database on the podman SQL Server
 cd tests/upstream && ../../.venv/bin/python -m pytest -q test_004_cursor.py
-cargo test --workspace --lib          # pure-Rust unit tests (no DB)
+cargo test --workspace --exclude mssql-tds --lib  # pure-Rust unit tests (no DB)
 ```

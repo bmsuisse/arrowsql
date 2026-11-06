@@ -33,6 +33,9 @@ mod utf8_wrap;
 #[cfg(unix)]
 mod aio;
 
+// The extension module's allocator; arrowsql-core declares none, so a Rust
+// dependent of the core keeps its own.
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
