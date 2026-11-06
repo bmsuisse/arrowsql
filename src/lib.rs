@@ -33,6 +33,14 @@ mod utf8_wrap;
 #[cfg(unix)]
 mod aio;
 
+// RUST-PORT: the DNS cache of vendor/mssql-tds (std + tokio only) is compiled here
+// too, because the vendored crate's own tests do not build (VENDOR.md patch 15).
+#[cfg(test)]
+#[path = "../vendor/mssql-tds/src/connection/dns_ttl_cache.rs"]
+mod dns_ttl_cache;
+#[cfg(test)]
+mod dns_ttl_cache_tests;
+
 // The extension module's allocator; arrowsql-core declares none, so a Rust
 // dependent of the core keeps its own.
 #[cfg(feature = "mimalloc")]
@@ -77,6 +85,60 @@ fn set_odbc_provider(_args: &Bound<'_, pyo3::types::PyTuple>) {}
 #[pyfunction]
 #[pyo3(name = "DDBCSetDecimalSeparator")]
 fn set_decimal_separator(_separator: String) {}
+
+/// Counters of the process-wide DNS cache (`DnsCacheTTL`), as a dict:
+/// `os_resolver_calls` counts every OS lookup made for a connection.
+#[pyfunction]
+fn dns_cache_stats() -> std::collections::HashMap<&'static str, u64> {
+    let (os_calls, s) = mssql_tds::connection::dns_cache_stats();
+    std::collections::HashMap::from([
+        ("os_resolver_calls", os_calls),
+        ("entries", s.entries as u64),
+        ("in_flight", s.in_flight as u64),
+        ("hits", s.hits),
+        ("stale_served", s.stale_served),
+        ("misses", s.misses),
+        ("coalesced", s.coalesced),
+        ("refreshes", s.refreshes),
+        ("resolver_calls", s.resolver_calls),
+        ("resolver_failures", s.resolver_failures),
+    ])
+}
+
+/// Test hook: the next `failures` OS lookups fail with a temporary resolver
+/// error and each lookup first sleeps `delay_ms`; `(0, 0)` resets.
+#[pyfunction]
+#[pyo3(signature = (failures=0, delay_ms=0))]
+fn dns_cache_test_fault(failures: u32, delay_ms: u64) {
+    mssql_tds::connection::dns_cache_test_fault(failures, delay_ms);
+}
+
+/// Test hook: empties the process-wide DNS cache.
+#[pyfunction]
+fn dns_cache_clear() {
+    mssql_tds::connection::dns_cache_clear();
+}
+
+/// Test hook: caches `addresses` (`"ip:port"` strings) for `host:port` in the
+/// DNS cache as if resolved `age_secs` seconds ago.
+#[pyfunction]
+#[pyo3(signature = (host, port, addresses, age_secs=0))]
+fn dns_cache_test_seed(
+    host: &str,
+    port: u16,
+    addresses: Vec<String>,
+    age_secs: u64,
+) -> PyResult<()> {
+    let addresses = addresses
+        .iter()
+        .map(|a| {
+            a.parse()
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{a}: {e}")))
+        })
+        .collect::<PyResult<Vec<std::net::SocketAddr>>>()?;
+    mssql_tds::connection::dns_cache_test_seed(host, port, addresses, age_secs);
+    Ok(())
+}
 
 /// Low-level SQLFetch/SQLGetData pair: the Python layer only uses the
 /// composite fetch functions, so these report IM001.
@@ -143,6 +205,10 @@ fn ddbc_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_odbc_provider, m)?)?;
     m.add_function(wrap_pyfunction!(set_decimal_separator, m)?)?;
     m.add_function(wrap_pyfunction!(sql_fetch, m)?)?;
+    m.add_function(wrap_pyfunction!(dns_cache_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(dns_cache_clear, m)?)?;
+    m.add_function(wrap_pyfunction!(dns_cache_test_fault, m)?)?;
+    m.add_function(wrap_pyfunction!(dns_cache_test_seed, m)?)?;
     m.add_function(wrap_pyfunction!(sql_get_data, m)?)?;
     m.add_function(wrap_pyfunction!(params::pyformat::scan_pyformat, m)?)?;
     m.add_function(wrap_pyfunction!(params::pyformat::has_unquoted_qmark, m)?)?;

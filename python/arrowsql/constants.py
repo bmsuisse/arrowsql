@@ -564,6 +564,8 @@ _ALLOWED_CONNECTION_STRING_PARAMS = {
     "keepaliveinterval": "KeepAliveInterval",
     # IP Address Preference (v18.1+)
     "ipaddresspreference": "IpAddressPreference",
+    # RUST-PORT: process-wide DNS cache TTL in seconds (src/connstr.rs)
+    "dnscachettl": "DnsCacheTTL",
     "packet size": "PacketSize",  # From the tests it looks like pyodbc users use Packet Size
     # (with spaces) ODBC only honors "PacketSize" without spaces
     # internally.
