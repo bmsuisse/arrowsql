@@ -23,6 +23,12 @@ Version numbers in this project are deliberately three different things:
   ReadOptions)`, a cancellable, `Send` Arrow `RecordBatchReader` over a
   partitioned parallel read. The Python extension is a pyo3 layer over it; no
   behaviour change for Python.
+- `arrowsql-core`: the partitions of a read as separate readers or Arrow C
+  streams. `plan_partitions` returns the planned `Slice`s, each opens on its
+  own connection (`Slice::open`, `Slice::open_ffi_stream`), so Spark tasks or
+  pyarrow in another shared library read them zero-copy;
+  `ParallelReader::into_ffi_stream` / `StatementReader::into_ffi_stream`
+  export the merged and single-statement readers the same way.
 
 ### Changed
 

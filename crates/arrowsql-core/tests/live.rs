@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use arrowsql_core::{
     ConnectOptions, Connection, ErrorKind, Param, Partitioning, ReadOptions, RecordBatchReader,
-    read_arrow, read_arrow_stream,
+    plan_partitions, read_arrow, read_arrow_stream,
 };
 
 fn options() -> Option<ConnectOptions> {
@@ -308,4 +308,61 @@ fn closing_a_partitioned_read_early() {
     reader.close();
     assert!(reader.is_closed());
     assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+/// Rows of an Arrow C stream, read back through arrow-rs' importer as a
+/// foreign consumer (pyarrow, Spark) would.
+fn ffi_rows(stream: arrowsql_core::FFI_ArrowArrayStream) -> Vec<i64> {
+    let reader = arrow_array::ffi_stream::RecordBatchStreamReader::try_new(stream).unwrap();
+    reader
+        .flat_map(|b| {
+            let b = b.unwrap();
+            let ids = b
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow_array::Int64Array>()
+                .unwrap();
+            ids.values().to_vec()
+        })
+        .collect()
+}
+
+#[test]
+fn partitions_as_arrow_c_streams() {
+    let (conn, options) = connect_or_skip!();
+    let table = Table::create(&conn, "ffi", 40_000);
+    let query = format!("SELECT id, s FROM {}", table.name);
+    let partitioning = Partitioning::Range {
+        column: "id".into(),
+        partitions: 3,
+    };
+    let slices = plan_partitions(&options, &query, &partitioning, true).unwrap();
+    assert!(slices.len() > 1, "{slices:?}");
+    // Each slice on its own thread and connection, as separate consumers would.
+    let handles: Vec<_> = slices
+        .into_iter()
+        .map(|slice| {
+            let options = options.clone();
+            std::thread::spawn(move || ffi_rows(slice.open_ffi_stream(&options, 4_096, 2).unwrap()))
+        })
+        .collect();
+    let mut ids: Vec<i64> = handles
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, (1..=40_000).collect::<Vec<i64>>());
+
+    let merged = read_arrow_stream(&options, &query, partitioning, ReadOptions::default()).unwrap();
+    assert_eq!(ffi_rows(merged.into_ffi_stream()).len(), 40_000);
+
+    let single = conn
+        .execute(
+            &format!("SELECT id FROM {} WHERE id <= 100", table.name),
+            &[],
+        )
+        .unwrap()
+        .into_reader(32, 1)
+        .unwrap();
+    assert_eq!(ffi_rows(single.into_ffi_stream()).len(), 100);
 }

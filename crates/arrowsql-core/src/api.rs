@@ -535,6 +535,12 @@ impl StatementReader {
             }
         }))
     }
+
+    /// This reader as an Arrow C stream, for a consumer in another language
+    /// or shared library; releasing the stream frees the connection.
+    pub fn into_ffi_stream(self) -> arrow_array::ffi_stream::FFI_ArrowArrayStream {
+        arrow_array::ffi_stream::FFI_ArrowArrayStream::new(Box::new(self))
+    }
 }
 
 impl Iterator for StatementReader {

@@ -18,11 +18,12 @@ use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 use arrow_array::{RecordBatch, RecordBatchReader};
 use arrow_schema::{ArrowError, SchemaRef};
 use parking_lot::Mutex;
 
-use crate::api::{ConnectOptions, Connection, Param, Statement, Value};
+use crate::api::{ConnectOptions, Connection, Param, Statement, StatementReader, Value};
 use crate::arrow::stream::{MergeCore, MergeReader, StreamCore};
 use crate::error::Error;
 use crate::statement::StmtShared;
@@ -112,6 +113,48 @@ impl Slice {
     fn new(sql: String, params: Vec<Param>) -> Slice {
         Slice { sql, params }
     }
+
+    /// Run this slice on a connection of its own and read its rows as
+    /// batches of `batch_rows`, `prefetch` batches decoded ahead on a
+    /// producer thread. The connection closes when the reader is dropped.
+    pub fn open(
+        &self,
+        connector: &dyn Connector,
+        batch_rows: usize,
+        prefetch: usize,
+    ) -> Result<StatementReader, Error> {
+        let conn = connector.connect()?;
+        conn.execute(&self.sql, &self.params)?
+            .into_reader(batch_rows, prefetch)
+    }
+
+    /// [`open`](Self::open) as an Arrow C stream, for consumers in another
+    /// language or shared library (pyarrow, Spark, DuckDB): the batches cross
+    /// without a copy, and releasing the stream closes the connection.
+    pub fn open_ffi_stream(
+        &self,
+        connector: &dyn Connector,
+        batch_rows: usize,
+        prefetch: usize,
+    ) -> Result<FFI_ArrowArrayStream, Error> {
+        let reader = self.open(connector, batch_rows, prefetch)?;
+        Ok(FFI_ArrowArrayStream::new(Box::new(reader)))
+    }
+}
+
+/// The slices of a partitioned read, planned (probes included) but not run:
+/// each one can be read on its own connection, by another thread or process
+/// (see [`Slice::open`] / [`Slice::open_ffi_stream`]). Together they return
+/// every row of `query` once; a read that is not split is one slice.
+pub fn plan_partitions(
+    connector: &dyn Connector,
+    query: &str,
+    partitioning: &Partitioning,
+    utf8_strings: bool,
+) -> Result<Vec<Slice>, Error> {
+    let Planned { conn, work, .. } = plan_read(connector, query, partitioning, utf8_strings)?;
+    drop(conn);
+    Ok(work)
 }
 
 /// `[name]`, with `]` doubled.
@@ -754,6 +797,12 @@ impl ParallelReader {
                 workers.stop(false);
             }
         })
+    }
+
+    /// This reader as an Arrow C stream (see [`Slice::open_ffi_stream`]);
+    /// releasing the stream stops the read.
+    pub fn into_ffi_stream(self) -> FFI_ArrowArrayStream {
+        FFI_ArrowArrayStream::new(Box::new(self))
     }
 
     /// The merged stream, for hosts that export or poll it themselves.

@@ -14,6 +14,12 @@
 //! # Ok::<(), arrowsql_core::Error>(())
 //! ```
 //!
+//! [`read_arrow_stream`] splits a read on a column across connections and
+//! merges the batches into one [`ParallelReader`]. To hand the partitions to
+//! separate consumers instead (Spark tasks, pyarrow in another library),
+//! [`plan_partitions`] returns the [`Slice`]s and each one opens as its own
+//! reader or Arrow C stream ([`Slice::open_ffi_stream`]).
+//!
 //! The modules below the facade are the driver internals the Python bindings
 //! build on (ODBC-style statement handles, diagnostics, pooling). They are
 //! public for that crate only and carry no stability promise.
@@ -29,13 +35,18 @@ pub mod read;
 pub mod utf8;
 
 pub use api::{
-    CancelHandle, ConnectOptions, Connection, FedAuthProvider, Param, Statement, StatementReader, TokenProvider,
+    CancelHandle, ConnectOptions, Connection, FedAuthProvider, Param, Statement, StatementReader,
+    TokenProvider,
 };
 pub use error::{Error, ErrorKind};
-pub use read::{ParallelReader, Partitioning, ReadOptions, read_arrow, read_arrow_stream};
+pub use read::{
+    Connector, ParallelReader, Partitioning, ReadOptions, Slice, plan_partitions, read_arrow,
+    read_arrow_stream, read_arrow_stream_with,
+};
 
+pub use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 pub use arrow_array::{RecordBatch, RecordBatchReader};
-pub use arrow_schema::SchemaRef;
+pub use arrow_schema::{ArrowError, SchemaRef};
 
 #[doc(hidden)]
 pub mod arrow;
