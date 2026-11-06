@@ -31,6 +31,20 @@ Version numbers in this project are deliberately three different things:
   export the merged and single-statement readers the same way.
 - `crates/arrowsql-rowcount`: a pure-Rust example and integration test of the
   core API (single, merged parallel and per-partition Arrow C stream reads).
+- Process-wide DNS cache for connects (`DnsCacheTTL=<seconds>` keyword, env
+  `ARROWSQL_DNS_CACHE_TTL`, default 300 s, 0 disables). A host that resolved
+  once is not resolved again for every connection (Spark tasks, parallel read
+  slices, pool members, reconnects), like the JDBC driver's long-lived cache.
+  An expired entry is served at once while one background thread refreshes it
+  (up to an hour past its TTL), so a slow or failing resolver ("Temporary
+  failure in name resolution") no longer costs each connection seconds or a
+  failed connect. Concurrent lookups of one host share a single resolver call;
+  each resolver call is bounded (`ARROWSQL_DNS_RESOLVE_TIMEOUT`, default 10 s)
+  and a temporary failure is retried once. Failures are never cached; if no
+  cached address accepts, the entry is dropped and the host is resolved once
+  more. IP literals and connection diagnostics bypass the cache.
+  `ddbc_bindings.dns_cache_stats()` reports its counters. Vendored mssql-tds
+  patch 15.
 
 ### Changed
 
