@@ -451,7 +451,7 @@ pub async fn open_session(conn_str: &str, autocommit: bool, timeout: u32) -> Res
     let client = TdsConnectionProvider {}
         .create_client(context, &datasource, None)
         .await
-        .map_err(|e| crate::diag::records_for_error(&e, "08001"))?;
+        .map_err(|e| crate::diag::login_records_for_error(&e))?;
     Ok(Session::new(client, autocommit, timeout))
 }
 

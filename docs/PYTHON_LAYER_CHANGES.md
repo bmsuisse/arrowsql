@@ -306,6 +306,11 @@ UsePlatformDefault.
 `src/connstr.rs`: seconds the process-wide DNS cache keeps a resolved host,
 0 disables it (see the DNS cache section of `docs/PLATFORMS_AND_CONNECTION.md`).
 
+`Connect Timeout`, `Connection Timeout`, `Login Timeout` and `LoginTimeout` (RUST-PORT)
+are allowed in `constants.py` as synonyms of `Connect Timeout`, the login timeout in
+seconds that `src/connstr.rs` applies (the `connect(timeout=)` argument wins). Upstream
+rejected them although the Rust core reads them.
+
 ## Cancel, Ctrl-C and aio pool semantics (A3/A4, RUST-PORT)
 
 - `cursor.py` `Cursor.cancel()` (new, pyodbc-compatible): cancels the statement

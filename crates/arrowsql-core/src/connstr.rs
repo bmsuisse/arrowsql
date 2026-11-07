@@ -202,7 +202,7 @@ pub fn build_context_with(
         ctx.encryption_options.server_certificate = Some(path.into());
     }
 
-    if let Some(t) = first(&map, &["connection timeout", "connect timeout", "logintimeout", "timeout"])
+    if let Some(t) = first(&map, &["connection timeout", "connect timeout", "login timeout", "logintimeout", "timeout"])
         && let Ok(t) = t.parse::<u32>()
     {
         ctx.connect_timeout = t;
@@ -337,6 +337,14 @@ mod tests {
         assert_eq!(m["server"], "tcp:h,1433");
         assert_eq!(m["pwd"], "a;b}c");
         assert_eq!(m["database"], "db");
+    }
+
+    #[test]
+    fn login_timeout_keywords() {
+        for key in ["Connect Timeout", "Connection Timeout", "Login Timeout", "LoginTimeout", "Timeout"] {
+            let (ctx, opts) = build_context(&format!("Server=h;{key}=7;"), None).unwrap();
+            assert_eq!((ctx.connect_timeout, opts.login_timeout), (7, Some(7)), "{key}");
+        }
     }
 
     #[test]

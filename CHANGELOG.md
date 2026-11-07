@@ -14,6 +14,20 @@ Version numbers in this project are deliberately three different things:
 
 ## [Unreleased]
 
+### Fixed
+
+- Every second login of a process to the same server hung until the login
+  timeout (then failed) against some SQL Servers, on Databricks drivers and
+  executors alike: the process-wide rustls config resumed the previous login's
+  TLS session and the server never completed the resumed handshake. TLS session
+  resumption is now off; every login does a full handshake, as msodbcsql does
+  (`vendor/mssql-tds/VENDOR.md` patch 16).
+- An expired login timeout is reported as `HYT00` "Login timeout expired"
+  (it read "Query timeout expired"), for `connect()` and `aio`.
+- The Python connection string parser accepts `Connect Timeout`, `Connection
+  Timeout` and `Login Timeout` (it rejected them although the Rust core reads
+  them); the Rust core now also reads `Login Timeout`.
+
 ## [0.3.0] - 2026-11-07
 
 ### Added

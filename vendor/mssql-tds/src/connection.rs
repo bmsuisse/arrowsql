@@ -67,6 +67,13 @@ pub fn dns_cache_test_seed(
     );
 }
 
+/// RUST-PORT test hook (VENDOR.md patch 16): whether the rustls engine's
+/// client configs resume TLS sessions (they must not).
+#[cfg(feature = "rustls-tls")]
+pub fn rustls_session_resumption_enabled() -> crate::core::TdsResult<bool> {
+    transport::tls::rustls_engine::session_resumption_enabled()
+}
+
 /// This computer's name, as the client compares a data source's host with it
 /// to decide whether the data source is local.
 pub fn this_computer_name() -> Option<String> {
