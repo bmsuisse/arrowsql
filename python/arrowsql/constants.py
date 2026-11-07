@@ -566,12 +566,6 @@ _ALLOWED_CONNECTION_STRING_PARAMS = {
     "ipaddresspreference": "IpAddressPreference",
     # RUST-PORT: process-wide DNS cache TTL in seconds (src/connstr.rs)
     "dnscachettl": "DnsCacheTTL",
-    # RUST-PORT: login timeout in seconds (src/connstr.rs; the connect()
-    # timeout argument wins). ADO.NET / JDBC-style spellings.
-    "connect timeout": "Connect Timeout",
-    "connection timeout": "Connect Timeout",
-    "login timeout": "Connect Timeout",
-    "logintimeout": "Connect Timeout",
     "packet size": "PacketSize",  # From the tests it looks like pyodbc users use Packet Size
     # (with spaces) ODBC only honors "PacketSize" without spaces
     # internally.

@@ -131,7 +131,7 @@ times = []
 for _ in range(int(sys.argv[2])):
     started = time.monotonic()
     try:
-        conn = mssql_python.connect(sys.argv[1])
+        conn = mssql_python.connect(sys.argv[1], timeout=15)
         conn.cursor().execute("SELECT 1").fetchone()
         conn.close()
         times.append(round(time.monotonic() - started, 3))
@@ -150,7 +150,7 @@ def test_sequential_encrypted_logins_in_one_process_all_succeed(conn_str):
     # (every login must be fast) rather than reproducing the stall; the
     # disabled resumption itself is asserted in arrowsql-core's unit tests.
     params = _ConnectionStringParser._normalize_params(_ConnectionStringParser()._parse(conn_str))
-    params.update({"Encrypt": "yes", "TrustServerCertificate": "yes", "Connect Timeout": "15"})
+    params.update({"Encrypt": "yes", "TrustServerCertificate": "yes"})
     out = subprocess.run(
         [sys.executable, "-c", SEQUENTIAL_LOGINS, _ConnectionStringBuilder(params).build(), "12"],
         capture_output=True, text=True, timeout=240, check=False,

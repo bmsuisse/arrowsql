@@ -37,7 +37,7 @@ Parsed natively (`src/connstr.rs`) and by the vendored Python layer.
 | `Server` / `Address` / `Data Source`, `Database`, `Uid`, `Pwd`, `APP`, `WSID`, `Language` | supported |
 | `Encrypt` (`yes`/`no`/`strict`), `TrustServerCertificate`, `HostNameInCertificate`, `ServerCertificate` | supported (rustls; TLS 1.2 / 1.3). `Encrypt=strict` is implemented but not verifiable against the local SQL Server 2022 container |
 | `ConnectRetryCount`, `ConnectRetryInterval`, `MultiSubnetFailover`, `ApplicationIntent`, `PacketSize` | supported |
-| `Connect Timeout` / `Connection Timeout` / `Login Timeout` | login timeout in seconds (`connect(timeout=)` wins); an expired login raises `OperationalError` HYT00 "Login timeout expired" |
+| login timeout | set with `connect(timeout=<seconds>)` (as upstream `mssql_python.connect`); an expired login raises `OperationalError` HYT00 "Login timeout expired" |
 | `DnsCacheTTL=<seconds>` | arrowsql extension: seconds a successfully resolved host name is reused without asking the resolver (default 300; `0` disables the cache and its retries entirely; env `ARROWSQL_DNS_CACHE_TTL` sets the default). See [DNS cache](#dns-cache) |
 | `Trusted_Connection=yes` / `Integrated Security=sspi` | Kerberos via GSSAPI (library loaded at runtime) on Unix, SSPI on Windows; not tested here |
 | `Authentication=ActiveDirectoryDefault`, `ActiveDirectoryInteractive`, `ActiveDirectoryDeviceCode`, `ActiveDirectoryMSI`, `ActiveDirectoryServicePrincipal` | acquired in Python with `azure-identity` (the `[azure]` extra) and passed as an access token; not tested against Entra ID here |
