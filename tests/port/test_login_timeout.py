@@ -51,6 +51,24 @@ def test_login_timeout_keywords_are_accepted(keyword):
     assert _ConnectionStringParser._normalize_params(params) == {"Server": "localhost", "Connect Timeout": "7"}
 
 
+def test_other_connection_behaviour_keywords_keep_upstream_names():
+    # The part of upstream's test_normalize_key_connection_params that does not
+    # concern the timeout keywords (that test is excluded as a GAP).
+    expected = {
+        "connectretrycount": "ConnectRetryCount",
+        "connectretryinterval": "ConnectRetryInterval",
+        "multisubnetfailover": "MultiSubnetFailover",
+        "applicationintent": "ApplicationIntent",
+        "keepalive": "KeepAlive",
+        "keepaliveinterval": "KeepAliveInterval",
+        "ipaddresspreference": "IpAddressPreference",
+    }
+    for key, canonical in expected.items():
+        assert _ConnectionStringParser.normalize_key(key) == canonical
+    # A bare "Timeout" stays rejected, as upstream has it.
+    assert _ConnectionStringParser.normalize_key("timeout") is None
+
+
 @pytest.mark.parametrize("keyword", ["Connect Timeout", "Login Timeout"])
 def test_expired_login_timeout_is_reported_as_login_timeout(silent_server, keyword):
     conn_str = (
