@@ -8,11 +8,13 @@ Version numbers in this project are deliberately three different things:
 
 | what | value | meaning |
 |---|---|---|
-| distribution `arrowsql` | 0.3.0 | this project's release number (`pyproject.toml`) |
+| distribution `arrowsql` | 0.3.1 | this project's release number (`pyproject.toml`) |
 | `arrowsql.__version__` | 1.16.0 | the upstream `mssql-python` release the Python layer is vendored from; kept so code that checks the upstream version keeps working |
 | `arrowsql.ddbc_bindings.__version__` | 1.0.0 | version of the Rust binding contract (`docs/CONTRACT.md`) |
 
 ## [Unreleased]
+
+## [0.3.1] - 2026-11-07
 
 ### Fixed
 
