@@ -1,6 +1,6 @@
 [package]
 name = "arrowsql-rowcount"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "MIT"
 description = "Example: arrowsql-core used from plain Rust (counts the rows of a query)"
