@@ -121,3 +121,40 @@ def test_host_name_in_certificate_is_validated(conn_str):
 def test_encrypt_off_connects_without_encryption(conn_str, encrypt):
     result = _connect(conn_str, Encrypt=encrypt, TrustServerCertificate=None)
     assert result == {"ok": True, "encrypted": False}
+
+
+SEQUENTIAL_LOGINS = """
+import json, sys, time
+import mssql_python
+mssql_python.pooling(enabled=False)
+times = []
+for _ in range(int(sys.argv[2])):
+    started = time.monotonic()
+    try:
+        conn = mssql_python.connect(sys.argv[1], timeout=15)
+        conn.cursor().execute("SELECT 1").fetchone()
+        conn.close()
+        times.append(round(time.monotonic() - started, 3))
+    except mssql_python.Error as exc:
+        times.append({"error": type(exc).__name__, "message": str(exc),
+                      "after": round(time.monotonic() - started, 3)})
+print(json.dumps(times))
+"""
+
+
+def test_sequential_encrypted_logins_in_one_process_all_succeed(conn_str):
+    # Regression guard for VENDOR.md patch 16: with TLS session resumption, the
+    # 2nd, 4th, ... login of a process to a production SQL Server resumed the
+    # previous login's session and hung until the login timeout. The local
+    # server completes resumed handshakes, so this guards the alternation
+    # (every login must be fast) rather than reproducing the stall; the
+    # disabled resumption itself is asserted in arrowsql-core's unit tests.
+    params = _ConnectionStringParser._normalize_params(_ConnectionStringParser()._parse(conn_str))
+    params.update({"Encrypt": "yes", "TrustServerCertificate": "yes"})
+    out = subprocess.run(
+        [sys.executable, "-c", SEQUENTIAL_LOGINS, _ConnectionStringBuilder(params).build(), "12"],
+        capture_output=True, text=True, timeout=240, check=False,
+    )
+    times = json.loads(out.stdout.strip().splitlines()[-1])
+    assert len(times) == 12
+    assert all(isinstance(t, float) and t < 5.0 for t in times), times

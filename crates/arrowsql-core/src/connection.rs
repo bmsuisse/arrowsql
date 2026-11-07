@@ -244,3 +244,13 @@ pub fn close_session(shared: &ConnShared) {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    /// Every second login to a server hung when the cached rustls config
+    /// resumed the previous login's TLS session (VENDOR.md patch 16).
+    #[test]
+    fn rustls_configs_do_not_resume_tls_sessions() {
+        assert!(!mssql_tds::connection::rustls_session_resumption_enabled().unwrap());
+    }
+}

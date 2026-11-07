@@ -145,10 +145,12 @@ pub fn records_for_error(err: &TdsError, default_state: &str) -> Vec<DiagRecord>
 
 /// Records for a failure while logging in. Server errors raised by the login
 /// carry SQLSTATE 28000 whatever their number (msodbcsql reports a database
-/// that cannot be opened as "Invalid authorization specification"); other
-/// failures keep the connect default `08001`.
+/// that cannot be opened as "Invalid authorization specification"); an
+/// expired login timeout is `HYT00` "Login timeout expired", as msodbcsql
+/// reports it; other failures keep the connect default `08001`.
 pub fn login_records_for_error(err: &TdsError) -> Vec<DiagRecord> {
     match err {
+        TdsError::TimeoutError(_) => vec![DiagRecord::driver("HYT00", "Login timeout expired")],
         TdsError::SqlServerError { diagnostics } if !diagnostics.errors.is_empty() => {
             let mut out: Vec<DiagRecord> = diagnostics
                 .errors
@@ -168,4 +170,21 @@ pub fn login_records_for_error(err: &TdsError) -> Vec<DiagRecord> {
 /// Python-visible formatting used by GetAllDiagRecords: `"[STATE] (native)"`.
 pub fn state_label(record: &DiagRecord) -> String {
     format!("[{}] ({})", record.sqlstate, record.native_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mssql_tds::error::TimeoutErrorType;
+
+    #[test]
+    fn login_timeout_is_reported_as_login_timeout() {
+        let err = TdsError::TimeoutError(TimeoutErrorType::String("connect timed out".into()));
+        let records = login_records_for_error(&err);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].sqlstate, "HYT00");
+        assert_eq!(records[0].message, format!("{DRIVER_PREFIX}Login timeout expired"));
+        // A statement timeout keeps the query wording.
+        assert!(records_for_error(&err, "HY000")[0].message.ends_with("Query timeout expired"));
+    }
 }

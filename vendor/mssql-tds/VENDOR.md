@@ -146,6 +146,23 @@ Local patches (search for `VENDOR PATCH`):
     (`src/dns_ttl_cache_tests.rs`, which compiles the file), since the vendored crate's own
     tests do not build; `tests/port/test_dns_cache.py` covers it end to end.
 
+16. No TLS session resumption in the rustls engine (marked `RUST-PORT`):
+    `src/connection/transport/tls/rustls_engine.rs` `build_config` sets
+    `config.resumption = Resumption::disabled()`. The `ClientConfig` is cached per process
+    (`CONFIG_CACHE`), so with rustls' default in-memory session cache the second login to a
+    server name resumed the first login's session (TLS 1.3 ticket / TLS 1.2 session id).
+    Against a production SQL Server that abbreviated handshake never completed: in each
+    process every second login hung until the login timeout (15 s default, the full 60 s
+    with `Connect Timeout=60`), on a Databricks driver and its executors alike, OK / FAIL /
+    OK / FAIL per server name (alternating IP and host name gave OK, OK, FAIL, FAIL); the
+    failed attempt dropped the cached session, so the next login did a full handshake
+    again. A new process per login, raw TCP and the JDBC driver were fine; with resumption
+    disabled 6 of 6 logins succeeded in 0.13 s each. msodbcsql does a full handshake for
+    every login too. `connection.rs` exports `rustls_session_resumption_enabled` for
+    arrowsql-core's unit test; `tests/port/test_tls.py` runs 12 encrypted logins in one
+    process (the local SQL Server completes resumed handshakes, so it guards the
+    alternation without reproducing the stall).
+
 `ddbc_bindings` and `crates/arrowsql-core` depend on this directory by path
 (no `[patch]`), so a crate that depends on arrowsql-core by git builds the
 patched copy too. To drop the vendored copy once the fixes are upstream,

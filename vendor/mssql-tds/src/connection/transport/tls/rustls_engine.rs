@@ -199,7 +199,32 @@ fn build_config(validation: &TlsValidationConfig) -> TdsResult<Arc<ClientConfig>
     if validation.use_alpn {
         config.alpn_protocols = vec![TDS_8_ALPN_PROTOCOL.as_bytes().to_vec()];
     }
+    // RUST-PORT (VENDOR.md patch 16): no TLS session resumption. The config is
+    // cached per process, so with rustls' default in-memory session cache every
+    // second login to a server resumed the previous login's session; against a
+    // production SQL Server that abbreviated handshake never completed and the
+    // login hung until its timeout (OK, FAIL, OK, FAIL per server name).
+    // msodbcsql does a full handshake for every login, too.
+    config.resumption = rustls::client::Resumption::disabled();
     Ok(Arc::new(config))
+}
+
+/// RUST-PORT test hook: whether any `ClientConfig` this engine builds would
+/// resume TLS sessions. `Resumption` has no accessors, so this reads its
+/// `Debug` form (`NoClientSessionStorage` store, TLS 1.2 resumption `Disabled`).
+pub(crate) fn session_resumption_enabled() -> TdsResult<bool> {
+    for bits in 0u8..8 {
+        let validation = TlsValidationConfig {
+            accept_invalid_certs: bits & 1 != 0,
+            accept_invalid_hostnames: bits & 2 != 0,
+            use_alpn: bits & 4 != 0,
+        };
+        let resumption = format!("{:?}", build_config(&validation)?.resumption);
+        if !resumption.contains("NoClientSessionStorage") || !resumption.contains("Disabled") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn get_or_build_config(validation: &TlsValidationConfig) -> TdsResult<Arc<ClientConfig>> {
