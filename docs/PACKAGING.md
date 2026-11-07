@@ -53,7 +53,7 @@ The sdist needs `vendor/mssql-tds` (a path dependency of both crates outside
 the package root, which maturin does not collect on its own), so `[tool.maturin] include` adds it. `cargo metadata
 --locked` succeeds on an unpacked sdist.
 
-Versions: distribution 0.1.0 (`pyproject.toml`), `mssql_python.__version__` 1.16.0
+Versions: distribution 0.3.0 (`pyproject.toml`), `mssql_python.__version__` 1.16.0
 (the vendored upstream release), `ddbc_bindings.__version__` 1.0.0 (binding
 contract). See `CHANGELOG.md`.
 

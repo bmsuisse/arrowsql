@@ -20,6 +20,8 @@
 - **2-7x faster than mssql-python**, up to 10x faster than pyodbc on large reads.
 - **Arrow out of the box:** results go straight to DuckDB, polars, pyarrow and Delta, no pyarrow required.
 - **Parallel reads and bulk loads** over several connections.
+- **Rust core crate:** `crates/arrowsql-core` (no pyo3) exposes connect, execute and the parallel Arrow read to other Rust programs.
+- **DNS cache:** resolved hosts are reused and served stale while refreshing (`DnsCacheTTL=<seconds>`, default 300, `0` disables).
 - **No ODBC driver:** native TDS in Rust, zero required dependencies, wheels for Linux, macOS and Windows.
 - **Drop-in:** same DB-API, same connection strings; `import mssql_python` keeps working.
 
