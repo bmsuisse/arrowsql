@@ -1,6 +1,6 @@
 [package]
 name = "arrowsql-core"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 description = "SQL Server over TDS into Arrow record batches: the Python-free core of arrowsql"
